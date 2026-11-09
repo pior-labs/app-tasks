@@ -122,6 +122,12 @@ Rollout checklist, with human review and merge for each repository:
 Current local evidence: migration applied to `tasks_dev`; typecheck, production
 build and eight disposable-database auth tests passed. Frontend and proxied health
 returned 200, unauthenticated `/api/me` returned 401. Hosted discovery returned
-200. Hosted SSO is pending dedicated client registration/activation. Docker is
+200. Browser smoke checks passed for the signed-out page and signed-in landing
+with a synthetic `/api/me` response; mobile layout had no horizontal overflow.
+The real browser sign-in reached hosted Auth and returned `invalid_client`
+(`client_id is required`) despite the generated authorization URL including
+`client_id=tasks`. This does not prove the underlying provider cause; activate
+and verify the dedicated registration with its matching private secret before
+retesting. Hosted SSO is pending that activation and a successful real login. Docker is
 unavailable on this machine, so image builds and full Caddy/Compose validation
 remain pending. No production deployment or hosted reseed was performed.
