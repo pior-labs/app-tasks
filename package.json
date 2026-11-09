@@ -1,15 +1,17 @@
 {
-  "name": "pior-labs-webapp-template",
+  "name": "pior-labs-tasks",
   "version": "0.1.0",
   "private": true,
   "packageManager": "pnpm@10.8.1",
   "scripts": {
-    "dev": "pnpm --parallel --filter @webapp/api --filter @webapp/web dev",
-    "dev:api": "pnpm --filter @webapp/api dev",
-    "dev:web": "pnpm --filter @webapp/web dev",
+    "dev": "pnpm --parallel --filter @tasks/api --filter @tasks/web dev",
+    "dev:api": "pnpm --filter @tasks/api dev",
+    "dev:web": "pnpm --filter @tasks/web dev",
     "build": "pnpm --recursive build",
     "typecheck": "pnpm --recursive typecheck",
-    "db:generate": "pnpm --filter @webapp/api db:generate",
-    "db:migrate": "pnpm --filter @webapp/api db:migrate"
+    "db:generate": "pnpm --filter @tasks/api db:generate",
+    "db:migrate": "pnpm --filter @tasks/api db:migrate",
+    "test": "pnpm --filter @tasks/api test",
+    "verify": "pnpm typecheck && pnpm test && pnpm build"
   }
 }

@@ -9,3 +9,7 @@ dist/
 coverage/
 data/
 .vite/
+
+.agents/
+.claude/
+*.tsbuildinfo

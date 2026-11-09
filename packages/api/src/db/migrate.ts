@@ -1,4 +1,5 @@
-import 'dotenv/config';
+import { loadEnvironment } from '../load-env.js';
+loadEnvironment();
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { drizzle } from 'drizzle-orm/postgres-js';
