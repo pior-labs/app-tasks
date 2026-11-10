@@ -7,3 +7,16 @@ node_modules
 **/node_modules
 **/dist
 **/*.log
+
+.github
+**/*.tsbuildinfo
+**/.env
+**/.env.*
+.data
+data
+coverage
+**/test-results
+**/playwright-report
+.ds-sync
+ds-bundle
+.design-sync
