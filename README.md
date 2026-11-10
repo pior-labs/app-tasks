@@ -36,6 +36,17 @@ The local client secret must match Auth's private `TASKS_CLIENT_SECRET`;
 `BETTER_AUTH_SECRET` is a separate generated session secret. Setting a secret
 locally does not register it with Auth. No credentials belong in `VITE_*`.
 
+For an authenticated GitHub CLI, enable package read access once and expose the
+credential only to the current shell (do not enable shell tracing):
+
+```sh
+gh auth refresh --hostname github.com --scopes read:packages
+export GITHUB_TOKEN="$(gh auth token)"
+```
+
+A repository-capable login alone may lack `read:packages`. The new repository's
+CI has successfully installed the published design system with its Actions token.
+
 ## Authentication
 
 The `auth-pior` OAuth client uses discovery, PKCE, issuer validation, and
@@ -128,6 +139,8 @@ The real browser sign-in reached hosted Auth and returned `invalid_client`
 (`client_id is required`) despite the generated authorization URL including
 `client_id=tasks`. This does not prove the underlying provider cause; activate
 and verify the dedicated registration with its matching private secret before
-retesting. Hosted SSO is pending that activation and a successful real login. Docker is
-unavailable on this machine, so image builds and full Caddy/Compose validation
-remain pending. No production deployment or hosted reseed was performed.
+retesting. Hosted SSO is pending that activation and a successful real login. Both API and web Docker images build successfully, including private package
+installation through a BuildKit secret. A clean checkout and empty package store
+also installed locked dependencies successfully using the refreshed CLI login.
+Application CI passed. Full platform Compose/Caddy validation passed in the
+companion infrastructure PR. No production deployment or hosted reseed was performed.
