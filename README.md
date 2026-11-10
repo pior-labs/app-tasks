@@ -142,5 +142,7 @@ and verify the dedicated registration with its matching private secret before
 retesting. Hosted SSO is pending that activation and a successful real login. Both API and web Docker images build successfully, including private package
 installation through a BuildKit secret. A clean checkout and empty package store
 also installed locked dependencies successfully using the refreshed CLI login.
-Application CI passed. Full platform Compose/Caddy validation passed in the
+Container runtime probes returned API health 200, unauthenticated `/api/me` 401,
+and static frontend 200 using the production HTTPS auth URL. Application CI
+passed. Full platform Compose/Caddy validation passed in the
 companion infrastructure PR. No production deployment or hosted reseed was performed.
