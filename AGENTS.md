@@ -1,0 +1,90 @@
+# Pior Labs Application Agent Instructions
+
+This repository is intended to become a Pior Labs user-facing application.
+
+## Shared PiorLabs context
+
+Before changing architecture, shared integrations, or deployment, consult the
+[PiorLabs workspace documentation](https://github.com/pior-labs/workspace/tree/main/docs).
+In the shared workspace, these documents are available under `../docs/`.
+
+Start with `architecture.md` and `conventions.md`; consult `service-catalog.md`,
+`infrastructure.md`, and `decisions/` as relevant. Preserve this reference when
+creating an application from the template. Follow this repository's local
+instructions, update documentation in the repository that owns the contract,
+and flag conflicts between documentation and implementation.
+
+## Before making architectural changes
+
+Read the current public platform documentation in `pior-labs/platform` and, when starting a new application, use `platform/prompts/new-webapp-bootstrap.md` as bootstrap context.
+
+When implementation details conflict with this template, current platform/service documentation wins.
+
+## Default architecture
+
+Prefer the established Pior Labs paved road:
+
+- TypeScript
+- React + Vite
+- Hono
+- PostgreSQL + Drizzle
+- pnpm
+- Docker Compose
+- GitHub Actions
+- `@pior-labs/design-system`
+- `service-auth` for OAuth/OIDC
+- platform Caddy for production routing and TLS
+- a minimal Caddy runtime inside the web container for static SPA serving only
+
+`platform-deploy` owns production reverse-proxy behavior. The app web container must not proxy `/api/*`; platform Caddy routes API traffic directly to the app API container and all other traffic to the app web container.
+
+Choose one canonical `<app>.szarans.ca` hostname. The platform's Cloudflare and Tailscale wildcard DNS rules cover it automatically, so do not add per-application CNAME records, dnsmasq host records, or restricted nameservers. Caddy routing remains explicit. Add a Docker DNS alias only when canonical service-to-service HTTPS requires one.
+
+Do not add a second authentication system, app-level reverse proxy, database server, or shared design system without a concrete requirement.
+
+## Local authentication convention
+
+- Run one user-facing application at a time on `http://localhost:5173`.
+- Use the hosted issuer `https://auth.szarans.ca/api/auth`; normal application
+  development does not require a local `service-auth`.
+- Register the exact callback
+  `http://localhost:5173/api/auth/oauth2/callback/auth-pior`.
+- Give every application a unique Better Auth `cookiePrefix`. Localhost cookies
+  are not isolated by port and persist when switching applications.
+- Keep the OAuth client secret and application session secret server-only.
+
+## Repository ownership
+
+This repository owns:
+
+- product code
+- app-specific database schema and migrations
+- app-specific containers
+- the static web-server configuration used only to serve the compiled SPA
+- CI and app deployment workflow
+- application documentation
+
+`platform-deploy` owns production infrastructure, Caddy reverse-proxy routing, shared Docker networks, database/role provisioning, and server-managed database credentials.
+
+`service-auth` owns user authentication and trusted OAuth client registration.
+
+## Security
+
+- Never commit secrets.
+- Prefer `DATABASE_URL_FILE` in production so database passwords remain server-managed.
+- Never expose OAuth client secrets through `VITE_*` variables.
+- Keep public ports closed unless there is a documented reason to publish them.
+- Use health checks for long-running services.
+
+## Template cleanup
+
+When this template becomes a real app:
+
+1. replace generic names and descriptions;
+2. define the real domain schema;
+3. generate and commit the first Drizzle migration;
+4. choose an app-specific cookie prefix and register the OAuth client with the
+   canonical and shared `localhost:5173` callbacks;
+5. provision the database and Caddy routes in `platform-deploy`; wildcard DNS requires no per-app record;
+6. configure deployment variables/secrets;
+7. update this file only where the application genuinely deviates from platform conventions.
