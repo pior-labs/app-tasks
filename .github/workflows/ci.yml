@@ -12,6 +12,16 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: tasks_test
+          POSTGRES_PASSWORD: fixture-only
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -U tasks_test" --health-interval 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://tasks_test:fixture-only@127.0.0.1:5432/postgres
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -22,8 +32,10 @@ jobs:
       - name: Install dependencies
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
       - name: Typecheck
         run: pnpm typecheck
+      - name: Auth regression tests
+        run: pnpm test
       - name: Build
         run: pnpm build

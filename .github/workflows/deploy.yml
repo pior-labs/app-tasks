@@ -12,26 +12,42 @@ permissions:
 
 jobs:
   deploy:
-    runs-on: [self-hosted, linux, prod]
+    environment: PRODUCTION
+    runs-on: [self-hosted, linux, app-tasks]
     env:
       DEPLOY_DIR: ${{ vars.DEPLOY_DIR }}
       APP_ENV: ${{ secrets.APP_ENV }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    concurrency:
+      group: tasks-production
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
+      - name: Require main
+        run: test "$GITHUB_REF" = refs/heads/main
+
       - name: Validate deployment configuration
         run: |
-          test -n "$DEPLOY_DIR" || { echo "Set the DEPLOY_DIR repository variable"; exit 1; }
+          case "$DEPLOY_DIR" in
+            /*) ;;
+            *) echo "Set DEPLOY_DIR to an absolute dedicated app directory"; exit 1 ;;
+          esac
+          case "$DEPLOY_DIR" in
+            /|/opt|/opt/|/opt/docker|/opt/docker/|/home|/home/|/srv|/srv/) echo "DEPLOY_DIR must be dedicated to Tasks"; exit 1 ;;
+          esac
           test -n "$APP_ENV" || { echo "Set the APP_ENV repository secret"; exit 1; }
 
       - name: Sync application source
         run: |
           mkdir -p "$DEPLOY_DIR"
-          rsync -a --delete --exclude .git ./ "$DEPLOY_DIR"/
+          rsync -a --delete --exclude .git --exclude .env --exclude node_modules ./ "$DEPLOY_DIR"/
 
       - name: Write application environment
-        run: printf '%s\n' "$APP_ENV" > "$DEPLOY_DIR/.env"
+        run: |
+          umask 077
+          printf '%s\n' "$APP_ENV" > "$DEPLOY_DIR/.env"
+          chmod 600 "$DEPLOY_DIR/.env"
 
       - name: Build images
         run: cd "$DEPLOY_DIR" && docker compose -f docker-compose.yml -f docker-compose.production.yml build
@@ -44,3 +60,8 @@ jobs:
 
       - name: Show service health
         run: cd "$DEPLOY_DIR" && docker compose -f docker-compose.yml -f docker-compose.production.yml ps
+
+      - name: Verify health through platform ingress
+        run: |
+          curl --fail --retry 10 --retry-delay 3 https://tasks.szarans.ca/api/health
+          curl --fail --retry 10 --retry-delay 3 https://tasks.szarans.ca/
