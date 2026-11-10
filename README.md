@@ -6,9 +6,9 @@ provides sign-in/sign-out. Task features are deferred.
 React 19/Vite, Hono, PostgreSQL/Drizzle, pnpm 10.8.1, published
 `@pior-labs/design-system`, and Better Auth 1.6.20 application sessions.
 The starting source is `pior-labs/template-webapp` revision
-`9b719955088ab31dd294ad84f7a9f1a0ac5a5e72`. Repository generation through GitHub
-is still pending; the local preparation checkout currently retains template
-history. Transfer the setup commit onto the generated baseline before its PR.
+`9b719955088ab31dd294ad84f7a9f1a0ac5a5e72`. The private GitHub repository was
+generated using GitHub template generation; foundation changes are separate
+commits on its generated baseline.
 
 ## Local development
 
@@ -108,8 +108,8 @@ The web container serves static files only. Wildcard DNS needs no new record.
 
 Rollout checklist, with human review and merge for each repository:
 
-1. Create the private GitHub template repository, transfer the setup commit, and
-   configure package access, runner, `DEPLOY_DIR`, and private app/Auth secrets.
+1. Configure package access for this generated repository, its runner,
+   `DEPLOY_DIR`, and private app/Auth secrets.
 2. Merge the Auth registration; run **Bootstrap Auth Production** with existing
    seed-user configuration, then **Deploy Auth Production** to reload clients.
 3. Merge/deploy platform changes to provision database `tasks`, role `tasks_app`,
