@@ -130,19 +130,29 @@ Rollout checklist, with human review and merge for each repository:
 5. Verify browser SSO, current user, local session, sign-out and expiry; then
    verify production routing and persistence. Review backup coverage before data.
 
-Current local evidence: migration applied to `tasks_dev`; typecheck, production
-build and eight disposable-database auth tests passed. Frontend and proxied health
-returned 200, unauthenticated `/api/me` returned 401. Hosted discovery returned
-200. Browser smoke checks passed for the signed-out page and signed-in landing
-with a synthetic `/api/me` response; mobile layout had no horizontal overflow.
-The real browser sign-in reached hosted Auth and returned `invalid_client`
-(`client_id is required`) despite the generated authorization URL including
-`client_id=tasks`. This does not prove the underlying provider cause; activate
-and verify the dedicated registration with its matching private secret before
-retesting. Hosted SSO is pending that activation and a successful real login. Both API and web Docker images build successfully, including private package
-installation through a BuildKit secret. A clean checkout and empty package store
-also installed locked dependencies successfully using the refreshed CLI login.
-Container runtime probes returned API health 200, unauthenticated `/api/me` 401,
-and static frontend 200 using the production HTTPS auth URL. Application CI
-passed. Full platform Compose/Caddy validation passed in the
-companion infrastructure PR. No production deployment or hosted reseed was performed.
+Current verification evidence: migration applied to `tasks_dev`; typecheck,
+production build and eight disposable-database auth tests passed. Frontend and
+proxied health returned 200, unauthenticated `/api/me` returned 401. Browser
+smoke checks covered signed-out UI and synthetic signed-in UI, with no mobile
+horizontal overflow. A clean checkout/empty package store installed locked
+dependencies with the refreshed CLI login. Both Docker images built, including
+private package access through a BuildKit secret; API health, protected-boundary
+and static-web container probes passed. Application CI and platform validation
+CI passed.
+
+Hosted Auth registration is activated at revision
+`bd5e4748b762953e2c2fcaa1e8e8602377d3c539`:
+
+- [Bootstrap, successful attempt 2](https://github.com/pior-labs/service-auth/actions/runs/42739434727)
+- [Deploy, successful](https://github.com/pior-labs/service-auth/actions/runs/42741226539)
+
+The initial Bootstrap build failed on runner build-network DNS before migrations
+or seeding. After the operator configured a reachable LAN resolver for Docker,
+the uncached build DNS probe and Bootstrap retry succeeded. The host repair is
+documented in platform-deploy's runner operations guide. The initial client
+error predates activation; the real browser now reaches hosted sign-in without
+that error, and the user confirmed a successful callback to Tasks showing their
+current user. The central account link is persisted in the local database.
+The user also confirmed real app sign-out and successful sign-in afterward.
+Expiry and revocation have passing regression coverage; a week-long live expiry
+was not observed. Tasks itself has not been deployed in production.
