@@ -107,7 +107,9 @@ release directories.
 `previous.json` preserves the preceding healthy release; `attempt.json` records
 the latest operation, including failure. Failed attempts preserve successful
 records but may have changed the database or running containers. Inspect the
-attempt's `runtime_dir` for diagnosis. There is no recorded predecessor for the
+attempt's `runtime_dir` for diagnosis. Compose configuration failures save
+`compose-config.stderr` there with private permissions; inspect it on the host
+and do not paste its contents publicly because parser errors can contain secrets. There is no recorded predecessor for the
 first deployment migrated from source builds.
 
 To roll application images back, dispatch Deploy with the previous record's

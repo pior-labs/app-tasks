@@ -109,7 +109,21 @@ def deploy():
                 '--env-file', str(runtime / '.env')]
         for name in config['compose_files'] + ['images.json']:
             base.extend(['-f', str(runtime / name)])
-        rendered = json.loads(command(*base, 'config', '--format', 'json', capture_output=True).stdout)
+        # Actions exports unset optional variables as empty strings. Compose
+        # gives the process environment precedence over --env-file, so remove
+        # these raw inputs after writing their normalized values to .env.
+        compose_environment = {key: value for key, value in os.environ.items()
+                               if key not in PRODUCTION_DEFAULTS}
+        try:
+            result = command(*base, 'config', '--format', 'json', capture_output=True,
+                             env=compose_environment)
+        except subprocess.CalledProcessError as error:
+            # Parser diagnostics can contain interpolated credentials. Retain
+            # them privately for host diagnosis rather than printing to Actions.
+            diagnostics = runtime / 'compose-config.stderr'
+            diagnostics.write_text(error.stderr or 'Compose returned no diagnostics.\n')
+            raise RuntimeError(f'Compose configuration failed; private diagnostics: {diagnostics}') from None
+        rendered = json.loads(result.stdout)
         if set(rendered['services']) != set(release['images']):
             raise ValueError('Every runtime service must have a verified image')
         for service, image in release['images'].items():
