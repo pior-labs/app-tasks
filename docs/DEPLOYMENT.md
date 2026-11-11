@@ -18,14 +18,50 @@ configuration alone does not provision a runner or establish a live deployment.
   `com.docker.compose.project` label before migrating; a different name can
   create a second project or collide with named containers. For a new app,
   choose its unique project name before initial deployment.
-- Keep the existing `APP_ENV` Actions secret for the remaining runtime settings.
-  Legacy project-name declarations are replaced in the staged `.env` with the
-  separate secret. Further environment splitting can happen independently.
+- Configure the individual settings below. `APP_ENV` is no longer read.
 - Confirm this repository can create/read its GHCR packages. Existing packages
   need Actions access for this repository. Keep visibility private unless a
   public release is deliberately agreed.
 - Provision shared database credentials, networks, OAuth client and Caddy routes
   before deployment. The application cannot establish those dependencies itself.
+
+## Individual production settings
+
+Set these Actions secrets at repository scope or in the `PRODUCTION` environment:
+
+| Secret | Value |
+| --- | --- |
+| `COMPOSE_PROJECT_NAME` | `tasks` for the first deployment; preserve the existing identity afterward |
+| `CENTRAL_AUTH_CLIENT_SECRET` | The same private value registered as Auth's `TASKS_CLIENT_SECRET` |
+| `BETTER_AUTH_SECRET` | A separate, stable application session secret, at least 32 characters |
+
+Set the Actions variable `DEPLOY_DIR` to `/opt/docker/app-tasks`. It is required.
+The following Actions variables are optional overrides of versioned production
+defaults. Leave them unset to use the values shown:
+
+| Variable | Default |
+| --- | --- |
+| `APP_SLUG` | `tasks` |
+| `PUBLIC_BASE_URL` | `https://tasks.szarans.ca` |
+| `BETTER_AUTH_URL` | `https://tasks.szarans.ca` |
+| `BETTER_AUTH_TRUSTED_ORIGINS` | `https://tasks.szarans.ca` |
+| `CENTRAL_AUTH_ISSUER` | `https://auth.szarans.ca/api/auth` |
+| `CENTRAL_AUTH_CLIENT_ID` | `tasks` |
+| `PLATFORM_DATABASE_URL_FILE` | `/opt/docker/pior-labs/secrets/app-tasks/database-url` |
+
+Only this explicit allowlist is written to the private runtime `.env`. Missing,
+placeholder or short session secrets fail before staging or Docker operations.
+Values must be single-line; quotes, backslashes and dollar signs are encoded
+for Compose rather than pasted as dotenv syntax. Existing `APP_ENV` secrets can
+be removed once these individual settings are configured. Local `.env` and
+`.env.local` development configuration still follow `.env.example`.
+
+The database connection stays in the platform-managed file on the host, mounted
+read-only into the API. Do not add `DATABASE_URL` or a database password to
+Actions. Changing an origin, issuer, client ID, slug or database-file path also
+requires the corresponding Auth/platform configuration; the workflow does not
+provision those dependencies. Ingress health probes remain tied to the canonical
+Tasks hostname in `scripts/deployment.json`.
 
 ## Release and deployment
 

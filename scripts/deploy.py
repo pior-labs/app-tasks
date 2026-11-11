@@ -22,20 +22,50 @@ def write_json(path, value):
     temporary.replace(path)
 
 
+# Production defaults are versioned with deployment tooling; Actions variables
+# can override these without putting public configuration in a secret blob.
+PRODUCTION_DEFAULTS = {
+    'APP_SLUG': 'tasks',
+    'PUBLIC_BASE_URL': 'https://tasks.szarans.ca',
+    'BETTER_AUTH_URL': 'https://tasks.szarans.ca',
+    'BETTER_AUTH_TRUSTED_ORIGINS': 'https://tasks.szarans.ca',
+    'CENTRAL_AUTH_ISSUER': 'https://auth.szarans.ca/api/auth',
+    'CENTRAL_AUTH_CLIENT_ID': 'tasks',
+    'PLATFORM_DATABASE_URL_FILE': '/opt/docker/pior-labs/secrets/app-tasks/database-url',
+}
+
+
+def production_environment(project):
+    values = {key: os.environ.get(key, '').strip() or default
+              for key, default in PRODUCTION_DEFAULTS.items()}
+    for key in ('CENTRAL_AUTH_CLIENT_SECRET', 'BETTER_AUTH_SECRET'):
+        value = os.environ.get(key, '').strip()
+        if not value or value.startswith('replace-with-'):
+            raise ValueError(f'Set the {key} Actions secret')
+        values[key] = value
+    if len(values['BETTER_AUTH_SECRET']) < 32:
+        raise ValueError('BETTER_AUTH_SECRET must contain at least 32 characters')
+    values['COMPOSE_PROJECT_NAME'] = project
+    # These application settings are single-line strings. Reject dotenv injection
+    # before creating files; errors name the setting and never include its value.
+    for key, value in values.items():
+        if any(character in value for character in ('\r', '\n', '\0')):
+            raise ValueError(f'{key} must be a single-line value without NUL')
+    # Compose double-quoted dotenv values understand JSON string escapes. Escape
+    # dollars as well so credentials are never treated as variable expressions.
+    return ''.join(f'{key}={json.dumps(value, ensure_ascii=False).replace("$", "$$")}\n'
+                   for key, value in values.items())
+
+
 def deploy():
     os.umask(0o077)
     root = Path(os.environ['DEPLOY_DIR'])
     if not root.is_absolute() or len(root.parts) < 4 or root.resolve() != root:
         raise ValueError('DEPLOY_DIR must be an absolute dedicated app directory without symlinks')
-    app_env = os.environ.get('APP_ENV', '')
-    if not app_env.strip():
-        raise ValueError('APP_ENV is required')
     project = os.environ.get('COMPOSE_PROJECT_NAME', '').strip()
     if not re.fullmatch(r'[a-z0-9][a-z0-9_-]*', project):
         raise ValueError('Set COMPOSE_PROJECT_NAME to the existing production project identity')
-    app_env = '\n'.join(line for line in app_env.splitlines()
-                        if not re.match(r'^[ \t]*(?:export[ \t]+)?COMPOSE_PROJECT_NAME[ \t]*=', line))
-    app_env += f'\nCOMPOSE_PROJECT_NAME={project}\n'
+    app_env = production_environment(project)
     release = json.loads(Path('release.json').read_text())
     validate_release(release, os.environ['GITHUB_REPOSITORY'], os.environ['EXPECTED_RUN_ID'],
                      os.environ['EXPECTED_ATTEMPT'], os.environ['EXPECTED_SHA'])
@@ -104,6 +134,7 @@ def deploy():
         # deliberately retained in the resolved configuration.
         for name in config.get('build_secrets', ['github_token']):
             rendered.get('secrets', {}).pop(name, None)
+        # Compose config already escapes literal dollars for safe re-reading.
         write_json(runtime / 'compose.json', rendered)
         compose = ['docker', 'compose', '--project-directory', str(runtime), '--project-name', project,
                    '-f', str(runtime / 'compose.json')]

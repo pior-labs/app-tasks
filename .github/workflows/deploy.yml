@@ -55,8 +55,16 @@ jobs:
     timeout-minutes: 20
     env:
       DEPLOY_DIR: ${{ vars.DEPLOY_DIR }}
-      APP_ENV: ${{ secrets.APP_ENV }}
       COMPOSE_PROJECT_NAME: ${{ secrets.COMPOSE_PROJECT_NAME }}
+      APP_SLUG: ${{ vars.APP_SLUG }}
+      PUBLIC_BASE_URL: ${{ vars.PUBLIC_BASE_URL }}
+      BETTER_AUTH_URL: ${{ vars.BETTER_AUTH_URL }}
+      BETTER_AUTH_TRUSTED_ORIGINS: ${{ vars.BETTER_AUTH_TRUSTED_ORIGINS }}
+      CENTRAL_AUTH_ISSUER: ${{ vars.CENTRAL_AUTH_ISSUER }}
+      CENTRAL_AUTH_CLIENT_ID: ${{ vars.CENTRAL_AUTH_CLIENT_ID }}
+      PLATFORM_DATABASE_URL_FILE: ${{ vars.PLATFORM_DATABASE_URL_FILE }}
+      CENTRAL_AUTH_CLIENT_SECRET: ${{ secrets.CENTRAL_AUTH_CLIENT_SECRET }}
+      BETTER_AUTH_SECRET: ${{ secrets.BETTER_AUTH_SECRET }}
       EXPECTED_SHA: ${{ needs.resolve.outputs.sha }}
       EXPECTED_RUN_ID: ${{ needs.resolve.outputs.run_id }}
       EXPECTED_ATTEMPT: ${{ needs.resolve.outputs.attempt }}

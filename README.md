@@ -92,23 +92,19 @@ only its mounted platform connection file.
 Deployment is manual, restricted to `main`, using the `PRODUCTION` environment
 and repository-scoped runner labels `self-hosted`, `linux`, `app-tasks`.
 The runner needs Python 3, Docker Compose, curl, and write access to `DEPLOY_DIR`.
-Configure `DEPLOY_DIR` (an absolute dedicated directory), `APP_ENV`, GitHub
-Packages access for this repository, and the runner before dispatch.
+Configure the required Actions variable `DEPLOY_DIR=/opt/docker/app-tasks`,
+GitHub Packages access for this repository, and the runner before dispatch.
 
-Set the separate `COMPOSE_PROJECT_NAME` Actions secret to `tasks` for a new project.
-`APP_ENV` must contain the remaining production settings from `.env.example`, including:
+Set these separate Actions secrets:
 
-```dotenv
-APP_SLUG=tasks
-BETTER_AUTH_URL=https://tasks.szarans.ca
-BETTER_AUTH_TRUSTED_ORIGINS=https://tasks.szarans.ca
-PUBLIC_BASE_URL=https://tasks.szarans.ca
-CENTRAL_AUTH_ISSUER=https://auth.szarans.ca/api/auth
-CENTRAL_AUTH_CLIENT_ID=tasks
-CENTRAL_AUTH_CLIENT_SECRET=<same-private-value-as-Auth-TASKS_CLIENT_SECRET>
-BETTER_AUTH_SECRET=<separate-private-session-secret>
-PLATFORM_DATABASE_URL_FILE=/opt/docker/pior-labs/secrets/app-tasks/database-url
-```
+- `COMPOSE_PROJECT_NAME`: `tasks` for a new project.
+- `CENTRAL_AUTH_CLIENT_SECRET`: the same private value as Auth's `TASKS_CLIENT_SECRET`.
+- `BETTER_AUTH_SECRET`: a separate stable application session secret, at least 32 characters.
+
+`APP_ENV` is no longer used. Public runtime configuration has versioned production
+defaults and individual optional Actions variable overrides. See the complete
+[production settings table](docs/DEPLOYMENT.md#individual-production-settings).
+No additional variables are needed for the standard Tasks production setup.
 
 Do not place production database passwords in GitHub. Production Compose clears
 `DATABASE_URL`, mounts the platform-generated file read-only, and sets

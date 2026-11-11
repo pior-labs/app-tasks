@@ -28,12 +28,12 @@ class DeploymentTests(unittest.TestCase):
         for name in ("docker-compose.yml", "docker-compose.production.yml", "docker-compose.production.yml"):
             Path("candidate", name).write_text("services: {}\n")
         Path("release.json").write_text(json.dumps(RELEASE))
-        self.root = self.workspace / "cookbook"
+        self.root = self.workspace / "tasks"
         self.history = self.root / ".deployments"
         self.history.mkdir(parents=True)
         self.previous = {"sha": "d" * 40, "run_id": 100, "status": "healthy"}
         (self.history / "current.json").write_text(json.dumps(self.previous))
-        self.environment = patch.dict(os.environ, {"DEPLOY_DIR": str(self.root), "APP_ENV": "SECRET=private", "COMPOSE_PROJECT_NAME": "cookbook", "GITHUB_REPOSITORY": REPOSITORY, "GITHUB_RUN_ID": "456", "GITHUB_STEP_SUMMARY": str(self.workspace / "summary"), "DEPLOY_BASE_URL": "https://fixture.example", "EXPECTED_SHA": SHA, "EXPECTED_RUN_ID": "123", "EXPECTED_ATTEMPT": "2"})
+        self.environment = patch.dict(os.environ, {"DEPLOY_DIR": str(self.root), "CENTRAL_AUTH_CLIENT_SECRET": "fixture-client", "BETTER_AUTH_SECRET": "fixture-session-secret-at-least-32-characters", "COMPOSE_PROJECT_NAME": "tasks", "GITHUB_REPOSITORY": REPOSITORY, "GITHUB_RUN_ID": "456", "GITHUB_STEP_SUMMARY": str(self.workspace / "summary"), "DEPLOY_BASE_URL": "https://fixture.example", "EXPECTED_SHA": SHA, "EXPECTED_RUN_ID": "123", "EXPECTED_ATTEMPT": "2"})
         self.environment.start()
         self.addCleanup(self.environment.stop)
         self.old_umask = os.umask(0o022)
@@ -94,20 +94,30 @@ class DeploymentTests(unittest.TestCase):
         # Deliberately different from the staged environment: the old deployment
         # must not silently supply env_file values to the new containers.
         (self.root / ".env").write_text("SECRET=stale\n")
-        app_env = "COMPOSE_PROJECT_NAME=legacy\n export COMPOSE_PROJECT_NAME=other\nSECRET=candidate\nBETTER_AUTH_SECRET=fixture-session\nAUTH_DATABASE_URL_FILE=/tmp/fixture-database-url\nPLATFORM_DATABASE_URL_FILE=/tmp/fixture-database-url\nPLATFORM_IMAGE_STORAGE_DIR=/tmp/fixture-images\nPLATFORM_MCP_HTTP_TOKEN_FILE=/tmp/fixture-token"
+        secret = "fixture-'quotes\"-backslash\\-dollar$UNSET-${UNSET}-$$-unicodeé"
         real_command = deploy.command
         def render_only(*args, **kwargs):
             if "config" in args:
                 return real_command(*args, **kwargs)
             return self.run_command(*args, **kwargs)
-        with patch.dict(os.environ, {"APP_ENV": app_env}), patch.object(deploy, "command", side_effect=render_only):
+        with patch.dict(os.environ, {"CENTRAL_AUTH_CLIENT_SECRET": secret, "APP_ENV": "SECRET=ignored"}), patch.object(deploy, "command", side_effect=render_only):
             deploy.deploy()
         runtime = (self.root / "current").resolve()
         config = json.loads((runtime / "compose.json").read_text())
-        self.assertEqual(config["name"], "cookbook")
-        self.assertEqual(config["services"]["api"]["environment"]["COMPOSE_PROJECT_NAME"], "cookbook")
+        self.assertEqual(config["name"], "tasks")
+        self.assertEqual(config["services"]["api"]["environment"]["COMPOSE_PROJECT_NAME"], "tasks")
         self.assertEqual((runtime / ".env").read_text().count("COMPOSE_PROJECT_NAME="), 1)
-        self.assertEqual(config["services"]["api"]["environment"]["SECRET"], "candidate")
+        self.assertNotIn('SECRET', config['services']['api']['environment'])
+        final = json.loads(real_command('docker', 'compose', '-f', str(runtime / 'compose.json'),
+                                       'config', '--format', 'json', capture_output=True).stdout)
+        environment = final['services']['api']['environment']
+        # Compose serializes literal dollars as $$ so its output is reusable.
+        self.assertEqual(environment['CENTRAL_AUTH_CLIENT_SECRET'], secret.replace('$', '$$'))
+        self.assertEqual(environment, config['services']['api']['environment'])
+        self.assertEqual(environment['BETTER_AUTH_SECRET'], os.environ['BETTER_AUTH_SECRET'])
+        self.assertEqual(environment['DATABASE_URL'], '')
+        self.assertEqual(environment['DATABASE_URL_FILE'], '/run/secrets/database_url')
+        self.assertNotIn('CENTRAL_AUTH_CLIENT_SECRET', final['services']['web'].get('environment', {}))
         self.assertTrue(all("build" not in service for service in config["services"].values()))
         for service, mounts in CONFIG.get("host_data_mounts", {}).items():
             for target, relative in mounts.items():
@@ -124,11 +134,30 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(json.loads((self.history / "current.json").read_text()), self.previous)
 
     def test_project_secret_is_required_and_validated_before_writing(self):
-        for value in ("", "Bad Name", "cookbook\nOTHER=value", "../cookbook"):
+        for value in ("", "Bad Name", "tasks\nOTHER=value", "../tasks"):
             with self.subTest(value=value), patch.dict(os.environ, {"COMPOSE_PROJECT_NAME": value}), patch.object(deploy, "command") as command, self.assertRaises(ValueError):
                 deploy.deploy()
             command.assert_not_called()
         self.assertFalse((self.root / "releases").exists())
+
+    def test_missing_or_invalid_secrets_fail_before_staging(self):
+        for key, value in (('CENTRAL_AUTH_CLIENT_SECRET', ''), ('BETTER_AUTH_SECRET', ''),
+                           ('BETTER_AUTH_SECRET', 'short'),
+                           ('CENTRAL_AUTH_CLIENT_SECRET', 'private\nINJECTED=value'),
+                           ('CENTRAL_AUTH_CLIENT_SECRET', 'replace-with-placeholder')):
+            with self.subTest(key=key, value=value), patch.dict(os.environ, {key: value}), \
+                    patch.object(deploy, 'command') as command, self.assertRaises(ValueError) as error:
+                deploy.deploy()
+            self.assertIn(key, str(error.exception))
+            command.assert_not_called()
+        self.assertFalse((self.root / 'releases').exists())
+
+    def test_variables_override_defaults_without_inheriting_unrelated_environment(self):
+        with patch.dict(os.environ, {'PUBLIC_BASE_URL': 'https://override.example', 'UNRELATED': 'private'}):
+            value = deploy.production_environment('tasks')
+        self.assertIn('PUBLIC_BASE_URL="https://override.example"', value)
+        self.assertIn('CENTRAL_AUTH_CLIENT_ID="tasks"', value)
+        self.assertNotIn('UNRELATED', value)
 
     def test_rejects_broad_directory_before_writing(self):
         with patch.dict(os.environ, {"DEPLOY_DIR": "/opt/docker"}), self.assertRaises(ValueError):
