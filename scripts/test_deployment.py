@@ -100,7 +100,7 @@ class DeploymentTests(unittest.TestCase):
             if "config" in args:
                 return real_command(*args, **kwargs)
             return self.run_command(*args, **kwargs)
-        with patch.dict(os.environ, {"CENTRAL_AUTH_CLIENT_SECRET": secret, "APP_ENV": "SECRET=ignored"}), patch.object(deploy, "command", side_effect=render_only):
+        with patch.dict(os.environ, {**dict.fromkeys(deploy.PRODUCTION_DEFAULTS, ""), "CENTRAL_AUTH_CLIENT_SECRET": secret, "APP_ENV": "SECRET=ignored"}), patch.object(deploy, "command", side_effect=render_only):
             deploy.deploy()
         runtime = (self.root / "current").resolve()
         config = json.loads((runtime / "compose.json").read_text())
@@ -117,6 +117,9 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(environment['BETTER_AUTH_SECRET'], os.environ['BETTER_AUTH_SECRET'])
         self.assertEqual(environment['DATABASE_URL'], '')
         self.assertEqual(environment['DATABASE_URL_FILE'], '/run/secrets/database_url')
+        mount = next(v for v in final['services']['api']['volumes'] if v['target'] == '/run/secrets/database_url')
+        self.assertEqual(mount['source'], deploy.PRODUCTION_DEFAULTS['PLATFORM_DATABASE_URL_FILE'])
+        self.assertIn('tasks-api', final['services']['api']['networks']['pior_edge']['aliases'])
         self.assertNotIn('CENTRAL_AUTH_CLIENT_SECRET', final['services']['web'].get('environment', {}))
         self.assertTrue(all("build" not in service for service in config["services"].values()))
         for service, mounts in CONFIG.get("host_data_mounts", {}).items():
@@ -124,6 +127,19 @@ class DeploymentTests(unittest.TestCase):
                 mount = next(v for v in config['services'][service]['volumes'] if v['target'] == target)
                 self.assertEqual(mount['source'], str(self.root / relative))
         real_command("docker", "compose", "-f", str(runtime / "compose.json"), "config", "--quiet", capture_output=True)
+
+    def test_compose_failure_keeps_diagnostics_private_and_preserves_current(self):
+        def fail(*args, **kwargs):
+            raise subprocess.CalledProcessError(1, args, stderr='fixture-private-parser-detail')
+        with patch.object(deploy, 'command', side_effect=fail), self.assertRaises(RuntimeError) as error:
+            deploy.deploy()
+        self.assertNotIn('fixture-private-parser-detail', str(error.exception))
+        attempt = json.loads((self.history / 'attempt.json').read_text())
+        diagnostics = Path(attempt['runtime_dir']) / 'compose-config.stderr'
+        self.assertEqual(diagnostics.read_text(), 'fixture-private-parser-detail')
+        self.assertEqual(diagnostics.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(attempt['status'], 'failed')
+        self.assertEqual(json.loads((self.history / 'current.json').read_text()), self.previous)
 
     def test_staging_failure_is_recorded_without_touching_production(self):
         Path("candidate", CONFIG["compose_files"][0]).unlink()
