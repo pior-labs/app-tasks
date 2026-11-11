@@ -91,24 +91,20 @@ only its mounted platform connection file.
 
 Deployment is manual, restricted to `main`, using the `PRODUCTION` environment
 and repository-scoped runner labels `self-hosted`, `linux`, `app-tasks`.
-The runner needs Docker Compose, rsync, curl, and write access to `DEPLOY_DIR`.
-Configure `DEPLOY_DIR` (an absolute dedicated directory), `APP_ENV`, GitHub
-Packages access for this repository, and the runner before dispatch.
+The runner needs Python 3, Docker Compose, curl, and write access to `DEPLOY_DIR`.
+Configure the required Actions variable `DEPLOY_DIR=/opt/docker/app-tasks`,
+GitHub Packages access for this repository, and the runner before dispatch.
 
-`APP_ENV` must contain the production settings from `.env.example`, including:
+Set these separate Actions secrets:
 
-```dotenv
-APP_SLUG=tasks
-COMPOSE_PROJECT_NAME=tasks
-BETTER_AUTH_URL=https://tasks.szarans.ca
-BETTER_AUTH_TRUSTED_ORIGINS=https://tasks.szarans.ca
-PUBLIC_BASE_URL=https://tasks.szarans.ca
-CENTRAL_AUTH_ISSUER=https://auth.szarans.ca/api/auth
-CENTRAL_AUTH_CLIENT_ID=tasks
-CENTRAL_AUTH_CLIENT_SECRET=<same-private-value-as-Auth-TASKS_CLIENT_SECRET>
-BETTER_AUTH_SECRET=<separate-private-session-secret>
-PLATFORM_DATABASE_URL_FILE=/opt/docker/pior-labs/secrets/app-tasks/database-url
-```
+- `COMPOSE_PROJECT_NAME`: `tasks` for a new project.
+- `CENTRAL_AUTH_CLIENT_SECRET`: the same private value as Auth's `TASKS_CLIENT_SECRET`.
+- `BETTER_AUTH_SECRET`: a separate stable application session secret, at least 32 characters.
+
+`APP_ENV` is no longer used. Public runtime configuration has versioned production
+defaults and individual optional Actions variable overrides. See the complete
+[production settings table](docs/DEPLOYMENT.md#individual-production-settings).
+No additional variables are needed for the standard Tasks production setup.
 
 Do not place production database passwords in GitHub. Production Compose clears
 `DATABASE_URL`, mounts the platform-generated file read-only, and sets
@@ -125,8 +121,9 @@ Rollout checklist, with human review and merge for each repository:
    seed-user configuration, then **Deploy Auth Production** to reload clients.
 3. Merge/deploy platform changes to provision database `tasks`, role `tasks_app`,
    connection secret, and explicit HTTPS ingress.
-4. Merge Tasks and dispatch Deploy. It builds locked images, applies app
-   migrations, starts containers, and probes health and frontend through Caddy.
+4. Merge Tasks, wait for its main CI images, and dispatch Deploy with that CI
+   run ID. It pulls exact digests, applies app migrations, starts containers,
+   and probes health and frontend through Caddy.
 5. Verify browser SSO, current user, local session, sign-out and expiry; then
    verify production routing and persistence. Review backup coverage before data.
 
@@ -156,3 +153,10 @@ current user. The central account link is persisted in the local database.
 The user also confirmed real app sign-out and successful sign-in afterward.
 Expiry and revocation have passing regression coverage; a week-long live expiry
 was not observed. Tasks itself has not been deployed in production.
+
+## Verified CI releases
+
+CI publishes immutable images after validation; production deployment is manual
+and selects a successful main CI run. Configure the separate
+`COMPOSE_PROJECT_NAME` Actions secret and follow [deployment operations](docs/DEPLOYMENT.md)
+for activation, exact run selection, persistent-data boundaries and recovery.

@@ -13,3 +13,5 @@ data/
 .agents/
 .claude/
 *.tsbuildinfo
+
+__pycache__/
