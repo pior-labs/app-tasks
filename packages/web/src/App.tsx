@@ -28,7 +28,8 @@ export function App() {
         body: JSON.stringify(user ? {} : { providerId: 'auth-pior', callbackURL: '/', errorCallbackURL: '/?error=sign-in' }),
       });
       if (!response.ok) throw new Error();
-      if (user) setUser(null);
+      // An explicit sign-out is not an ended session, even if a task request got a 401 meanwhile.
+      if (user) { setUser(null); setError(''); }
       else {
         const { url } = await response.json();
         location.assign(url);

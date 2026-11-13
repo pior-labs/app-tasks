@@ -120,6 +120,64 @@ test('invalid titles and bodies are rejected with 400 and create no row (AC-2)',
   assert.equal(await taskRowCount(), before);
 });
 
+test('titles that cannot be stored or have nothing visible are rejected with 400 (AC-2)', async () => {
+  const session = await signIn(fixture, 0);
+  const before = await taskRowCount();
+  const message = async (title: string) => {
+    const response = await send(session, 'POST', '/api/tasks', { title });
+    await assertError(response.clone(), 400, 'invalid_title');
+    return (await response.json()).message as string;
+  };
+
+  // PostgreSQL text cannot store U+0000; this must be a validation error, not a 500.
+  for (const title of ['a\u0000b', '\u0000 leading', 'trailing\u0000']) {
+    assert.match(await message(title), /null character/);
+  }
+
+  // Titles made only of whitespace, control and invisible characters count as empty.
+  for (const title of [
+    '​', // zero width space
+    '​‌‍⁠', // zero width non-joiner, joiner, word joiner
+    ' ​ ﻿ ',
+    '­', // soft hyphen
+    '‎‏', // direction marks
+    'ㅤ', // Hangul filler
+    ' 　', // no-break and ideographic spaces
+    '\u0001\u001F',
+    '\u0000', // a lone null character is also nothing visible
+    '\u{E0001}', // language tag, outside the BMP
+  ]) {
+    assert.equal(await message(title), 'Enter a task title.');
+  }
+  assert.equal(await taskRowCount(), before);
+
+  // Invisible characters inside a visible title are stored unchanged.
+  const joined = 'Family \u{1F468}‍\u{1F469}‍\u{1F467} dinner';
+  assert.equal((await createTask(session, joined)).title, joined);
+  const zeroWidth = 'a​b';
+  assert.equal((await createTask(session, zeroWidth)).title, zeroWidth);
+});
+
+test('the 200 limit counts characters (code points), not UTF-16 units (AC-2)', async () => {
+  const session = await signIn(fixture, 0);
+  const before = await taskRowCount();
+  const emoji = '\u{1F600}'; // one character, two UTF-16 units
+  for (const title of ['x'.repeat(201), emoji.repeat(201), 'x'.repeat(199) + emoji + 'x']) {
+    const response = await send(session, 'POST', '/api/tasks', { title });
+    await assertError(response.clone(), 400, 'invalid_title');
+    assert.match((await response.json()).message, /200 characters/);
+  }
+  assert.equal(await taskRowCount(), before);
+
+  for (const title of [emoji.repeat(200), 'x'.repeat(199) + emoji]) {
+    const task = await createTask(session, `  ${title}  `);
+    assert.equal(task.title, title);
+    assert.equal([...task.title].length, 200);
+    const [row] = await fixture.client`select char_length(title)::int as length from tasks where id = ${task.id}`;
+    assert.equal(row.length, 200);
+  }
+});
+
 test('a task can be completed and cleared again; invalid updates are rejected (AC-3)', async () => {
   const session = await signIn(fixture, 0);
   const task = await createTask(session, 'Toggle me');

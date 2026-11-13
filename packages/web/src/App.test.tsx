@@ -1,4 +1,5 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { StrictMode } from 'react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { App } from './App';
@@ -173,6 +174,86 @@ describe('creating a task', () => {
     expect(taskTitles()).toEqual(['Buy oat milk']);
   });
 
+  test('rejects a title with nothing visible like an empty one, without a request', async () => {
+    signedIn([milk]);
+    render(<App />);
+    const input = await screen.findByLabelText('New task');
+    for (const invisible of ['\u200B', ' \u200B\u200D\u2060\uFEFF ', '\u00AD\u200E', '\u3164']) {
+      fireEvent.change(input, { target: { value: invisible } });
+      expect(screen.queryByRole('alert')).toBeNull();
+      await userEvent.click(screen.getByRole('button', { name: 'Add task' }));
+      expect(screen.getByRole('alert').textContent).toBe('Enter a task title.');
+    }
+    expect(callsTo('POST /api/tasks')).toHaveLength(0);
+    expect(taskTitles()).toEqual(['Buy oat milk']);
+  });
+
+  test('counts the 200 limit in characters, the same way the server does', async () => {
+    const emoji = '\u{1F600}'; // one character, two UTF-16 units
+    const longest = emoji.repeat(200);
+    signedIn([milk]);
+    reply('POST /api/tasks', json({ task: { id: 8, title: longest, completed: false } }, 201));
+    render(<App />);
+    const input = (await screen.findByLabelText('New task')) as HTMLInputElement;
+
+    for (const tooLong of ['x'.repeat(201), emoji.repeat(201), `  ${'x'.repeat(199)}${emoji}x  `]) {
+      fireEvent.change(input, { target: { value: tooLong } });
+      await userEvent.click(screen.getByRole('button', { name: 'Add task' }));
+      expect(screen.getByRole('alert').textContent).toBe('Task titles can be at most 200 characters.');
+      expect(input.getAttribute('aria-invalid')).toBe('true');
+      expect(input.value).toBe(tooLong);
+    }
+    expect(callsTo('POST /api/tasks')).toHaveLength(0);
+
+    // Exactly 200 characters is sent, even though it is 400 UTF-16 units.
+    fireEvent.change(input, { target: { value: ` ${longest} ` } });
+    await userEvent.click(screen.getByRole('button', { name: 'Add task' }));
+    await waitFor(() => expect(callsTo('POST /api/tasks')).toHaveLength(1));
+    expect(callsTo('POST /api/tasks')[0].body).toEqual({ title: longest });
+    await waitFor(() => expect(taskTitles()).toEqual([longest, 'Buy oat milk']));
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  test('keeps focus in the title field and ignores repeat submits while saving', async () => {
+    signedIn([milk]);
+    let finish!: (response: Response) => void;
+    reply(
+      'POST /api/tasks',
+      new Promise<Response>((resolve) => (finish = resolve)),
+      json({ task: { id: 9, title: 'Second', completed: false } }, 201),
+    );
+    render(<App />);
+    const input = (await screen.findByLabelText('New task')) as HTMLInputElement;
+    await userEvent.type(input, 'First{Enter}');
+    const button = screen.getByRole('button', { name: 'Adding...' }) as HTMLButtonElement;
+
+    // Locked without the disabled attribute, which would make a browser drop focus.
+    expect(input.disabled).toBe(false);
+    expect(input.readOnly).toBe(true);
+    expect(button.disabled).toBe(false);
+    expect(button.getAttribute('aria-disabled')).toBe('true');
+    expect(document.activeElement).toBe(input);
+
+    // Repeat submits and typing while the request is pending change nothing.
+    await userEvent.keyboard('{Enter}');
+    await userEvent.click(button);
+    await userEvent.type(input, 'ignored', { skipClick: true });
+    expect(callsTo('POST /api/tasks')).toHaveLength(1);
+    expect(input.value).toBe('First');
+
+    finish(json({ task: { id: 7, title: 'First', completed: false } }, 201));
+    await waitFor(() => expect(taskTitles()).toEqual(['First', 'Buy oat milk']));
+    // The submit click moved focus to the button; a successful add returns it to the field.
+    expect(document.activeElement).toBe(input);
+    expect(input.readOnly).toBe(false);
+    expect(input.value).toBe('');
+
+    await userEvent.keyboard('Second{Enter}');
+    await waitFor(() => expect(taskTitles()).toEqual(['Second', 'First', 'Buy oat milk']));
+    expect(callsTo('POST /api/tasks')).toHaveLength(2);
+    expect(document.activeElement).toBe(input);
+  });
+
   test('shows the server message when the server rejects the title', async () => {
     signedIn([milk]);
     reply('POST /api/tasks', json({ error: 'invalid_title', message: 'Enter a task title.' }, 400));
@@ -201,7 +282,7 @@ describe('creating a task', () => {
       expect(taskTitles()).toEqual(['Buy oat milk']);
       // The typed title is kept so the user can retry.
       expect(input.value).toBe('Never saved');
-      await waitFor(() => expect(input.disabled).toBe(false));
+      await waitFor(() => expect(input.readOnly).toBe(false));
     }
   });
 });
@@ -220,12 +301,19 @@ describe('completing a task', () => {
     await userEvent.click(checkbox);
     // Until the server answers, the stored state is still shown and the control is locked.
     expect(checkbox.checked).toBe(false);
-    expect(checkbox.disabled).toBe(true);
+    // Locked with aria-disabled, not disabled, so a keyboard user keeps focus on it.
+    expect(checkbox.disabled).toBe(false);
+    expect(checkbox.getAttribute('aria-disabled')).toBe('true');
+    expect(document.activeElement).toBe(checkbox);
+    await userEvent.click(checkbox);
+    expect(checkbox.checked).toBe(false);
+    expect(callsTo('PATCH /api/tasks/1')).toHaveLength(1);
     expect(callsTo('PATCH /api/tasks/1')[0].body).toEqual({ completed: true });
 
     finish(json({ task: { ...milk, completed: true } }));
     await waitFor(() => expect(checkbox.checked).toBe(true));
-    expect(checkbox.disabled).toBe(false);
+    expect(checkbox.getAttribute('aria-disabled')).toBeNull();
+    expect(document.activeElement).toBe(checkbox);
     expect(screen.getByText('Buy oat milk').className).toContain('line-through');
 
     await userEvent.click(checkbox);
@@ -248,7 +336,7 @@ describe('completing a task', () => {
       '"Buy oat milk" could not be updated. Please try again.',
     );
     expect(open.checked).toBe(false);
-    await waitFor(() => expect(open.disabled).toBe(false));
+    await waitFor(() => expect(open.getAttribute('aria-disabled')).toBeNull());
 
     await userEvent.click(done);
     await waitFor(() =>
@@ -260,7 +348,7 @@ describe('completing a task', () => {
     expect(taskTitles()).toEqual(['Water the plants', 'Buy oat milk']);
 
     // A later successful update clears the failure message.
-    await waitFor(() => expect(done.disabled).toBe(false));
+    await waitFor(() => expect(done.getAttribute('aria-disabled')).toBeNull());
     await userEvent.click(open);
     await waitFor(() => expect(open.checked).toBe(true));
     expect(screen.queryByRole('alert')).toBeNull();
@@ -298,6 +386,42 @@ describe('session handling', () => {
     await expectSignedOut();
   });
 
+  test('a task request that fails with 401 after an explicit sign-out shows no session error', async () => {
+    signedIn([milk]);
+    let finishUpdate!: (response: Response) => void;
+    let finishCreate!: (response: Response) => void;
+    reply('PATCH /api/tasks/1', new Promise<Response>((resolve) => (finishUpdate = resolve)));
+    reply('POST /api/tasks', new Promise<Response>((resolve) => (finishCreate = resolve)));
+    reply('POST /api/auth/sign-out', json({ success: true }));
+    render(<App />);
+    await userEvent.click(await screen.findByRole('checkbox', { name: 'Buy oat milk' }));
+    await userEvent.type(screen.getByLabelText('New task'), 'In flight{Enter}');
+    await userEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    expect(await screen.findByRole('button', { name: 'Sign in with Pior Labs' })).toBeTruthy();
+
+    finishUpdate(json({ error: 'unauthorized' }, 401));
+    finishCreate(json({ error: 'unauthorized' }, 401));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Sign in with Pior Labs' })).toBeTruthy();
+  });
+
+  test('a 401 that arrives while sign-out is in progress leaves no session error', async () => {
+    signedIn([milk]);
+    let finishSignOut!: (response: Response) => void;
+    reply('PATCH /api/tasks/1', json({ error: 'unauthorized' }, 401));
+    reply('POST /api/auth/sign-out', new Promise<Response>((resolve) => (finishSignOut = resolve)));
+    render(<App />);
+    const checkbox = await screen.findByRole('checkbox', { name: 'Buy oat milk' });
+    await userEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    await userEvent.click(checkbox);
+    await waitFor(() => expect(screen.queryByRole('list')).toBeNull());
+
+    finishSignOut(json({ success: true }));
+    expect(await screen.findByRole('button', { name: 'Sign in with Pior Labs' })).toBeTruthy();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
   test('sign-out returns to the signed-out view without an error', async () => {
     signedIn([milk]);
     reply('POST /api/auth/sign-out', json({ success: true }));
@@ -308,5 +432,35 @@ describe('session handling', () => {
     expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.queryByRole('list')).toBeNull();
     expect(callsTo('POST /api/auth/sign-out')[0].body).toEqual({});
+  });
+});
+
+describe('under StrictMode', () => {
+  test('ignores the discarded first load and still creates tasks', async () => {
+    // StrictMode runs each effect twice in development: two session and two task requests.
+    let finishDiscarded!: (response: Response) => void;
+    reply('GET /api/me', json({ user: signedInUser }), json({ user: signedInUser }));
+    reply(
+      'GET /api/tasks',
+      new Promise<Response>((resolve) => (finishDiscarded = resolve)),
+      json({ tasks: [milk] }),
+    );
+    reply('POST /api/tasks', json({ task: { id: 7, title: 'Call the plumber', completed: false } }, 201));
+    render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    );
+    await waitFor(() => expect(taskTitles()).toEqual(['Buy oat milk']));
+    expect(callsTo('GET /api/tasks')).toHaveLength(2);
+
+    // The first, discarded request answers late with different data and must not win.
+    finishDiscarded(json({ tasks: [plants] }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(taskTitles()).toEqual(['Buy oat milk']);
+
+    await userEvent.type(screen.getByLabelText('New task'), 'Call the plumber{Enter}');
+    await waitFor(() => expect(taskTitles()).toEqual(['Call the plumber', 'Buy oat milk']));
+    expect(callsTo('POST /api/tasks')).toHaveLength(1);
   });
 });

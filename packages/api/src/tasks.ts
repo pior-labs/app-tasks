@@ -11,12 +11,30 @@ export type AppDatabase = PostgresJsDatabase<typeof schema>;
 export const MAX_TITLE_LENGTH = 200;
 const MAX_TASK_ID = 2_147_483_647; // tasks.id is a 32-bit serial.
 
+// A title needs at least one character a person can see. Whitespace, control
+// characters and Unicode "default ignorable" code points (zero width space and
+// joiners, soft hyphen, direction marks, fillers) render as nothing, so a title
+// made only of those is treated like an empty one. This only decides whether a
+// title is empty: visible titles are stored exactly as sent (after trimming).
+// The web form applies the same rules in packages/web/src/Tasks.tsx.
+const VISIBLE_CHARACTER = /[^\p{White_Space}\p{Cc}\p{Default_Ignorable_Code_Point}]/u;
+
 const createTaskBody = z.object(
   {
     title: z
       .string({ error: 'A task title is required and must be text.' })
       .trim()
-      .min(1, { error: 'Enter a task title.' })
+      .refine((title) => VISIBLE_CHARACTER.test(title), {
+        error: 'Enter a task title.',
+        abort: true,
+      })
+      // PostgreSQL text cannot store U+0000, so reject it here instead of failing the insert.
+      .refine((title) => !title.includes('\u0000'), {
+        error: 'Task titles cannot contain a null character.',
+        abort: true,
+      })
+      // zod counts Unicode code points here, so an emoji is one character. The
+      // web form counts the same way; tests on both sides pin the boundary.
       .max(MAX_TITLE_LENGTH, {
         error: `Task titles can be at most ${MAX_TITLE_LENGTH} characters.`,
       }),

@@ -87,10 +87,20 @@ A task is `{ id, title, completed, createdAt, updatedAt }`. Errors are
 (`BETTER_AUTH_URL`) in `Origin`; 404 `task_not_found` for an id that does not
 exist or belongs to another user (the two cases are indistinguishable).
 
+Title rules, applied by the API and mirrored by the form: the title is trimmed;
+a title with nothing visible (only whitespace, control characters or invisible
+characters such as a zero width space) is rejected like an empty one; a title
+containing a null character is rejected because PostgreSQL cannot store it; the
+200 limit counts Unicode code points, so an emoji is one character. Visible
+titles are stored unchanged apart from trimming.
+
 The signed-in page shows an add-task form and the task list, with distinct
 loading, empty, load-failure (with retry), create-failure and update-failure
-states. A checkbox changes only after the server stores the new state. A 401
-from a task request returns the page to the signed-out view.
+states. A checkbox changes only after the server stores the new state. While a
+request is pending its control ignores repeat input but keeps keyboard focus,
+and after a task is added focus returns to the title field. A 401 from a task
+request returns the page to the signed-out view, except after an explicit
+sign-out.
 
 ## Verification
 
