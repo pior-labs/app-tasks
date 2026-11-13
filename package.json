@@ -11,7 +11,12 @@
     "typecheck": "pnpm --recursive typecheck",
     "db:generate": "pnpm --filter @tasks/api db:generate",
     "db:migrate": "pnpm --filter @tasks/api db:migrate",
-    "test": "pnpm --filter @tasks/api test",
+    "test": "pnpm --filter @tasks/api test && pnpm --filter @tasks/web test",
     "verify": "pnpm typecheck && pnpm test && pnpm build"
+  },
+  "pnpm": {
+    "overrides": {
+      "better-auth>vitest": "-"
+    }
   }
 }
