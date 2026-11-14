@@ -1,7 +1,8 @@
 # Tasks
 
-Pior Labs Tasks foundation. The first release identifies the signed-in user and
-provides sign-in/sign-out. Task features are deferred.
+Pior Labs Tasks. A signed-in user can create tasks, see their saved tasks, and
+mark a task complete or clear it again. Editing, deletion, notes, projects,
+priorities and due dates are not implemented.
 
 React 19/Vite, Hono, PostgreSQL/Drizzle, pnpm 10.8.1, published
 `@pior-labs/design-system`, and Better Auth 1.6.20 application sessions.
@@ -52,7 +53,7 @@ CI has successfully installed the published design system with its Actions token
 The `auth-pior` OAuth client uses discovery, PKCE, issuer validation, and
 authenticated UserInfo. Provider identities are linked by subject; email-based
 account linking is disabled. Local users, sessions, accounts and OAuth state
-are persisted in Tasks' own database. There is no task-domain schema yet.
+are persisted in Tasks' own database, alongside the task-domain `tasks` table.
 
 `GET /api/me` requires an unexpired local session and returns only ID/name/email.
 `/health` and `/api/health` are public liveness endpoints. Other API routes after
@@ -64,6 +65,42 @@ Exact callbacks registered by the companion service-auth change:
 
 - http://localhost:5173/api/auth/oauth2/callback/auth-pior
 - https://tasks.szarans.ca/api/auth/oauth2/callback/auth-pior
+
+## Tasks
+
+Each row in `tasks` belongs to one app-local user (`user_id`, cascade delete)
+and has a `title`, a `completed` boolean and timestamps. The owner is always
+taken from the server session, never from the request, and `user_id` is not
+returned. All task routes sit behind the session boundary and return 401
+without a valid session.
+
+| Route | Request | Success |
+| --- | --- | --- |
+| `GET /api/tasks` | none | 200 `{ "tasks": [...] }`, the session user's tasks only, newest first |
+| `POST /api/tasks` | `{ "title": string }` | 201 `{ "task": {...} }`; the title is trimmed, 1 to 200 characters |
+| `PATCH /api/tasks/:id` | `{ "completed": boolean }` | 200 `{ "task": {...} }` |
+
+A task is `{ id, title, completed, createdAt, updatedAt }`. Errors are
+`{ "error": code, "message": text }` with stable codes: 400 `invalid_json`,
+`invalid_title`, `invalid_completed` or `invalid_task_id`; 403
+`forbidden_origin` when a `POST`/`PATCH` does not carry the application origin
+(`BETTER_AUTH_URL`) in `Origin`; 404 `task_not_found` for an id that does not
+exist or belongs to another user (the two cases are indistinguishable).
+
+Title rules, applied by the API and mirrored by the form: the title is trimmed;
+a title with nothing visible (only whitespace, control characters or invisible
+characters such as a zero width space) is rejected like an empty one; a title
+containing a null character is rejected because PostgreSQL cannot store it; the
+200 limit counts Unicode code points, so an emoji is one character. Visible
+titles are stored unchanged apart from trimming.
+
+The signed-in page shows an add-task form and the task list, with distinct
+loading, empty, load-failure (with retry), create-failure and update-failure
+states. A checkbox changes only after the server stores the new state. While a
+request is pending its control ignores repeat input but keeps keyboard focus,
+and after a task is added focus returns to the title field. A 401 from a task
+request returns the page to the signed-out view, except after an explicit
+sign-out.
 
 ## Verification
 
@@ -77,13 +114,31 @@ pnpm test
 pnpm db:migrate
 ```
 
-Auth tests create/migrate/drop a unique disposable `tasks_test_*` database. They
-never truncate the development database. They exercise PKCE callbacks, state and
-issuer checks, replay, invalid profiles, session persistence/renewal/expiry,
-cookie isolation, CSRF and sign-out using a fixture provider. They do not prove
-hosted SSO. CI runs typechecks, auth tests and production builds.
+`pnpm test` runs the API integration tests and then the web component tests;
+`pnpm verify` runs typecheck, tests and build.
 
-`pnpm db:generate` generates checked-in app-owned migrations. Verify the local
+Each API test file creates/migrates/drops its own unique disposable
+`tasks_test_*` database. They never truncate the development database. Auth
+tests exercise PKCE callbacks, state and issuer checks, replay, invalid profiles,
+session persistence/renewal/expiry, cookie isolation, CSRF and sign-out using a
+fixture provider. Task tests cover create/list, title validation, completing and
+clearing, persistence across sign-out, a new session and a second app instance
+on the same database, per-user isolation, session enforcement and the origin
+check. They do not prove hosted SSO.
+
+Web component tests (`packages/web/src/*.test.tsx`) use Vitest, jsdom and
+Testing Library with `fetch` stubbed. They cover the signed-out view, the task
+list states, creating and completing tasks, failures and 401 handling. They do
+not run a real browser or the real API. CI runs typechecks, API and web tests
+and production builds.
+
+Vitest is an optional peer dependency of Better Auth. The root `pnpm.overrides`
+entry `better-auth>vitest` keeps the web test tooling out of the API's
+dependency tree and production image.
+
+`pnpm db:generate` generates checked-in app-owned migrations. It does not connect
+to a database, but the Drizzle configuration requires `DATABASE_URL` or
+`DATABASE_URL_FILE` to be set. Verify the local
 connection with workspace tooling before applying migrations. Production reads
 only its mounted platform connection file.
 
@@ -127,7 +182,13 @@ Rollout checklist, with human review and merge for each repository:
 5. Verify browser SSO, current user, local session, sign-out and expiry; then
    verify production routing and persistence. Review backup coverage before data.
 
-Current verification evidence: migration applied to `tasks_dev`; typecheck,
+Task feature verification evidence: typecheck, production builds, fifteen
+disposable-database API tests (eight auth, seven task) and fifteen web component
+tests passed locally. Migration `0001` was applied only to disposable test
+databases; it has not been applied to `tasks_dev` or production, and the task
+feature has not been checked in a real browser or against hosted SSO.
+
+Foundation verification evidence: migration `0000` applied to `tasks_dev`; typecheck,
 production build and eight disposable-database auth tests passed. Frontend and
 proxied health returned 200, unauthenticated `/api/me` returned 401. Browser
 smoke checks covered signed-out UI and synthetic signed-in UI, with no mobile

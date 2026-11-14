@@ -10,6 +10,7 @@ import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import postgres from 'postgres';
 import { createAuth } from '../src/auth.js';
 import { createApp } from '../src/app.js';
+import * as schema from '../src/db/schema.js';
 import { databaseConnection } from '../src/env.js';
 
 export const fixtureUsers = [
@@ -183,7 +184,7 @@ export async function createFixture(baseURL = 'http://localhost:5173') {
       clientSecret: 'fixture-client-secret',
       secret: 'fixture-session-secret-at-least-32-characters',
     });
-    const app = createApp(auth);
+    const app = createApp(auth, drizzle(client, { schema }), baseURL);
     return {
       app,
       auth,

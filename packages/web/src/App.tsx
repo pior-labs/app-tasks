@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { Tasks } from './Tasks';
 
 type User = { name: string; email: string };
 export function App() {
@@ -13,6 +14,11 @@ export function App() {
       setUser((await response.json()).user);
     }).catch(() => setError('Unable to connect. Please reload to try again.')).finally(() => setLoading(false));
   }, []);
+  // A task request answered with 401 means the session ended: show the signed-out view.
+  const handleSignedOut = useCallback(() => {
+    setUser(null);
+    setError('Your session has ended. Please sign in again.');
+  }, []);
   async function authenticate() {
     setBusy(true);
     setError('');
@@ -22,7 +28,8 @@ export function App() {
         body: JSON.stringify(user ? {} : { providerId: 'auth-pior', callbackURL: '/', errorCallbackURL: '/?error=sign-in' }),
       });
       if (!response.ok) throw new Error();
-      if (user) setUser(null);
+      // An explicit sign-out is not an ended session, even if a task request got a 401 meanwhile.
+      if (user) { setUser(null); setError(''); }
       else {
         const { url } = await response.json();
         location.assign(url);
@@ -37,6 +44,7 @@ export function App() {
       {loading ? <p role="status">Loading your session...</p> : <>
         <p className="text-lg opacity-75">{user ? `Welcome, ${user.name}.` : 'A little space for what comes next.'}</p>
         {user && <div className="rounded-lg border p-5"><p className="font-medium">Signed in as {user.name}</p><p className="mt-1 opacity-65">{user.email}</p></div>}
+        {user && <Tasks onSignedOut={handleSignedOut} />}
         <button disabled={busy} onClick={() => void authenticate()} className="rounded-md bg-primary px-5 py-3 font-medium text-primary-foreground disabled:opacity-50">{busy ? 'Please wait...' : user ? 'Sign out' : 'Sign in with Pior Labs'}</button>
       </>}
       {error && <p role="alert">{error}</p>}
