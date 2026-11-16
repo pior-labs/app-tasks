@@ -68,6 +68,9 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
   const updatingRef = useRef(new Set<number>());
   const savingRef = useRef(false);
   const deletingRef = useRef(false);
+  // Tasks this page removed from the list, so a late answer about one of them
+  // is not reported as a failure.
+  const removedRef = useRef(new Set<number>());
   // Row elements by task id, and the latest list, for moving keyboard focus.
   const rows = useRef(new Map<number, HTMLLIElement>());
   const tasksRef = useRef(tasks);
@@ -175,6 +178,8 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
       });
       if (!mounted.current) return;
       if (response.status === 401) return onSignedOut();
+      // The task was deleted and has already left the list: nothing to report.
+      if (response.status === 404 && removedRef.current.has(task.id)) return;
       if (!response.ok) throw new Error();
       const body: { task: Task } = await response.json();
       // The checkbox changes only once the server has stored the new state.
@@ -200,6 +205,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
           ? rows.current.get(neighbour.id)?.querySelector<HTMLElement>('input, button')
           : titleInput.current;
     }
+    removedRef.current.add(id);
     setTasks((current) => current.filter((item) => item.id !== id));
     setEditing((current) => (current?.id === id ? null : current));
     setConfirmingId((current) => (current === id ? null : current));
@@ -270,7 +276,8 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
   }
 
   function startDelete(task: Task) {
-    if (deletingRef.current) return;
+    // One request per task at a time: wait for a pending completion change.
+    if (deletingRef.current || updatingRef.current.has(task.id)) return;
     setConfirmingId(task.id);
     // Focus lands on Cancel, so a repeated key press or click does not delete.
     focusAfterRender.current = () => control(task.id, 'cancel-delete');
@@ -283,7 +290,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
   }
 
   async function confirmDelete(task: Task) {
-    if (deletingRef.current || confirmingId !== task.id) return;
+    if (deletingRef.current || confirmingId !== task.id || updatingRef.current.has(task.id)) return;
     deletingRef.current = true;
     setDeleting(true);
     setUpdateError('');
@@ -389,6 +396,9 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
               task={task}
               mode={rowMode(task)}
               updating={updatingIds.includes(task.id)}
+              // Controls whose action is ignored right now are marked as locked.
+              editLocked={saving || updatingIds.includes(task.id)}
+              deleteLocked={deleting || updatingIds.includes(task.id)}
               rowRef={(element) => {
                 if (element) rows.current.set(task.id, element);
                 else rows.current.delete(task.id);

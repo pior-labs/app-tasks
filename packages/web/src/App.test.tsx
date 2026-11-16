@@ -619,6 +619,60 @@ describe('renaming a task', () => {
     await userEvent.click(edit);
     expect(editField('Buy oat milk').value).toBe('Buy oat milk');
   });
+
+  test('Escape on Save or Cancel also cancels, but not while the save is pending', async () => {
+    signedIn([plants, milk]);
+    const save = pending();
+    reply('PATCH /api/tasks/1', save.response);
+    render(<App />);
+    for (const control of ['Save', 'Cancel']) {
+      const field = await startEditing('Buy oat milk');
+      await userEvent.type(field, ' thrown away');
+      button(control).focus();
+      await userEvent.keyboard('{Escape}');
+      expect(taskTitles()).toEqual(['Water the plants', 'Buy oat milk']);
+      expect(document.activeElement).toBe(button('Edit "Buy oat milk"'));
+    }
+    expect(calls.filter((call) => call.method !== 'GET')).toEqual([]);
+
+    // While the save is pending, Escape on any control of the form changes nothing.
+    const field = await startEditing('Buy oat milk');
+    await userEvent.type(field, ' and bread{Enter}');
+    for (const target of [field, button('Saving...'), button('Cancel')]) {
+      target.focus();
+      await userEvent.keyboard('{Escape}');
+      expect(taskTitles()).toEqual(['Water the plants', 'editing: Buy oat milk and bread']);
+      expect(document.activeElement).toBe(target);
+    }
+    save.finish(json({ task: { ...milk, title: 'Buy oat milk and bread' } }));
+    await waitFor(() => expect(taskTitles()).toEqual(['Water the plants', 'Buy oat milk and bread']));
+    expect(callsTo('PATCH /api/tasks/1')).toHaveLength(1);
+  });
+
+  test('while a save is pending, Edit on other rows is visibly locked and ignored', async () => {
+    signedIn([plants, milk]);
+    const save = pending();
+    reply('PATCH /api/tasks/1', save.response);
+    render(<App />);
+    const field = await startEditing('Buy oat milk');
+    expect(button('Edit "Water the plants"').getAttribute('aria-disabled')).toBeNull();
+    await userEvent.type(field, ' and bread{Enter}');
+
+    const other = button('Edit "Water the plants"');
+    expect(other.disabled).toBe(false);
+    expect(other.getAttribute('aria-disabled')).toBe('true');
+    expect(other.className).toContain('aria-disabled:opacity-50');
+    await userEvent.click(other);
+    expect(document.activeElement).toBe(other);
+    expect(screen.queryByRole('textbox', { name: 'New title for "Water the plants"' })).toBeNull();
+    expect(taskTitles()).toEqual(['Water the plants', 'editing: Buy oat milk and bread']);
+
+    save.finish(json({ task: { ...milk, title: 'Buy oat milk and bread' } }));
+    await waitFor(() => expect(taskTitles()).toEqual(['Water the plants', 'Buy oat milk and bread']));
+    expect(other.getAttribute('aria-disabled')).toBeNull();
+    await userEvent.click(other);
+    expect(editField('Water the plants').value).toBe('Water the plants');
+  });
 });
 
 describe('deleting a task', () => {
@@ -769,6 +823,95 @@ describe('deleting a task', () => {
       expect((screen.getByRole('checkbox', { name: 'Water the plants' }) as HTMLInputElement).checked).toBe(false),
     );
     expect(screen.getByText('Delete this task?')).toBeTruthy();
+  });
+
+  test('deleting waits for a pending completion change on the same task', async () => {
+    signedIn([plants, milk]);
+    const first = pending();
+    const second = pending();
+    reply('PATCH /api/tasks/1', first.response, second.response);
+    reply('DELETE /api/tasks/1', noContent());
+    render(<App />);
+    const checkbox = (await screen.findByRole('checkbox', { name: 'Buy oat milk' })) as HTMLInputElement;
+
+    // From the plain row: Delete is locked (but focusable) while the change is pending.
+    await userEvent.click(checkbox);
+    const remove = button('Delete "Buy oat milk"');
+    expect(remove.disabled).toBe(false);
+    expect(remove.getAttribute('aria-disabled')).toBe('true');
+    await userEvent.click(remove);
+    expect(document.activeElement).toBe(remove);
+    expect(screen.queryByText('Delete this task?')).toBeNull();
+    first.finish(json({ task: { ...milk, completed: true } }));
+    await waitFor(() => expect(checkbox.checked).toBe(true));
+    await waitFor(() => expect(remove.getAttribute('aria-disabled')).toBeNull());
+
+    // With the question open: Confirm is locked while a change started there is pending.
+    await userEvent.click(remove);
+    await userEvent.click(checkbox);
+    const confirm = button('Confirm deleting "Buy oat milk"');
+    expect(confirm.disabled).toBe(false);
+    expect(confirm.getAttribute('aria-disabled')).toBe('true');
+    await userEvent.click(confirm);
+    expect(document.activeElement).toBe(confirm);
+    expect(confirm.textContent).toBe('Confirm');
+    expect(callsTo('DELETE /api/tasks/1')).toHaveLength(0);
+
+    second.finish(json({ task: { ...milk, completed: false } }));
+    await waitFor(() => expect(confirm.getAttribute('aria-disabled')).toBeNull());
+    await userEvent.click(confirm);
+    await waitFor(() => expect(taskTitles()).toEqual(['Water the plants']));
+    expect(callsTo('DELETE /api/tasks/1')).toHaveLength(1);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  test('Escape in the question cancels it and returns focus to Delete, but not while deleting', async () => {
+    signedIn([plants, milk]);
+    const removal = pending();
+    reply('DELETE /api/tasks/1', removal.response);
+    render(<App />);
+    for (const control of ['Cancel deleting "Buy oat milk"', 'Confirm deleting "Buy oat milk"']) {
+      await userEvent.click(await screen.findByRole('button', { name: 'Delete "Buy oat milk"' }));
+      button(control).focus();
+      await userEvent.keyboard('{Escape}');
+      expect(screen.queryByText('Delete this task?')).toBeNull();
+      expect(document.activeElement).toBe(button('Delete "Buy oat milk"'));
+    }
+    expect(calls.filter((call) => call.method !== 'GET')).toEqual([]);
+
+    await userEvent.click(button('Delete "Buy oat milk"'));
+    const confirm = button('Confirm deleting "Buy oat milk"');
+    await userEvent.click(confirm);
+    await userEvent.keyboard('{Escape}');
+    button('Cancel deleting "Buy oat milk"').focus();
+    await userEvent.keyboard('{Escape}');
+    expect(screen.getByText('Delete this task?')).toBeTruthy();
+    removal.finish(noContent());
+    await waitFor(() => expect(taskTitles()).toEqual(['Water the plants']));
+  });
+
+  test('while a delete is pending, Delete on other rows is visibly locked and ignored', async () => {
+    signedIn([plants, milk]);
+    const removal = pending();
+    reply('DELETE /api/tasks/1', removal.response);
+    render(<App />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Delete "Buy oat milk"' }));
+    expect(button('Delete "Water the plants"').getAttribute('aria-disabled')).toBeNull();
+    await userEvent.click(button('Confirm deleting "Buy oat milk"'));
+
+    const other = button('Delete "Water the plants"');
+    expect(other.disabled).toBe(false);
+    expect(other.getAttribute('aria-disabled')).toBe('true');
+    expect(other.className).toContain('aria-disabled:opacity-50');
+    await userEvent.click(other);
+    expect(document.activeElement).toBe(other);
+    expect(screen.queryByRole('group', { name: 'Delete "Water the plants"?' })).toBeNull();
+
+    removal.finish(noContent());
+    await waitFor(() => expect(taskTitles()).toEqual(['Water the plants']));
+    expect(other.getAttribute('aria-disabled')).toBeNull();
+    await userEvent.click(other);
+    expect(screen.getByRole('group', { name: 'Delete "Water the plants"?' })).toBeTruthy();
   });
 });
 

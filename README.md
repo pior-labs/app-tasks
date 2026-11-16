@@ -118,22 +118,29 @@ Each row has an Edit and a Delete control next to its checkbox, each named
 after the task (for example `Edit "Buy oat milk"`).
 
 - Edit turns the title into a text field with Save and Cancel, one row at a
-  time. Enter saves and Escape cancels. The field applies the same title rules
+  time. Enter saves, and Escape anywhere in the field, Save or Cancel cancels.
+  The field applies the same title rules
   as the add form and shows the message under the field. A title that is
   unchanged after trimming is not sent. The row shows the new title only after
   the server stored it; if saving fails the row stays in edit mode with the
-  typed text and an error. While a row is edited its checkbox is hidden, and
-  Edit waits while a completion change for that task is pending.
+  typed text and an error. While a row is edited its checkbox is hidden.
 - Delete asks in the row ("Delete this task?" with Confirm and Cancel) instead
-  of using a browser dialog. Focus lands on Cancel. The row disappears only
+  of using a browser dialog. Focus lands on Cancel, and Escape inside the
+  question cancels it like Cancel does. The row disappears only
   after the server deleted the task; if that fails the row and the question
   stay and an error is shown. Deleting the last task shows the empty state.
 - Focus is moved on purpose: into the field when editing starts, back to the
   row's Edit control after saving or cancelling, back to Delete after
   cancelling a delete, and after a delete to the first control of the next row,
   else the previous row, else the new-task field.
+- Edit and Delete wait while a completion change for that task is pending, and
+  so does Confirm. While a rename is being saved, Edit on the other rows waits;
+  while a delete is pending, Delete on the other rows waits. A control that is
+  waiting is marked `aria-disabled` and dimmed, and keeps keyboard focus.
 - If the server answers 404 to a rename or delete (the task was removed
   elsewhere), the row is removed and a notice says the task no longer exists.
+  A completion change answered with 404 for a task this page has already
+  removed shows no error.
 
 ## Verification
 
@@ -249,7 +256,7 @@ databases; it has not been applied to `tasks_dev` or production, and the task
 feature has not been checked in a real browser or against hosted SSO.
 
 Rename and delete verification evidence: typecheck, production builds, the API
-tests (eight auth, fifteen task), 39 web component tests and the eight
+tests (eight auth, fifteen task), 44 web component tests and the eight
 end-to-end tests passed locally on Node 24 against disposable databases, with
 the end-to-end suite in headless Chromium using fixture sign-in. The change
 adds no migration. It has not been checked against hosted SSO or a deployed

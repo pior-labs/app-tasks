@@ -172,6 +172,15 @@ test('cancels a rename with Escape and with Cancel, sending nothing', async ({ p
   await expect(checkbox(page, 'Cancel: keep this title')).toBeVisible();
   await expect(editButton(page, 'Cancel: keep this title')).toBeFocused();
 
+  // Escape also cancels from the form's buttons, not only from the field.
+  await page.keyboard.press('Enter');
+  await editField(page, 'Cancel: keep this title').fill('Cancel: thrown away from a button');
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(checkbox(page, 'Cancel: keep this title')).toBeVisible();
+  await expect(editButton(page, 'Cancel: keep this title')).toBeFocused();
+
   // An unchanged title is not sent either.
   await editButton(page, 'Cancel: keep this title').click();
   await page.keyboard.press('Enter');
@@ -218,6 +227,13 @@ test('deletes a task after confirmation; cancelling keeps it', async ({ page }) 
   await page.keyboard.press('Enter');
   await expect(deleteButton(page, 'Delete: this one')).toBeFocused();
   await expect(checkbox(page, 'Delete: this one')).toBeVisible();
+  // Escape closes the question too, also from Confirm.
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('Shift+Tab');
+  await expect(confirm).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(page.getByText('Delete this task?')).toHaveCount(0);
+  await expect(deleteButton(page, 'Delete: this one')).toBeFocused();
   await page.keyboard.press('Enter');
   await page.keyboard.press('Shift+Tab');
   await expect(confirm).toBeFocused();

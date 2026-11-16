@@ -14,6 +14,10 @@ type Props = {
   mode: RowMode;
   // A completion change for this task is waiting for the server.
   updating: boolean;
+  // Edit or Delete would be ignored now: another row is saving or deleting, or
+  // a completion change for this task is pending.
+  editLocked: boolean;
+  deleteLocked: boolean;
   rowRef: Ref<HTMLLIElement>;
   onToggle: (completed: boolean) => void;
   onStartEdit: () => void;
@@ -23,6 +27,15 @@ type Props = {
   onStartDelete: () => void;
   onConfirmDelete: () => void;
   onCancelDelete: () => void;
+};
+
+// Escape anywhere in the edit form or the delete question cancels it. Tasks
+// ignores the cancel while that row's request is pending, as for Cancel.
+const escapeTo = (cancel: () => void) => (event: KeyboardEvent) => {
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    cancel();
+  }
 };
 
 const rowButton =
@@ -36,6 +49,8 @@ export function TaskRow({
   task,
   mode,
   updating,
+  editLocked,
+  deleteLocked,
   rowRef,
   onToggle,
   onStartEdit,
@@ -52,21 +67,19 @@ export function TaskRow({
       event.preventDefault();
       onSave();
     };
-    const keyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        onCancelEdit();
-      }
-    };
     return (
       <li ref={rowRef} className="px-5 py-3">
-        <form onSubmit={submit} noValidate className="flex flex-wrap items-center justify-end gap-2">
+        <form
+          onSubmit={submit}
+          onKeyDown={escapeTo(onCancelEdit)}
+          noValidate
+          className="flex flex-wrap items-center justify-end gap-2"
+        >
           <input
             data-action="edit-title"
             aria-label={`New title for "${task.title}"`}
             value={mode.text}
             onChange={(event) => onEditText(event.target.value)}
-            onKeyDown={keyDown}
             readOnly={mode.saving}
             autoComplete="off"
             aria-invalid={mode.error ? true : undefined}
@@ -116,13 +129,18 @@ export function TaskRow({
         </span>
       </label>
       {mode.kind === 'confirm-delete' ? (
-        <div role="group" aria-label={`Delete "${task.title}"?`} className="flex items-center gap-2">
+        <div
+          role="group"
+          aria-label={`Delete "${task.title}"?`}
+          onKeyDown={escapeTo(onCancelDelete)}
+          className="flex items-center gap-2"
+        >
           <span className="text-sm">Delete this task?</span>
           <button
             type="button"
             data-action="confirm-delete"
             aria-label={`Confirm deleting "${task.title}"`}
-            aria-disabled={deleting || undefined}
+            aria-disabled={deleting || updating || undefined}
             onClick={onConfirmDelete}
             className={`${rowButton} border-destructive text-destructive`}
           >
@@ -145,7 +163,7 @@ export function TaskRow({
             type="button"
             data-action="edit"
             aria-label={`Edit "${task.title}"`}
-            aria-disabled={updating || undefined}
+            aria-disabled={editLocked || undefined}
             onClick={onStartEdit}
             className={rowButton}
           >
@@ -155,6 +173,7 @@ export function TaskRow({
             type="button"
             data-action="delete"
             aria-label={`Delete "${task.title}"`}
+            aria-disabled={deleteLocked || undefined}
             onClick={onStartDelete}
             className={rowButton}
           >
