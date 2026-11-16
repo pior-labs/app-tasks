@@ -51,6 +51,18 @@ importers:
         specifier: ^5.7.3
         version: 5.9.3
 
+  packages/e2e:
+    devDependencies:
+      '@playwright/test':
+        specifier: ^1.65.1
+        version: 1.65.1
+      '@types/node':
+        specifier: ^22.13.4
+        version: 22.20.5
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
   packages/web:
     dependencies:
       '@pior-labs/design-system':
@@ -798,6 +810,11 @@ packages:
     resolution: {integrity: sha512-vfvt+Z3UjMaE87tZDe32lyJq3poxQu5LmPjxBXxu8DhtrIhPQUJPERfrP21Z2VFfvZ35gIUdF7XUWG3UjHIgzw==, tarball: https://npm.pkg.github.com/download/@pior-labs/design-system/1.0.1/45fbb033b15a21d78023c55bd63a731f75ac28a6}
     peerDependencies:
       react: ^19.0.0
+
+  '@playwright/test@1.65.1':
+    resolution: {integrity: sha512-y+NCIRm2LvY4slUVWvGh1nujJ8RF/hEisIsq2mtUPgdQC4L701bq5hZGMhrpeXjACvwvO9tj5dJqhvM6TP9lbw==}
+    engines: {node: '>=20'}
+    hasBin: true
 
   '@rolldown/pluginutils@1.0.0-beta.27':
     resolution: {integrity: sha512-+d0F4MKMCbeVUJwG96uQ4SgAznZNSq93I3V+9NHA4OpvqG8mRCpGdKmK8l/dl02h2CCDHwW2FqilnTyDcAnqjA==}
@@ -1624,6 +1641,16 @@ packages:
     resolution: {integrity: sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA==}
     engines: {node: '>=12'}
 
+  playwright-core@1.65.1:
+    resolution: {integrity: sha512-hqPpz7blSMPxWVdoeE1yiBSzXsKiVOd2k+kjCvmUywD2GPO2Dd9HfcWnq9NN0GHbNZDFgZ9JfBFr+X5/BLo0qw==}
+    engines: {node: '>=20'}
+    hasBin: true
+
+  playwright@1.65.1:
+    resolution: {integrity: sha512-vJ1FuoOrNwOKHUIVEvSt3jT1L+wjjDpwhwIstKtfvTh8XIG4FG4bIFuvNdMxi81LGfAhUgUZleVFaOLY4RIUUw==}
+    engines: {node: '>=20'}
+    hasBin: true
+
   postcss@8.5.29:
     resolution: {integrity: sha512-49cGhUbXj8Qenv0iTMxA1cFBzxXoctpC9Ujd77t1WcbJIr6nF/eI7g/8MgxrYldFRuAXvja7xQRwavoW7kgrxQ==}
     engines: {node: ^10 || ^12 || >=14}
@@ -2367,6 +2394,10 @@ snapshots:
     dependencies:
       react: 19.3.0
 
+  '@playwright/test@1.65.1':
+    dependencies:
+      playwright: 1.65.1
+
   '@rolldown/pluginutils@1.0.0-beta.27': {}
 
   '@rollup/rollup-android-arm-eabi@4.64.3':
@@ -3024,6 +3055,12 @@ snapshots:
   picocolors@1.1.1: {}
 
   picomatch@4.0.7: {}
+
+  playwright-core@1.65.1: {}
+
+  playwright@1.65.1:
+    dependencies:
+      playwright-core: 1.65.1
 
   postcss@8.5.29:
     dependencies:
