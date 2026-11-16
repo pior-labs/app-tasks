@@ -46,6 +46,9 @@ gh auth refresh --hostname github.com --scopes read:packages
 export GITHUB_TOKEN="$(gh auth token)"
 ```
 
+Then add `//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}` to your user-level `~/.npmrc` (current pnpm ignores credentials in the committed `.npmrc`).
+The workspace setup script supplies the token itself during setup.
+
 A repository-capable login alone may lack `read:packages`. The new repository's
 CI has successfully installed the published design system with its Actions token.
 
