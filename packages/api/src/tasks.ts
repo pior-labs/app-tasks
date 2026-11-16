@@ -19,31 +19,34 @@ const MAX_TASK_ID = 2_147_483_647; // tasks.id is a 32-bit serial.
 // The web form applies the same rules in packages/web/src/Tasks.tsx.
 const VISIBLE_CHARACTER = /[^\p{White_Space}\p{Cc}\p{Default_Ignorable_Code_Point}]/u;
 
-const createTaskBody = z.object(
-  {
-    title: z
-      .string({ error: 'A task title is required and must be text.' })
-      .trim()
-      .refine((title) => VISIBLE_CHARACTER.test(title), {
-        error: 'Enter a task title.',
-        abort: true,
-      })
-      // PostgreSQL text cannot store U+0000, so reject it here instead of failing the insert.
-      .refine((title) => !title.includes('\u0000'), {
-        error: 'Task titles cannot contain a null character.',
-        abort: true,
-      })
-      // zod counts Unicode code points here, so an emoji is one character. The
-      // web form counts the same way; tests on both sides pin the boundary.
-      .max(MAX_TITLE_LENGTH, {
-        error: `Task titles can be at most ${MAX_TITLE_LENGTH} characters.`,
-      }),
-  },
-  { error: 'Send a JSON object with a title.' },
-);
+// The one definition of a valid title, used by both create and rename.
+const taskTitle = z
+  .string({ error: 'A task title is required and must be text.' })
+  .trim()
+  .refine((title) => VISIBLE_CHARACTER.test(title), {
+    error: 'Enter a task title.',
+    abort: true,
+  })
+  // PostgreSQL text cannot store U+0000, so reject it here instead of failing the write.
+  .refine((title) => !title.includes('\u0000'), {
+    error: 'Task titles cannot contain a null character.',
+    abort: true,
+  })
+  // zod counts Unicode code points here, so an emoji is one character. The
+  // web form counts the same way; tests on both sides pin the boundary.
+  .max(MAX_TITLE_LENGTH, {
+    error: `Task titles can be at most ${MAX_TITLE_LENGTH} characters.`,
+  });
+
+const createTaskBody = z.object({ title: taskTitle }, { error: 'Send a JSON object with a title.' });
+// Either field may be sent alone. Unknown keys (such as an owner or an id) are dropped.
+const UPDATE_FIELDS_MESSAGE = 'Send a JSON object with a title, a completed value, or both.';
 const updateTaskBody = z.object(
-  { completed: z.boolean({ error: 'Completed must be true or false.' }) },
-  { error: 'Send a JSON object with a completed value.' },
+  {
+    title: taskTitle.optional(),
+    completed: z.boolean({ error: 'Completed must be true or false.' }).optional(),
+  },
+  { error: UPDATE_FIELDS_MESSAGE },
 );
 
 // Never expose user_id: the owner is implied by the session.
@@ -68,6 +71,18 @@ function sessionUserId(c: Context<AppEnv>): number {
   const id = Number(c.get('user').id);
   if (!Number.isSafeInteger(id)) throw new Error('Session user id is not an integer');
   return id;
+}
+
+const invalidTaskId = {
+  error: 'invalid_task_id',
+  message: 'The task id must be a positive whole number.',
+};
+const taskNotFound = { error: 'task_not_found', message: 'That task could not be found.' };
+
+// A route id is a positive decimal integer. Ids beyond the column range are
+// well formed but cannot exist, so callers answer those with "not found".
+function taskId(raw: string): number | null {
+  return /^[1-9]\d{0,15}$/.test(raw) ? Number(raw) : null;
 }
 
 export function createTaskRoutes(db: AppDatabase, appOrigin: string) {
@@ -113,35 +128,58 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string) {
   });
 
   routes.patch('/:id', async (c) => {
-    const rawId = c.req.param('id');
-    if (!/^[1-9]\d{0,15}$/.test(rawId)) {
-      return c.json(
-        { error: 'invalid_task_id', message: 'The task id must be a positive whole number.' },
-        400,
-      );
-    }
+    const id = taskId(c.req.param('id'));
+    if (id === null) return c.json(invalidTaskId, 400);
     const body = await readJson(c);
     if (body === malformedJson) {
       return c.json({ error: 'invalid_json', message: 'The request body must be valid JSON.' }, 400);
     }
     const parsed = updateTaskBody.safeParse(body);
     if (!parsed.success) {
-      return c.json({ error: 'invalid_completed', message: parsed.error.issues[0].message }, 400);
+      const [issue] = parsed.error.issues;
+      const error =
+        issue.path[0] === 'title'
+          ? 'invalid_title'
+          : issue.path[0] === 'completed'
+            ? 'invalid_completed'
+            : 'invalid_update';
+      return c.json({ error, message: issue.message }, 400);
     }
-    const id = Number(rawId);
+    const { title, completed } = parsed.data;
+    if (title === undefined && completed === undefined) {
+      return c.json({ error: 'invalid_update', message: UPDATE_FIELDS_MESSAGE }, 400);
+    }
     // Unknown ids and other users' tasks are indistinguishable to the caller.
     const [task] =
       id > MAX_TASK_ID
         ? []
         : await db
             .update(tasks)
-            .set({ completed: parsed.data.completed, updatedAt: sql`now()` })
+            .set({
+              ...(title === undefined ? {} : { title }),
+              ...(completed === undefined ? {} : { completed }),
+              updatedAt: sql`now()`,
+            })
             .where(and(eq(tasks.id, id), eq(tasks.userId, sessionUserId(c))))
             .returning(taskColumns);
-    if (!task) {
-      return c.json({ error: 'task_not_found', message: 'That task could not be found.' }, 404);
-    }
+    if (!task) return c.json(taskNotFound, 404);
     return c.json({ task });
+  });
+
+  routes.delete('/:id', async (c) => {
+    const id = taskId(c.req.param('id'));
+    if (id === null) return c.json(invalidTaskId, 400);
+    // The owner filter is part of the delete itself, so a missing, already
+    // deleted or foreign task all end the same way.
+    const [deleted] =
+      id > MAX_TASK_ID
+        ? []
+        : await db
+            .delete(tasks)
+            .where(and(eq(tasks.id, id), eq(tasks.userId, sessionUserId(c))))
+            .returning({ id: tasks.id });
+    if (!deleted) return c.json(taskNotFound, 404);
+    return c.body(null, 204);
   });
 
   return routes;

@@ -41,6 +41,20 @@ jobs:
         run: pnpm test
       - name: Build
         run: pnpm build
+      - name: Install Chromium for end-to-end tests
+        run: pnpm --filter @tasks/e2e exec playwright install --with-deps --only-shell chromium
+      - name: End-to-end tests
+        run: pnpm test:e2e
+      - name: Save end-to-end failure report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-report-${{ github.run_attempt }}
+          path: |
+            packages/e2e/playwright-report
+            packages/e2e/test-results
+          if-no-files-found: ignore
+          retention-days: 7
 
   images:
     name: Build release images

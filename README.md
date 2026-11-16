@@ -1,8 +1,9 @@
 # Tasks
 
-Pior Labs Tasks. A signed-in user can create tasks, see their saved tasks, and
-mark a task complete or clear it again. Editing, deletion, notes, projects,
-priorities and due dates are not implemented.
+Pior Labs Tasks. A signed-in user can create tasks, see their saved tasks,
+mark a task complete or clear it again, rename a task and delete a task.
+Deletion is permanent: there is no archive or undo. Notes, projects, priorities
+and due dates are not implemented.
 
 React 19/Vite, Hono, PostgreSQL/Drizzle, pnpm 10.8.1, published
 `@pior-labs/design-system`, and Better Auth 1.6.20 application sessions.
@@ -78,16 +79,27 @@ without a valid session.
 | --- | --- | --- |
 | `GET /api/tasks` | none | 200 `{ "tasks": [...] }`, the session user's tasks only, newest first |
 | `POST /api/tasks` | `{ "title": string }` | 201 `{ "task": {...} }`; the title is trimmed, 1 to 200 characters |
-| `PATCH /api/tasks/:id` | `{ "completed": boolean }` | 200 `{ "task": {...} }` |
+| `PATCH /api/tasks/:id` | `{ "title": string }`, `{ "completed": boolean }`, or both | 200 `{ "task": {...} }` with the stored task |
+| `DELETE /api/tasks/:id` | none | 204 with no body; the task is removed permanently |
 
 A task is `{ id, title, completed, createdAt, updatedAt }`. Errors are
 `{ "error": code, "message": text }` with stable codes: 400 `invalid_json`,
-`invalid_title`, `invalid_completed` or `invalid_task_id`; 403
-`forbidden_origin` when a `POST`/`PATCH` does not carry the application origin
-(`BETTER_AUTH_URL`) in `Origin`; 404 `task_not_found` for an id that does not
-exist or belongs to another user (the two cases are indistinguishable).
+`invalid_title`, `invalid_completed`, `invalid_update` or `invalid_task_id`; 403
+`forbidden_origin` when a `POST`/`PATCH`/`DELETE` does not carry the application
+origin (`BETTER_AUTH_URL`) in `Origin`; 404 `task_not_found` for an id that does
+not exist, was already deleted or belongs to another user (the cases are
+indistinguishable).
 
-Title rules, applied by the API and mirrored by the form: the title is trimmed;
+`PATCH` changes only the fields that are sent. A title follows the same rules
+as on create, from one shared definition in `packages/api/src/tasks.ts`. A body
+with neither `title` nor `completed` (an empty object, or anything that is not
+an object) is 400 `invalid_update`; before renaming existed such a body was
+answered with `invalid_completed`. If either field is invalid nothing is
+changed. Other fields, such as `userId` or `id`, are ignored. Every successful
+update sets `updatedAt`; `createdAt`, and so the list order, never changes.
+Both writes filter on the session user in the statement that changes the row.
+
+Title rules, applied by the API and mirrored by the forms: the title is trimmed;
 a title with nothing visible (only whitespace, control characters or invisible
 characters such as a zero width space) is rejected like an empty one; a title
 containing a null character is rejected because PostgreSQL cannot store it; the
@@ -102,6 +114,34 @@ and after a task is added focus returns to the title field. A 401 from a task
 request returns the page to the signed-out view, except after an explicit
 sign-out.
 
+Each row has an Edit and a Delete control next to its checkbox, each named
+after the task (for example `Edit "Buy oat milk"`).
+
+- Edit turns the title into a text field with Save and Cancel, one row at a
+  time. Enter saves, and Escape anywhere in the field, Save or Cancel cancels.
+  The field applies the same title rules
+  as the add form and shows the message under the field. A title that is
+  unchanged after trimming is not sent. The row shows the new title only after
+  the server stored it; if saving fails the row stays in edit mode with the
+  typed text and an error. While a row is edited its checkbox is hidden.
+- Delete asks in the row ("Delete this task?" with Confirm and Cancel) instead
+  of using a browser dialog. Focus lands on Cancel, and Escape inside the
+  question cancels it like Cancel does. The row disappears only
+  after the server deleted the task; if that fails the row and the question
+  stay and an error is shown. Deleting the last task shows the empty state.
+- Focus is moved on purpose: into the field when editing starts, back to the
+  row's Edit control after saving or cancelling, back to Delete after
+  cancelling a delete, and after a delete to the first control of the next row,
+  else the previous row, else the new-task field.
+- Edit and Delete wait while a completion change for that task is pending, and
+  so does Confirm. While a rename is being saved, Edit on the other rows waits;
+  while a delete is pending, Delete on the other rows waits. A control that is
+  waiting is marked `aria-disabled` and dimmed, and keeps keyboard focus.
+- If the server answers 404 to a rename or delete (the task was removed
+  elsewhere), the row is removed and a notice says the task no longer exists.
+  A completion change answered with 404 for a task this page has already
+  removed shows no error.
+
 ## Verification
 
 ```sh
@@ -112,25 +152,52 @@ pnpm build
 # Without it, the suite creates a disposable PostgreSQL 16 Docker container.
 pnpm test
 pnpm db:migrate
+# Browser end-to-end suite, see below. Not part of `pnpm test` or `pnpm verify`.
+pnpm --filter @tasks/e2e exec playwright install chromium
+pnpm test:e2e
 ```
 
 `pnpm test` runs the API integration tests and then the web component tests;
-`pnpm verify` runs typecheck, tests and build.
+`pnpm verify` runs typecheck, tests and build. Neither needs a browser.
 
 Each API test file creates/migrates/drops its own unique disposable
 `tasks_test_*` database. They never truncate the development database. Auth
 tests exercise PKCE callbacks, state and issuer checks, replay, invalid profiles,
 session persistence/renewal/expiry, cookie isolation, CSRF and sign-out using a
 fixture provider. Task tests cover create/list, title validation, completing and
-clearing, persistence across sign-out, a new session and a second app instance
+clearing, renaming (with the create title cases reused against `PATCH`),
+deleting, persistence across sign-out, a new session and a second app instance
 on the same database, per-user isolation, session enforcement and the origin
 check. They do not prove hosted SSO.
 
 Web component tests (`packages/web/src/*.test.tsx`) use Vitest, jsdom and
 Testing Library with `fetch` stubbed. They cover the signed-out view, the task
-list states, creating and completing tasks, failures and 401 handling. They do
-not run a real browser or the real API. CI runs typechecks, API and web tests
-and production builds.
+list states, creating, completing, renaming and deleting tasks, failures,
+pending states, focus targets and 401 handling. They do not run a real browser
+or the real API.
+
+The end-to-end suite (`packages/e2e`, Playwright, headless Chromium) drives the
+real application in a browser. `pnpm test:e2e` starts the Vite dev server on
+port 5273 and the real API on port 3173 (`packages/api/test/e2e-server.ts`), so
+it does not collide with, or attach to, an application running on 5173 and
+3000. Set `E2E_WEB_PORT` or `E2E_API_PORT` to use other ports. The API runs on
+the same test fixture as the API tests: a new disposable `tasks_test_*`
+database (Docker, or `TEST_DATABASE_URL`) and the fixture SSO provider, where
+the suite signs in by following the "Household One" or "Household Two" link.
+It never uses `tasks_dev`, `.env.local` credentials or hosted SSO, and the
+database is dropped when the run ends. The suite covers sign-in, create,
+complete, rename by keyboard and by pointer, cancelling a rename, delete with
+confirmation, cancelling a delete, persistence across reloads, focus after each
+action, a task removed in another tab, an ended session, and that a second user
+sees none of the first user's tasks. `@playwright/test` is a dev dependency of
+`@tasks/e2e` only, so it is installed neither with the API or web package nor
+in either image. The first run needs the browser download shown above; on a
+machine without Chromium's system libraries add `--with-deps`, which needs
+root. Failures leave a trace and a screenshot under
+`packages/e2e/test-results/`.
+
+CI runs typechecks, API and web tests, production builds and then the
+end-to-end suite.
 
 Vitest is an optional peer dependency of Better Auth. The root `pnpm.overrides`
 entry `better-auth>vitest` keeps the web test tooling out of the API's
@@ -187,6 +254,13 @@ disposable-database API tests (eight auth, seven task) and fifteen web component
 tests passed locally. Migration `0001` was applied only to disposable test
 databases; it has not been applied to `tasks_dev` or production, and the task
 feature has not been checked in a real browser or against hosted SSO.
+
+Rename and delete verification evidence: typecheck, production builds, the API
+tests (eight auth, fifteen task), 44 web component tests and the eight
+end-to-end tests passed locally on Node 24 against disposable databases, with
+the end-to-end suite in headless Chromium using fixture sign-in. The change
+adds no migration. It has not been checked against hosted SSO or a deployed
+site.
 
 Foundation verification evidence: migration `0000` applied to `tasks_dev`; typecheck,
 production build and eight disposable-database auth tests passed. Frontend and
