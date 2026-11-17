@@ -189,10 +189,10 @@ export function TaskRow({
             {overdue && (
               <>
                 <span className="font-semibold">Overdue</span>
-                <span className="sr-only">,</span>{' '}
+                {' \u00B7 '}
               </>
             )}
-            {dueLabel(task.dueDate, today)}
+            <span>{dueLabel(task.dueDate, today)}</span>
           </p>
         )}
       </div>

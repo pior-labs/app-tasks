@@ -1275,10 +1275,10 @@ describe('due dates', () => {
 
     // The overdue rows say so in text, in the destructive colour, and the
     // checkbox description includes it.
-    expect(label('Was yesterday').textContent).toBe('Overdue, Due yesterday');
+    expect(label('Was yesterday').textContent).toBe('Overdue \u00B7 Due yesterday');
     expect(label('Was yesterday').className).toContain('text-destructive');
     expect(within(label('Was yesterday')).getByText('Overdue')).toBeTruthy();
-    expect(label('Last year').textContent).toMatch(/^Overdue, Due .*2025$/);
+    expect(label('Last year').textContent).toMatch(/^Overdue \u00B7 Due .*2025$/);
     // Not overdue: no word, no destructive colour.
     for (const [title, text] of [
       ['Is today', 'Due today'],
@@ -1620,7 +1620,7 @@ describe('due dates', () => {
     });
     expect(rowTitles(group('Overdue'))).toEqual(['Bins out']);
     // Two days later: a date, not "yesterday".
-    expect(document.getElementById('task-1-due')!.textContent).toMatch(/^Overdue, Due \S.*20$/);
+    expect(document.getElementById('task-1-due')!.textContent).toMatch(/^Overdue \u00B7 Due \S.*20$/);
     expect(callsTo('GET /api/tasks')).toHaveLength(1);
   });
 });
