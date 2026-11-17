@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
+import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { createApp } from '../src/app.js';
 import { createAuth } from '../src/auth.js';
@@ -7,7 +8,14 @@ import * as schema from '../src/db/schema.js';
 import { createFixture } from './fixture.js';
 import { appOrigin, signIn, signOut } from './session.js';
 
-type Task = { id: number; title: string; completed: boolean; createdAt: string; updatedAt: string };
+type Task = {
+  id: number;
+  title: string;
+  completed: boolean;
+  dueDate: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
 type App = { request: Awaited<ReturnType<typeof createFixture>>['app']['request'] };
 
 let fixture: Awaited<ReturnType<typeof createFixture>>;
@@ -86,7 +94,14 @@ test('a signed-in user creates tasks and lists them newest first (AC-1)', async 
   assert.equal(first.title, 'Buy oat milk');
   assert.equal(first.completed, false);
   assert.ok(Number.isInteger(first.id));
-  assert.deepEqual(Object.keys(first).sort(), ['completed', 'createdAt', 'id', 'title', 'updatedAt']);
+  assert.deepEqual(Object.keys(first).sort(), [
+    'completed',
+    'createdAt',
+    'dueDate',
+    'id',
+    'title',
+    'updatedAt',
+  ]);
 
   // Surrounding whitespace is trimmed before storing.
   const second = await createTask(session, '   Water the plants \n');
@@ -448,6 +463,7 @@ test('a task can be renamed; the title is trimmed and nothing else changes (edit
   assert.deepEqual(Object.keys(renamedTask).sort(), [
     'completed',
     'createdAt',
+    'dueDate',
     'id',
     'title',
     'updatedAt',
@@ -584,9 +600,9 @@ test('rename applies the create title rules and rejects an empty update (edit AC
     assert.equal(await rejected({ title }), (await created.json()).message);
   }
 
-  // Neither field: a distinct, stable code.
+  // None of the fields: a distinct, stable code, and the message names all three.
   for (const body of [{}, { name: 'wrong key' }, { userId: 1, id: 2 }, [], null, '"text"', '42']) {
-    assert.match(await rejected(body, 'invalid_update'), /title.*completed/);
+    assert.match(await rejected(body, 'invalid_update'), /title.*completed.*due date/);
   }
   await rejected('{"title": "unterminated', 'invalid_json');
   for (const id of ['abc', '0', '-1', '1.5', '1e3', `${task.id}abc`]) {
@@ -769,4 +785,316 @@ test('rename and delete require a valid session and the application origin (edit
 
   assert.deepEqual(await storedRow(task.id), before);
   assert.equal(await taskRowCount(), count);
+});
+
+// Due dates. The criteria named below are those of the due dates task.
+
+// The stored due date as PostgreSQL prints it, so no client-side parsing can
+// hide a shifted day.
+async function storedDueDate(id: number) {
+  const [row] = await fixture.client`select due_date::text as due_date from tasks where id = ${id}`;
+  return row.due_date as string | null;
+}
+async function createWithDueDate(session: string, title: string, dueDate: unknown) {
+  const response = await send(session, 'POST', '/api/tasks', { title, dueDate });
+  assert.equal(response.status, 201);
+  return (await response.json()).task as Task;
+}
+
+test('a due date is stored and returned exactly on create, with none by default (due AC-2)', async () => {
+  const session = await signIn(fixture, 0);
+  const plain = await createTask(session, 'Due: no date given');
+  assert.equal(plain.dueDate, null);
+  assert.equal(await storedDueDate(plain.id), null);
+  const explicitNull = await createWithDueDate(session, 'Due: null date', null);
+  assert.equal(explicitNull.dueDate, null);
+  assert.equal(await storedDueDate(explicitNull.id), null);
+
+  // Dates near both ends of a day in every timezone, both range boundaries, a
+  // leap day and a past date are stored and returned as the same text.
+  const dates = ['2026-11-20', '2026-01-01', '2026-12-31', '2025-01-01', '2100-12-31', '2028-02-29'];
+  const created: Task[] = [];
+  for (const dueDate of dates) {
+    const task = await createWithDueDate(session, `Due: ${dueDate}`, dueDate);
+    assert.equal(task.dueDate, dueDate);
+    assert.equal(task.completed, false);
+    assert.equal(await storedDueDate(task.id), dueDate);
+    created.push(task);
+  }
+
+  // The list returns dueDate on every task, exactly as stored, still newest first.
+  const listed = await listTasks(session);
+  for (const task of listed) assert.ok('dueDate' in task);
+  const mine = listed.filter((task) => [plain, explicitNull, ...created].some((item) => item.id === task.id));
+  assert.deepEqual(
+    mine.map((task) => task.id),
+    [...created].reverse().map((task) => task.id).concat([explicitNull.id, plain.id]),
+  );
+  for (const task of created) {
+    assert.deepEqual(
+      listed.find((item) => item.id === task.id),
+      task,
+    );
+  }
+});
+
+test('PATCH sets, changes and removes a due date, alone or with other fields (due AC-2)', async () => {
+  const session = await signIn(fixture, 0);
+  const older = await createTask(session, 'Due patch: older');
+  const task = await createTask(session, 'Due patch: target');
+  const newer = await createTask(session, 'Due patch: newer');
+  const orderBefore = (await listTasks(session)).map((item) => item.id);
+  let previous = await storedRow(task.id);
+
+  // Each step changes only what it sends and advances updatedAt.
+  const steps: { body: Record<string, unknown>; expected: Partial<Task> }[] = [
+    { body: { dueDate: '2026-11-20' }, expected: { dueDate: '2026-11-20' } },
+    { body: { dueDate: '2027-03-01' }, expected: { dueDate: '2027-03-01' } },
+    { body: { dueDate: null }, expected: { dueDate: null } },
+    {
+      body: { title: ' Due patch: renamed ', dueDate: '2026-12-24' },
+      expected: { title: 'Due patch: renamed', dueDate: '2026-12-24' },
+    },
+    { body: { completed: true, dueDate: '2025-06-30' }, expected: { completed: true, dueDate: '2025-06-30' } },
+    {
+      body: { title: 'Due patch: all three', completed: false, dueDate: null },
+      expected: { title: 'Due patch: all three', completed: false, dueDate: null },
+    },
+    { body: { dueDate: '2026-11-21' }, expected: { dueDate: '2026-11-21' } },
+    // A rename or a completion change without dueDate leaves the date alone.
+    { body: { title: 'Due patch: keeps date' }, expected: { title: 'Due patch: keeps date', dueDate: '2026-11-21' } },
+    { body: { completed: true }, expected: { completed: true, dueDate: '2026-11-21' } },
+  ];
+  let current: Task = task;
+  for (const { body, expected } of steps) {
+    const response = await send(session, 'PATCH', `/api/tasks/${task.id}`, body);
+    assert.equal(response.status, 200, JSON.stringify(body));
+    const updated: Task = (await response.json()).task;
+    assert.deepEqual(
+      { id: updated.id, title: updated.title, completed: updated.completed, dueDate: updated.dueDate },
+      {
+        id: task.id,
+        title: current.title,
+        completed: current.completed,
+        dueDate: current.dueDate,
+        ...expected,
+      },
+    );
+    assert.equal(updated.createdAt, task.createdAt);
+    const row = await storedRow(task.id);
+    assert.ok(row!.updated_epoch > previous!.updated_epoch);
+    assert.equal(row!.created_at, previous!.created_at);
+    assert.equal(row!.user_id, previous!.user_id);
+    assert.equal(await storedDueDate(task.id), updated.dueDate);
+    previous = row;
+    current = updated;
+  }
+
+  // List order is unchanged and the list agrees with the stored row.
+  const listed = await listTasks(session);
+  assert.deepEqual(
+    listed.map((item) => item.id),
+    orderBefore,
+  );
+  assert.deepEqual(
+    listed.find((item) => item.id === task.id),
+    current,
+  );
+  assert.deepEqual(
+    listed.find((item) => item.id === older.id),
+    older,
+  );
+  assert.deepEqual(
+    listed.find((item) => item.id === newer.id),
+    newer,
+  );
+});
+
+test('the day never shifts with the process timezone (due AC-2)', async () => {
+  // This file also runs with TZ=Pacific/Auckland (see the README); the stored
+  // text and the response must agree whatever the process timezone is.
+  const session = await signIn(fixture, 0);
+  const task = await createWithDueDate(session, 'Due: timezone check', '2026-11-20');
+  assert.equal(task.dueDate, '2026-11-20');
+  const listed = (await listTasks(session)).find((item) => item.id === task.id);
+  assert.equal(listed?.dueDate, '2026-11-20');
+  const patched = await send(session, 'PATCH', `/api/tasks/${task.id}`, { dueDate: '2027-01-01' });
+  assert.equal((await patched.json()).task.dueDate, '2027-01-01');
+  assert.equal(await storedDueDate(task.id), '2027-01-01');
+  // Reading through Drizzle, as the routes do, gives the same text.
+  const [row] = await drizzle(fixture.client, { schema })
+    .select({ dueDate: schema.tasks.dueDate })
+    .from(schema.tasks)
+    .where(eq(schema.tasks.id, task.id));
+  assert.equal(row.dueDate, '2027-01-01');
+});
+
+const invalidDueDates: unknown[] = [
+  // Wrong format.
+  '2026-1-5',
+  '20261105',
+  '2026-11-05T00:00:00Z',
+  '2026-11-05 ',
+  ' 2026-11-05',
+  '2026/11/05',
+  '',
+  '+02026-11-05',
+  // Days that do not exist.
+  '2026-02-30',
+  '2025-02-29',
+  '2026-13-01',
+  '2026-00-10',
+  '2026-04-31',
+  '2026-11-00',
+  // Outside the supported range.
+  '2024-12-31',
+  '2101-01-01',
+  '0000-01-01',
+  '9999-12-31',
+  // Not a string or null.
+  20261105,
+  0,
+  true,
+  false,
+  {},
+  ['2026-11-05'],
+];
+
+test('invalid due dates are rejected with 400 on create and change nothing (due AC-3)', async () => {
+  const session = await signIn(fixture, 0);
+  const before = await taskRowCount();
+  let message: string | undefined;
+  for (const dueDate of invalidDueDates) {
+    const response = await send(session, 'POST', '/api/tasks', { title: 'Due: never created', dueDate });
+    await assertError(response.clone(), 400, 'invalid_due_date');
+    const body = await response.json();
+    // One shared definition: the same message for every invalid value.
+    message ??= body.message;
+    assert.equal(body.message, message, JSON.stringify(dueDate));
+  }
+  assert.match(message!, /2025-01-01.*2100-12-31/);
+  assert.equal(await taskRowCount(), before);
+
+  // The first invalid field decides the code; titles keep theirs.
+  await assertError(
+    await send(session, 'POST', '/api/tasks', { title: '  ', dueDate: 'soon' }),
+    400,
+    'invalid_title',
+  );
+  await assertError(await send(session, 'POST', '/api/tasks', { dueDate: '2026-11-20' }), 400, 'invalid_title');
+  assert.equal(await taskRowCount(), before);
+
+  // Boundaries and a real leap day are accepted.
+  for (const dueDate of ['2025-01-01', '2100-12-31', '2028-02-29']) {
+    assert.equal((await createWithDueDate(session, `Due: valid ${dueDate}`, dueDate)).dueDate, dueDate);
+  }
+});
+
+test('invalid due dates are rejected with 400 on update and change nothing (due AC-3)', async () => {
+  const session = await signIn(fixture, 0);
+  const task = await createWithDueDate(session, 'Due: keep my date', '2026-11-20');
+  const before = await storedRow(task.id);
+  const create = await send(session, 'POST', '/api/tasks', { title: 'Due: message', dueDate: 'x' });
+  const createMessage = (await create.json()).message;
+
+  for (const dueDate of invalidDueDates) {
+    for (const body of [
+      { dueDate },
+      { dueDate, title: 'Due: not applied' },
+      { dueDate, completed: true },
+      { title: 'Due: not applied', completed: true, dueDate },
+    ]) {
+      const response = await send(session, 'PATCH', `/api/tasks/${task.id}`, body);
+      await assertError(response.clone(), 400, 'invalid_due_date');
+      // The same message as on create.
+      assert.equal((await response.json()).message, createMessage);
+    }
+  }
+  // The first invalid field still decides: title and completed keep their codes.
+  await assertError(
+    await send(session, 'PATCH', `/api/tasks/${task.id}`, { title: '', dueDate: 'soon' }),
+    400,
+    'invalid_title',
+  );
+  await assertError(
+    await send(session, 'PATCH', `/api/tasks/${task.id}`, { completed: 'yes', dueDate: 'soon' }),
+    400,
+    'invalid_completed',
+  );
+  // A valid date does not rescue an invalid title or completed value.
+  await assertError(
+    await send(session, 'PATCH', `/api/tasks/${task.id}`, { title: '  ', dueDate: '2026-12-01' }),
+    400,
+    'invalid_title',
+  );
+  await assertError(
+    await send(session, 'PATCH', `/api/tasks/${task.id}`, { completed: null, dueDate: '2026-12-01' }),
+    400,
+    'invalid_completed',
+  );
+  // An empty body is still invalid_update.
+  await assertError(await send(session, 'PATCH', `/api/tasks/${task.id}`, {}), 400, 'invalid_update');
+  // Nothing changed, not even updated_at.
+  assert.deepEqual(await storedRow(task.id), before);
+  assert.equal(await storedDueDate(task.id), '2026-11-20');
+
+  // The leap day and both boundaries are accepted on update too.
+  for (const dueDate of ['2028-02-29', '2025-01-01', '2100-12-31']) {
+    const response = await send(session, 'PATCH', `/api/tasks/${task.id}`, { dueDate });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).task.dueDate, dueDate);
+  }
+});
+
+test('users cannot set or clear the due date of each other\'s tasks (due AC-4)', async () => {
+  const [one, two] = await Promise.all([signIn(fixture, 0), signIn(fixture, 1)]);
+  const [userTwo] = await fixture.client`select id from users where email = 'two@example.test'`;
+  const mine = await createTask(one, 'Due: mine');
+  const theirs = await createWithDueDate(two, 'Due: theirs', '2026-11-20');
+  const theirsBefore = await storedRow(theirs.id);
+  const missing = await send(one, 'PATCH', '/api/tasks/999999', { dueDate: '2026-12-01' });
+  assert.equal(missing.status, 404);
+  const missingBody = await missing.json();
+
+  for (const body of [
+    { dueDate: '2026-12-01' },
+    { dueDate: null },
+    { dueDate: '2026-12-01', title: 'Taken over' },
+    { dueDate: null, completed: true },
+  ]) {
+    const response = await send(one, 'PATCH', `/api/tasks/${theirs.id}`, body);
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), missingBody);
+  }
+  assert.deepEqual(await storedRow(theirs.id), theirsBefore);
+  assert.equal(await storedDueDate(theirs.id), '2026-11-20');
+  assert.deepEqual(
+    (await listTasks(two)).find((item) => item.id === theirs.id),
+    theirs,
+  );
+
+  // Only owner or id fields: still nothing to update.
+  await assertError(
+    await send(one, 'PATCH', `/api/tasks/${mine.id}`, { userId: userTwo.id, user_id: userTwo.id, id: theirs.id }),
+    400,
+    'invalid_update',
+  );
+  // A due date with an owner field changes only the caller's own task.
+  const spoofed = await send(one, 'PATCH', `/api/tasks/${mine.id}`, {
+    dueDate: '2026-12-02',
+    userId: userTwo.id,
+    id: theirs.id,
+  });
+  assert.equal(spoofed.status, 200);
+  assert.equal(await storedDueDate(mine.id), '2026-12-02');
+  assert.equal(await storedDueDate(theirs.id), '2026-11-20');
+
+  // Session and origin checks apply to the new field as well.
+  assert.equal((await send('', 'PATCH', `/api/tasks/${mine.id}`, { dueDate: null })).status, 401);
+  await assertError(
+    await send(one, 'PATCH', `/api/tasks/${mine.id}`, { dueDate: null }, { origin: 'https://evil.example' }),
+    403,
+    'forbidden_origin',
+  );
+  assert.equal(await storedDueDate(mine.id), '2026-12-02');
 });
