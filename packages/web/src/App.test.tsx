@@ -31,11 +31,13 @@ function signedIn(tasks: unknown[] | Reply = []) {
   reply('GET /api/me', json({ user: signedInUser }));
   reply('GET /api/tasks', Array.isArray(tasks) ? json({ tasks }) : tasks);
 }
-// The element around all task groups. Rows in the collapsed Completed list are
-// hidden, so queries inside it only find the rows a user can see.
+// The smallest element that holds every task list (found by role, including
+// the collapsed Completed list). Rows in a collapsed list are hidden, so
+// queries inside it only find the rows a user can see.
 function taskList() {
-  const container = document.querySelector('section')?.parentElement;
-  if (!container) throw new Error('No task groups are shown');
+  const lists = screen.getAllByRole('list', { hidden: true });
+  let container: HTMLElement = lists[0];
+  while (!lists.every((list) => container.contains(list))) container = container.parentElement!;
   return container;
 }
 // The Completed section starts collapsed; this opens it.
