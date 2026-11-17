@@ -1601,6 +1601,68 @@ describe('due dates', () => {
     expect(callsTo('GET /api/tasks')).toHaveLength(1);
   });
 
+  test('at midnight, focus stays on the same control of a row that moved group', async () => {
+    vi.setSystemTime(new Date(2026, 10, 20, 23, 59, 0));
+    signedIn([due(2, 'Bins out', '2026-11-20'), due(1, 'Dentist', '2026-11-21')]);
+    render(<App />);
+    const checkbox = (await screen.findByRole('checkbox', { name: 'Bins out' })) as HTMLInputElement;
+    checkbox.focus();
+
+    act(() => {
+      vi.advanceTimersByTime(61_000);
+    });
+    expect(rowTitles(group('Overdue'))).toEqual(['Bins out']);
+    // A new element in the Overdue list, with focus on it.
+    const moved = screen.getByRole('checkbox', { name: 'Bins out' });
+    expect(moved).not.toBe(checkbox);
+    await waitFor(() => expect(document.activeElement).toBe(moved));
+
+    // A row in edit mode: the typed text stays, the field keeps focus and the
+    // caret, so typing goes on where it was. Dentist is due today now.
+    const field = await startEditing('Dentist');
+    await userEvent.type(field, ' first', { skipClick: true });
+    field.setSelectionRange(3, 3);
+    act(() => {
+      vi.advanceTimersByTime(24 * 60 * 60 * 1000);
+    });
+    expect(rowTitles(group('Overdue'))).toEqual(['Bins out', 'editing: Dentist first']);
+    const movedField = editField('Dentist');
+    expect(movedField).not.toBe(field);
+    await waitFor(() => expect(document.activeElement).toBe(movedField));
+    expect(movedField.selectionStart).toBe(3);
+    await userEvent.keyboard('X');
+    expect(movedField.value).toBe('DenXtist first');
+
+    // The date field of an edited row keeps focus too.
+    dateField('Dentist').focus();
+    act(() => {
+      vi.advanceTimersByTime(24 * 60 * 60 * 1000);
+    });
+    await waitFor(() => expect(document.activeElement).toBe(dateField('Dentist')));
+    expect(calls.filter((call) => call.method !== 'GET')).toEqual([]);
+  });
+
+  test('when the page becomes visible again, focus stays on the moved row', async () => {
+    let state: DocumentVisibilityState = 'visible';
+    vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => state);
+    signedIn([due(1, 'Bins out', '2026-11-20')]);
+    render(<App />);
+    const edit = await screen.findByRole('button', { name: 'Edit "Bins out"' });
+    edit.focus();
+    state = 'hidden';
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    vi.setSystemTime(new Date(2026, 10, 21, 9, 0, 0));
+    state = 'visible';
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    expect(rowTitles(group('Overdue'))).toEqual(['Bins out']);
+    await waitFor(() => expect(document.activeElement).toBe(button('Edit "Bins out"')));
+    expect(button('Edit "Bins out"')).not.toBe(edit);
+  });
+
   test('when the page becomes visible again, groups follow the date', async () => {
     let state: DocumentVisibilityState = 'visible';
     vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => state);

@@ -133,6 +133,7 @@ export function TaskRow({
           )}
           <button
             type="submit"
+            data-action="save"
             aria-disabled={mode.saving || undefined}
             className={`${rowButton} border-primary bg-primary text-primary-foreground`}
           >
@@ -140,6 +141,7 @@ export function TaskRow({
           </button>
           <button
             type="button"
+            data-action="cancel-edit"
             onClick={onCancelEdit}
             aria-disabled={mode.saving || undefined}
             className={rowButton}

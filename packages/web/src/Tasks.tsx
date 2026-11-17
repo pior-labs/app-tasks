@@ -94,6 +94,8 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
   // "Today" is the browser's local date. It is recomputed at local midnight and
   // when the page becomes visible again, so rows move between groups without a reload.
   const [today, setToday] = useState(() => localDate(new Date()));
+  const todayRef = useRef(today);
+  todayRef.current = today;
   // Collapsed on every page load; the choice is not remembered.
   const [completedOpen, setCompletedOpen] = useState(false);
   const titleInput = useRef<HTMLInputElement>(null);
@@ -120,10 +122,18 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
   // Edit and delete replace the control that had focus, so focus is moved on
   // purpose: the target is looked up after the next render has updated the page.
   const focusAfterRender = useRef<(() => HTMLElement | null | undefined) | null>(null);
+  // Focus to restore once the page shows a new day. React may first run the
+  // effects of an earlier render, so this waits for the render with that day.
+  const focusOnDay = useRef<{ day: string; target: () => HTMLElement | null | undefined } | null>(null);
   useEffect(() => {
     const target = focusAfterRender.current?.();
     focusAfterRender.current = null;
     target?.focus();
+    if (focusOnDay.current?.day === today) {
+      const moved = focusOnDay.current.target();
+      focusOnDay.current = null;
+      moved?.focus();
+    }
   });
   const control = (id: number, action: string) =>
     rows.current.get(id)?.querySelector<HTMLElement>(`[data-action="${action}"]`);
@@ -152,7 +162,36 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const refresh = () => setToday(localDate(new Date()));
+    const refresh = () => {
+      const next = localDate(new Date());
+      if (next === todayRef.current) return;
+      // A new day can move rows to another group, and a moved row is a new
+      // element. If focus was on a row's control (or in its edit fields),
+      // put it back on the same control, with the same caret, after the render.
+      const active = document.activeElement;
+      const action = active instanceof HTMLElement ? active.dataset.action : undefined;
+      const owner = action ? [...rows.current].find(([, row]) => row.contains(active)) : undefined;
+      if (owner && action) {
+        const [id] = owner;
+        const field = active instanceof HTMLInputElement ? active : null;
+        // Only text fields have a caret; a date or checkbox input reports null.
+        const caret =
+          field && field.selectionStart !== null
+            ? { start: field.selectionStart, end: field.selectionEnd ?? field.selectionStart }
+            : null;
+        focusOnDay.current = {
+          day: next,
+          target: () => {
+            const target = control(id, action);
+            if (target && caret && target instanceof HTMLInputElement) {
+              target.setSelectionRange(caret.start, caret.end);
+            }
+            return target;
+          },
+        };
+      }
+      setToday(next);
+    };
     // A timer that fires a little early finds the same day and waits again.
     const schedule = () => {
       clearTimeout(timer);
