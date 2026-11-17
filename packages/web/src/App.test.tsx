@@ -454,8 +454,9 @@ describe('renaming a task', () => {
 
     save.finish(json({ task: { ...milk, title: 'Buy oat milk and bread' } }));
     await waitFor(() => expect(taskTitles()).toEqual(['Buy oat milk and bread', 'Water the plants']));
-    // The controls are named after the new title, and focus is back on Edit.
-    expect(document.activeElement).toBe(button('Edit "Buy oat milk and bread"'));
+    // The controls are named after the new title, and focus is back on Edit
+    // (moved by an effect after that render, so this waits for it).
+    await waitFor(() => expect(document.activeElement).toBe(button('Edit "Buy oat milk and bread"')));
     expect(button('Delete "Buy oat milk and bread"')).toBeTruthy();
     expect((screen.getByRole('checkbox', { name: 'Buy oat milk and bread' }) as HTMLInputElement).checked).toBe(false);
     expect(screen.queryByRole('alert')).toBeNull();
@@ -476,7 +477,7 @@ describe('renaming a task', () => {
     ]);
     expect((screen.getByRole('checkbox', { name: 'Water the ferns' }) as HTMLInputElement).checked).toBe(true);
     expect(screen.getByText('Water the ferns').className).toContain('line-through');
-    expect(document.activeElement).toBe(button('Edit "Water the ferns"'));
+    await waitFor(() => expect(document.activeElement).toBe(button('Edit "Water the ferns"')));
   });
 
   test('Escape and Cancel restore the original title without a request', async () => {
