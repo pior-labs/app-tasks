@@ -657,14 +657,29 @@ test.describe('due dates west of UTC', () => {
       if (request.method() === 'GET' && new URL(request.url()).pathname === '/api/tasks') loads.push(request.url());
     });
 
-    // Pass local midnight.
+    // Pass local midnight with keyboard focus on the task that will move.
+    await checkbox(page, 'Midnight: take out the recycling').focus();
     await page.clock.runFor(60_000);
     await expect(groupList(page, 'Overdue').getByText('Midnight: take out the recycling')).toBeVisible();
+    // Focus moved with the row.
+    await expect(checkbox(page, 'Midnight: take out the recycling')).toBeFocused();
     const moved = rowOf(page, 'Midnight: take out the recycling');
     await expect(moved.getByText('Overdue', { exact: true })).toBeVisible();
     await expect(moved.getByText('Due yesterday')).toBeVisible();
     await expect(groupList(page, 'Today').getByText('Midnight: call grandma')).toBeVisible();
     await expect(rowOf(page, 'Midnight: call grandma').getByText('Due today')).toBeVisible();
+
+    // Editing across the next midnight: the row moves to Overdue while the user
+    // types, and no keystroke is lost.
+    await editButton(page, 'Midnight: call grandma').click();
+    const field = editField(page, 'Midnight: call grandma');
+    await page.keyboard.type(' at');
+    await page.clock.runFor(24 * 60 * 60 * 1000);
+    await expect(groupList(page, 'Overdue').getByRole('textbox', { name: 'New title for "Midnight: call grandma"' })).toBeVisible();
+    await expect(field).toBeFocused();
+    await page.keyboard.type(' noon');
+    await expect(field).toHaveValue('Midnight: call grandma at noon');
+    await page.keyboard.press('Escape');
     expect(loads).toEqual([]);
   });
 });
