@@ -15,7 +15,11 @@ commits on its generated baseline.
 
 ## Local development
 
-Use Node 22 and the declared pnpm version. From the workspace root:
+Install the Node.js version in `.node-version` (fnm, mise, nodenv and asdf read it
+directly) and any pnpm release; pnpm switches itself to the version in
+`packageManager`. Node.js 25 and later no longer bundle Corepack. CI runs
+`scripts/check_versions.py`, which fails when Dockerfiles, workflows or
+`engines` disagree with those sources. From the workspace root:
 
 ```sh
 bash scripts/setup-dev.sh tasks --configure-only
