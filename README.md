@@ -252,18 +252,33 @@ Rollout checklist, with human review and merge for each repository:
 5. Verify browser SSO, current user, local session, sign-out and expiry; then
    verify production routing and persistence. Review backup coverage before data.
 
+### Production status
+
+Tasks is deployed at https://tasks.szarans.ca. The latest production deploy is
+[Deploy Tasks run 43887151976](https://github.com/pior-labs/app-tasks/actions/runs/43887151976)
+(successful, 2026-11-16) at revision `f9e7e479ad73451eb04103d0779a1006937f3f4c`,
+which includes task creation, completion, rename and delete. The deploy applies
+the app migrations, so `0000` and `0001` are applied in production. The user
+confirmed the deployed application works. Earlier successful deploys were
+[43622123331](https://github.com/pior-labs/app-tasks/actions/runs/43622123331)
+(`107c767`, task creation and completion) and
+[43052764530](https://github.com/pior-labs/app-tasks/actions/runs/43052764530)
+(`4631c02`).
+
+The evidence paragraphs below were recorded before production deployment and
+describe the local checks done for each change.
+
 Task feature verification evidence: typecheck, production builds, fifteen
 disposable-database API tests (eight auth, seven task) and fifteen web component
-tests passed locally. Migration `0001` was applied only to disposable test
-databases; it has not been applied to `tasks_dev` or production, and the task
-feature has not been checked in a real browser or against hosted SSO.
+tests passed locally. At the time, migration `0001` had been applied only to
+disposable test databases, and the feature had not been checked in a real
+browser or against hosted SSO.
 
 Rename and delete verification evidence: typecheck, production builds, the API
 tests (eight auth, fifteen task), 44 web component tests and the eight
 end-to-end tests passed locally on Node 24 against disposable databases, with
 the end-to-end suite in headless Chromium using fixture sign-in. The change
-adds no migration. It has not been checked against hosted SSO or a deployed
-site.
+adds no migration.
 
 Foundation verification evidence: migration `0000` applied to `tasks_dev`; typecheck,
 production build and eight disposable-database auth tests passed. Frontend and
@@ -290,7 +305,8 @@ that error, and the user confirmed a successful callback to Tasks showing their
 current user. The central account link is persisted in the local database.
 The user also confirmed real app sign-out and successful sign-in afterward.
 Expiry and revocation have passing regression coverage; a week-long live expiry
-was not observed. Tasks itself has not been deployed in production.
+was not observed. Tasks is deployed in production; see
+[Production status](#production-status).
 
 ## Verified CI releases
 
