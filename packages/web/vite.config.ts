@@ -9,7 +9,7 @@ export default defineConfig(({ mode }) => {
   return {
     envDir: '../..',
     plugins: [react(), tailwindcss()],
-    test: { environment: 'jsdom', include: ['src/**/*.test.tsx'], restoreMocks: true },
+    test: { environment: 'jsdom', include: ['src/**/*.test.ts', 'src/**/*.test.tsx'], restoreMocks: true },
     server: {
       port: Number(env.WEB_PORT || '5173'),
       strictPort: true,
