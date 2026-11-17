@@ -191,6 +191,9 @@ after the task (for example `Edit "Buy oat milk"`).
   moved to Completed (an open delete question on that row is closed).
   Completing a task while Completed is expanded, or clearing a completed task,
   keeps focus on that task's checkbox in its new position.
+- When a new day (at local midnight, or when the page becomes visible again)
+  moves rows to another group, focus stays on the same control of the moved
+  row, and a text field being edited keeps its caret.
 - Edit and Delete wait while a completion change for that task is pending, and
   so does Confirm. While a rename is being saved, Edit on the other rows waits;
   while a delete is pending, Delete on the other rows waits. A control that is
