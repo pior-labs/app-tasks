@@ -1,5 +1,14 @@
 import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
+import {
+  INCOMPLETE_DUE_DATE_MESSAGE,
+  MAX_DUE_DATE,
+  MIN_DUE_DATE,
+  dueDateProblem,
+  localDate,
+  msUntilNextLocalMidnight,
+} from './dueDate';
 import { type RowMode, type Task, TaskRow } from './TaskRow';
+import { groupTasks, visibleTasks } from './taskGroups';
 
 export type { Task };
 
@@ -32,35 +41,66 @@ function goneMessage(task: Task) {
   return `"${task.title}" no longer exists, so it was removed from the list.`;
 }
 
-// Prefer the server's human-readable message for a rejected request.
-async function serverMessage(response: Response, fallback: string) {
+// Prefer the server's human-readable message for a rejected request. The code
+// tells which field the message is about.
+async function serverError(response: Response, fallback: string) {
   try {
     const body: unknown = await response.json();
     if (body && typeof body === 'object' && 'message' in body && typeof body.message === 'string') {
-      return body.message;
+      const code = 'error' in body && typeof body.error === 'string' ? body.error : '';
+      return { message: body.message, code };
     }
   } catch {
     // Not JSON: fall through to the generic message.
   }
-  return fallback;
+  return { message: fallback, code: '' };
+}
+
+type Field = 'title' | 'dueDate';
+const fieldOf = (code: string): Field => (code === 'invalid_due_date' ? 'dueDate' : 'title');
+
+// A date input that holds a partly typed date reports an empty value and
+// badInput. That is not "no due date", so it is refused instead of sent.
+function dateFieldProblem(field: HTMLInputElement | null | undefined, value: string) {
+  return field?.validity?.badInput ? INCOMPLETE_DUE_DATE_MESSAGE : dueDateProblem(value);
+}
+
+function movedMessage(task: Task) {
+  return `"${task.title}" was moved to Completed.`;
 }
 
 export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [listState, setListState] = useState<'loading' | 'ready' | 'failed'>('loading');
   const [title, setTitle] = useState('');
+  const [dueDate, setDueDate] = useState('');
   const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState('');
+  const [createError, setCreateError] = useState<{ message: string; field: Field } | null>(null);
   const [updatingIds, setUpdatingIds] = useState<number[]>([]);
   const [updateError, setUpdateError] = useState('');
   // A neutral message, shown when a task turned out to be gone already.
   const [notice, setNotice] = useState('');
   // At most one row is in edit mode, and at most one asks to confirm a delete.
-  const [editing, setEditing] = useState<{ id: number; text: string; error: string } | null>(null);
+  const [editing, setEditing] = useState<{
+    id: number;
+    text: string;
+    dueDate: string;
+    error: string;
+    errorField: Field;
+  } | null>(null);
   const [saving, setSaving] = useState(false);
   const [confirmingId, setConfirmingId] = useState<number | null>(null);
   const [deleting, setDeleting] = useState(false);
+  // "Today" is the browser's local date. It is recomputed at local midnight and
+  // when the page becomes visible again, so rows move between groups without a reload.
+  const [today, setToday] = useState(() => localDate(new Date()));
+  const todayRef = useRef(today);
+  todayRef.current = today;
+  // Collapsed on every page load; the choice is not remembered.
+  const [completedOpen, setCompletedOpen] = useState(false);
   const titleInput = useRef<HTMLInputElement>(null);
+  const dueDateInput = useRef<HTMLInputElement>(null);
+  const completedToggle = useRef<HTMLButtonElement>(null);
   // Pending requests are tracked in refs as well as state so a repeat submit
   // in the same tick is ignored. The controls are locked with readOnly and
   // aria-disabled instead of disabled, because a disabled control loses focus.
@@ -71,20 +111,39 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
   // Tasks this page removed from the list, so a late answer about one of them
   // is not reported as a failure.
   const removedRef = useRef(new Set<number>());
-  // Row elements by task id, and the latest list, for moving keyboard focus.
+  // Row elements by task id, and the rows the user can see in page order, for
+  // moving keyboard focus. A row moved to another group is a new element.
   const rows = useRef(new Map<number, HTMLLIElement>());
-  const tasksRef = useRef(tasks);
-  tasksRef.current = tasks;
+  const groups = groupTasks(tasks, today);
+  const visibleRef = useRef<Task[]>([]);
+  visibleRef.current = visibleTasks(groups, completedOpen);
+  const completedOpenRef = useRef(completedOpen);
+  completedOpenRef.current = completedOpen;
   // Edit and delete replace the control that had focus, so focus is moved on
   // purpose: the target is looked up after the next render has updated the page.
   const focusAfterRender = useRef<(() => HTMLElement | null | undefined) | null>(null);
+  // Focus to restore once the page shows a new day. React may first run the
+  // effects of an earlier render, so this waits for the render with that day.
+  const focusOnDay = useRef<{ day: string; target: () => HTMLElement | null | undefined } | null>(null);
   useEffect(() => {
     const target = focusAfterRender.current?.();
     focusAfterRender.current = null;
     target?.focus();
+    if (focusOnDay.current?.day === today) {
+      const moved = focusOnDay.current.target();
+      focusOnDay.current = null;
+      moved?.focus();
+    }
   });
   const control = (id: number, action: string) =>
     rows.current.get(id)?.querySelector<HTMLElement>(`[data-action="${action}"]`);
+  const firstControl = (id: number) => rows.current.get(id)?.querySelector<HTMLElement>('input, button');
+  // The row after the given one in page order, else the one before it.
+  const visibleNeighbour = (id: number) => {
+    const list = visibleRef.current;
+    const index = list.findIndex((item) => item.id === id);
+    return index === -1 ? undefined : (list[index + 1] ?? list[index - 1]);
+  };
   // Focus is only moved for a row the user is still in. Some browsers do not
   // focus a clicked button, which leaves focus on the page body: that counts too.
   const hasFocus = (id: number) => {
@@ -98,6 +157,60 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
     mounted.current = true;
     return () => {
       mounted.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refresh = () => {
+      const next = localDate(new Date());
+      if (next === todayRef.current) return;
+      // A new day can move rows to another group, and a moved row is a new
+      // element. If focus was on a row's control (or in its edit fields),
+      // put it back on the same control, with the same caret, after the render.
+      const active = document.activeElement;
+      const action = active instanceof HTMLElement ? active.dataset.action : undefined;
+      const owner = action ? [...rows.current].find(([, row]) => row.contains(active)) : undefined;
+      if (owner && action) {
+        const [id] = owner;
+        const field = active instanceof HTMLInputElement ? active : null;
+        // Only text fields have a caret; a date or checkbox input reports null.
+        const caret =
+          field && field.selectionStart !== null
+            ? { start: field.selectionStart, end: field.selectionEnd ?? field.selectionStart }
+            : null;
+        focusOnDay.current = {
+          day: next,
+          target: () => {
+            const target = control(id, action);
+            if (target && caret && target instanceof HTMLInputElement) {
+              target.setSelectionRange(caret.start, caret.end);
+            }
+            return target;
+          },
+        };
+      }
+      setToday(next);
+    };
+    // A timer that fires a little early finds the same day and waits again.
+    const schedule = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        refresh();
+        schedule();
+      }, msUntilNextLocalMidnight(new Date()));
+    };
+    // Timers can be held back while a page is hidden or the computer sleeps.
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') return;
+      refresh();
+      schedule();
+    };
+    schedule();
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, []);
 
@@ -132,30 +245,35 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
     if (creatingRef.current) return;
     const trimmed = title.trim();
     const problem = titleProblem(trimmed);
-    if (problem) return setCreateError(problem);
+    if (problem) return setCreateError({ message: problem, field: 'title' });
+    const dateProblem = dateFieldProblem(dueDateInput.current, dueDate);
+    if (dateProblem) return setCreateError({ message: dateProblem, field: 'dueDate' });
     creatingRef.current = true;
     setCreating(true);
-    setCreateError('');
+    setCreateError(null);
     try {
       const response = await fetch('/api/tasks', {
         method: 'POST',
         headers: jsonHeaders,
-        body: JSON.stringify({ title: trimmed }),
+        // No due date is sent as no field at all.
+        body: JSON.stringify(dueDate === '' ? { title: trimmed } : { title: trimmed, dueDate }),
       });
       if (!mounted.current) return;
       if (response.status === 401) return onSignedOut();
       if (response.status === 400) {
-        return setCreateError(await serverMessage(response, 'That title was not accepted.'));
+        const { message, code } = await serverError(response, 'That task was not accepted.');
+        return setCreateError({ message, field: fieldOf(code) });
       }
       if (!response.ok) throw new Error();
       const body: { task: Task } = await response.json();
       // Only a task the server confirmed is added to the list.
       setTasks((current) => [body.task, ...current]);
       setTitle('');
+      setDueDate('');
       // Ready for the next task, also when the add button was clicked.
       titleInput.current?.focus();
     } catch {
-      setCreateError('The task could not be saved. Please try again.');
+      setCreateError({ message: 'The task could not be saved. Please try again.', field: 'title' });
     } finally {
       creatingRef.current = false;
       setCreating(false);
@@ -182,8 +300,28 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
       if (response.status === 404 && removedRef.current.has(task.id)) return;
       if (!response.ok) throw new Error();
       const body: { task: Task } = await response.json();
-      // The checkbox changes only once the server has stored the new state.
-      setTasks((current) => current.map((item) => (item.id === body.task.id ? body.task : item)));
+      const updated = body.task;
+      // A task completed while the Completed section is collapsed leaves view.
+      const leavesView = updated.completed && !completedOpenRef.current;
+      if (hasFocus(task.id)) {
+        if (leavesView) {
+          // Like after a delete: the next row, else the previous one, else the
+          // Completed toggle, which now exists.
+          const neighbour = visibleNeighbour(task.id);
+          focusAfterRender.current = () =>
+            neighbour ? firstControl(neighbour.id) : completedToggle.current;
+        } else {
+          // The row moved to another group: focus follows its checkbox.
+          focusAfterRender.current = () => control(updated.id, 'toggle');
+        }
+      }
+      if (leavesView) {
+        setNotice(movedMessage(updated));
+        // A delete question cannot stay open on a row nobody can see.
+        setConfirmingId((current) => (current === task.id ? null : current));
+      }
+      // The checkbox changes, and the row moves, only once the server has stored the new state.
+      setTasks((current) => current.map((item) => (item.id === updated.id ? updated : item)));
     } catch {
       setUpdateError(`"${task.title}" could not be updated. Please try again.`);
     } finally {
@@ -195,15 +333,11 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
   // Remove a row the server no longer has. If keyboard focus was inside it,
   // move focus to the next row's first control, else the previous row's, else
   // the new-task field, so focus is never dropped onto the page.
+  // Neighbours are taken in page order, across groups.
   function removeRow(id: number) {
-    const list = tasksRef.current;
-    const index = list.findIndex((item) => item.id === id);
-    const neighbour = index === -1 ? undefined : (list[index + 1] ?? list[index - 1]);
+    const neighbour = visibleNeighbour(id);
     if (hasFocus(id)) {
-      focusAfterRender.current = () =>
-        neighbour
-          ? rows.current.get(neighbour.id)?.querySelector<HTMLElement>('input, button')
-          : titleInput.current;
+      focusAfterRender.current = () => (neighbour ? firstControl(neighbour.id) : titleInput.current);
     }
     removedRef.current.add(id);
     setTasks((current) => current.filter((item) => item.id !== id));
@@ -214,7 +348,13 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
   function startEdit(task: Task) {
     // One request per task at a time: wait for a pending save or completion change.
     if (savingRef.current || updatingRef.current.has(task.id)) return;
-    setEditing({ id: task.id, text: task.title, error: '' });
+    setEditing({
+      id: task.id,
+      text: task.title,
+      dueDate: task.dueDate ?? '',
+      error: '',
+      errorField: 'title',
+    });
     focusAfterRender.current = () => {
       const field = control(task.id, 'edit-title') as HTMLInputElement | null | undefined;
       field?.setSelectionRange(field.value.length, field.value.length);
@@ -236,21 +376,31 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
     if (savingRef.current || editing?.id !== task.id) return;
     const trimmed = editing.text.trim();
     const problem = titleProblem(trimmed);
-    if (problem) return setEditing({ ...editing, error: problem });
+    if (problem) return setEditing({ ...editing, error: problem, errorField: 'title' });
+    const dateProblem = dateFieldProblem(
+      control(task.id, 'edit-due-date') as HTMLInputElement | null | undefined,
+      editing.dueDate,
+    );
+    if (dateProblem) return setEditing({ ...editing, error: dateProblem, errorField: 'dueDate' });
+    // Only the fields that changed are sent.
+    const changes: { title?: string; dueDate?: string | null } = {};
+    if (trimmed !== task.title) changes.title = trimmed;
+    const newDueDate = editing.dueDate === '' ? null : editing.dueDate;
+    if (newDueDate !== task.dueDate) changes.dueDate = newDueDate;
     // Nothing to store: leave edit mode without a request.
-    if (trimmed === task.title) return leaveEdit(task);
+    if (changes.title === undefined && changes.dueDate === undefined) return leaveEdit(task);
     savingRef.current = true;
     setSaving(true);
     setUpdateError('');
     setNotice('');
-    const fail = (error: string) =>
-      setEditing((current) => (current?.id === task.id ? { ...current, error } : current));
+    const fail = (error: string, errorField: Field = 'title') =>
+      setEditing((current) => (current?.id === task.id ? { ...current, error, errorField } : current));
     fail('');
     try {
       const response = await fetch(`/api/tasks/${task.id}`, {
         method: 'PATCH',
         headers: jsonHeaders,
-        body: JSON.stringify({ title: trimmed }),
+        body: JSON.stringify(changes),
       });
       if (!mounted.current) return;
       if (response.status === 401) return onSignedOut();
@@ -259,16 +409,24 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
         return setNotice(goneMessage(task));
       }
       if (response.status === 400) {
-        return fail(await serverMessage(response, 'That title was not accepted.'));
+        const { message, code } = await serverError(response, 'That change was not accepted.');
+        return fail(message, fieldOf(code));
       }
       if (!response.ok) throw new Error();
       const body: { task: Task } = await response.json();
-      // The row shows the new title only once the server has stored it.
+      // The row shows the new title and date, and moves to its new group,
+      // only once the server has stored them. Focus follows it to Edit.
       setTasks((current) => current.map((item) => (item.id === body.task.id ? body.task : item)));
       leaveEdit(task);
     } catch {
-      // Edit mode and the typed text are kept so the user can retry.
-      fail('The new title could not be saved. Please try again.');
+      // Edit mode and the typed values are kept so the user can retry.
+      const what =
+        changes.dueDate === undefined
+          ? 'The new title'
+          : changes.title === undefined
+            ? 'The new due date'
+            : 'The changes';
+      fail(`${what} could not be saved. Please try again.`, changes.title === undefined ? 'dueDate' : 'title');
     } finally {
       savingRef.current = false;
       setSaving(false);
@@ -317,7 +475,14 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
 
   function rowMode(task: Task): RowMode {
     if (editing?.id === task.id) {
-      return { kind: 'edit', text: editing.text, error: editing.error, saving };
+      return {
+        kind: 'edit',
+        text: editing.text,
+        dueDate: editing.dueDate,
+        error: editing.error,
+        errorField: editing.errorField,
+        saving,
+      };
     }
     if (confirmingId === task.id) return { kind: 'confirm-delete', deleting };
     return { kind: 'view' };
@@ -338,28 +503,101 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
       </div>
     );
   }
+  const renderRow = (task: Task) => (
+    <TaskRow
+      key={task.id}
+      task={task}
+      mode={rowMode(task)}
+      today={today}
+      updating={updatingIds.includes(task.id)}
+      // Controls whose action is ignored right now are marked as locked.
+      editLocked={saving || updatingIds.includes(task.id)}
+      deleteLocked={deleting || updatingIds.includes(task.id)}
+      rowRef={(element) => {
+        if (!element) return;
+        rows.current.set(task.id, element);
+        // A row that moves to another group is a new element, which may be
+        // registered before the old one is cleaned up: only forget this one.
+        return () => {
+          if (rows.current.get(task.id) === element) rows.current.delete(task.id);
+        };
+      }}
+      onToggle={(completed) => void setCompleted(task, completed)}
+      onStartEdit={() => startEdit(task)}
+      onEditText={(text) =>
+        setEditing((current) =>
+          current?.id === task.id && !savingRef.current ? { ...current, text, error: '' } : current,
+        )
+      }
+      onEditDueDate={(value) =>
+        setEditing((current) =>
+          current?.id === task.id && !savingRef.current
+            ? { ...current, dueDate: value, error: '' }
+            : current,
+        )
+      }
+      onRemoveDueDate={() => {
+        if (savingRef.current) return;
+        setEditing((current) =>
+          current?.id === task.id ? { ...current, dueDate: '', error: '' } : current,
+        );
+        // The Remove control goes away with the date, so focus moves to the date field.
+        focusAfterRender.current = () => control(task.id, 'edit-due-date');
+      }}
+      onSave={() => void saveEdit(task)}
+      onCancelEdit={() => cancelEdit(task)}
+      onStartDelete={() => startDelete(task)}
+      onConfirmDelete={() => void confirmDelete(task)}
+      onCancelDelete={() => cancelDelete(task)}
+    />
+  );
+  const listClass = 'divide-y divide-border rounded-lg border border-border';
+  const headingClass = 'text-sm font-semibold uppercase tracking-wide';
   return (
     <div className="space-y-4">
       <form onSubmit={(event) => void create(event)} noValidate className="space-y-2">
-        <label htmlFor="new-task-title" className="block text-sm font-medium">
-          New task
-        </label>
-        <div className="flex gap-3">
-          <input
-            id="new-task-title"
-            ref={titleInput}
-            value={title}
-            onChange={(event) => {
-              setTitle(event.target.value);
-              setCreateError('');
-            }}
-            readOnly={creating}
-            placeholder="What needs doing?"
-            autoComplete="off"
-            aria-invalid={createError ? true : undefined}
-            aria-describedby={createError ? 'new-task-error' : undefined}
-            className="min-w-0 flex-1 rounded-md border border-border bg-card px-4 py-3 text-card-foreground read-only:opacity-60"
-          />
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="flex min-w-48 flex-1 flex-col gap-2">
+            <label htmlFor="new-task-title" className="block text-sm font-medium">
+              New task
+            </label>
+            <input
+              id="new-task-title"
+              ref={titleInput}
+              value={title}
+              onChange={(event) => {
+                setTitle(event.target.value);
+                setCreateError(null);
+              }}
+              readOnly={creating}
+              placeholder="What needs doing?"
+              autoComplete="off"
+              aria-invalid={createError?.field === 'title' || undefined}
+              aria-describedby={createError?.field === 'title' ? 'new-task-error' : undefined}
+              className="min-w-0 rounded-md border border-border bg-card px-4 py-3 text-card-foreground read-only:opacity-60"
+            />
+          </div>
+          <div className="flex flex-col gap-2">
+            <label htmlFor="new-task-due-date" className="block text-sm font-medium">
+              Due date
+            </label>
+            <input
+              id="new-task-due-date"
+              ref={dueDateInput}
+              type="date"
+              value={dueDate}
+              min={MIN_DUE_DATE}
+              max={MAX_DUE_DATE}
+              onChange={(event) => {
+                setDueDate(event.target.value);
+                setCreateError(null);
+              }}
+              readOnly={creating}
+              aria-invalid={createError?.field === 'dueDate' || undefined}
+              aria-describedby={createError?.field === 'dueDate' ? 'new-task-error' : undefined}
+              className="rounded-md border border-border bg-card px-4 py-3 text-card-foreground read-only:opacity-60"
+            />
+          </div>
           <button
             type="submit"
             aria-disabled={creating || undefined}
@@ -370,7 +608,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
         </div>
         {createError && (
           <p id="new-task-error" role="alert" className="text-sm text-destructive">
-            {createError}
+            {createError.message}
           </p>
         )}
       </form>
@@ -389,37 +627,44 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
           No tasks yet. Add your first one above.
         </p>
       ) : (
-        <ul aria-label="Your tasks" className="divide-y divide-border rounded-lg border border-border">
-          {tasks.map((task) => (
-            <TaskRow
-              key={task.id}
-              task={task}
-              mode={rowMode(task)}
-              updating={updatingIds.includes(task.id)}
-              // Controls whose action is ignored right now are marked as locked.
-              editLocked={saving || updatingIds.includes(task.id)}
-              deleteLocked={deleting || updatingIds.includes(task.id)}
-              rowRef={(element) => {
-                if (element) rows.current.set(task.id, element);
-                else rows.current.delete(task.id);
-              }}
-              onToggle={(completed) => void setCompleted(task, completed)}
-              onStartEdit={() => startEdit(task)}
-              onEditText={(text) =>
-                setEditing((current) =>
-                  current?.id === task.id && !savingRef.current
-                    ? { ...current, text, error: '' }
-                    : current,
-                )
-              }
-              onSave={() => void saveEdit(task)}
-              onCancelEdit={() => cancelEdit(task)}
-              onStartDelete={() => startDelete(task)}
-              onConfirmDelete={() => void confirmDelete(task)}
-              onCancelDelete={() => cancelDelete(task)}
-            />
+        <div className="space-y-6">
+          {/* Each group is a list named by its heading: "Overdue, list, 2 items". */}
+          {groups.open.map((group) => (
+            <section key={group.key} aria-labelledby={`group-${group.key}`} className="space-y-2">
+              <h2
+                id={`group-${group.key}`}
+                className={`${headingClass} ${group.key === 'overdue' ? 'text-destructive' : 'text-muted-foreground'}`}
+              >
+                {group.heading}
+              </h2>
+              <ul aria-labelledby={`group-${group.key}`} className={listClass}>
+                {group.tasks.map(renderRow)}
+              </ul>
+            </section>
           ))}
-        </ul>
+          {groups.completed.length > 0 && (
+            <section aria-labelledby="group-completed" className="space-y-2">
+              <h2 id="group-completed" className={`${headingClass} text-muted-foreground`}>
+                <button
+                  type="button"
+                  ref={completedToggle}
+                  aria-expanded={completedOpen}
+                  aria-controls="completed-tasks"
+                  onClick={() => setCompletedOpen((open) => !open)}
+                  className="flex items-center gap-2 rounded-md py-1 uppercase tracking-wide"
+                >
+                  <span aria-hidden="true" className={`inline-block transition-transform ${completedOpen ? 'rotate-90' : ''}`}>
+                    &#9656;
+                  </span>
+                  Completed ({groups.completed.length})
+                </button>
+              </h2>
+              <ul id="completed-tasks" aria-labelledby="group-completed" hidden={!completedOpen} className={listClass}>
+                {groups.completed.map(renderRow)}
+              </ul>
+            </section>
+          )}
+        </div>
       )}
     </div>
   );

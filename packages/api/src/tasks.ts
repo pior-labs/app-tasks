@@ -38,13 +38,54 @@ const taskTitle = z
     error: `Task titles can be at most ${MAX_TITLE_LENGTH} characters.`,
   });
 
-const createTaskBody = z.object({ title: taskTitle }, { error: 'Send a JSON object with a title.' });
-// Either field may be sent alone. Unknown keys (such as an owner or an id) are dropped.
-const UPDATE_FIELDS_MESSAGE = 'Send a JSON object with a title, a completed value, or both.';
+// The one definition of a valid due date, used by both create and update. A
+// due date is a calendar day with no time or timezone, exchanged as the exact
+// text "YYYY-MM-DD" and stored in a PostgreSQL date column, so the server never
+// converts it. The day must exist (no February 30) and fall in the supported
+// range; past days are allowed. null means "no due date". The web forms apply
+// the same range (packages/web/src/dueDate.ts).
+export const MIN_DUE_DATE = '2025-01-01';
+export const MAX_DUE_DATE = '2100-12-31';
+const DUE_DATE_MESSAGE = `A due date must be a real calendar date from ${MIN_DUE_DATE} through ${MAX_DUE_DATE}, written as YYYY-MM-DD, or null.`;
+
+function isDueDate(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  const [year, month, day] = match.slice(1).map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  const exists =
+    date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+  // Fixed-width text compares in calendar order.
+  return exists && value >= MIN_DUE_DATE && value <= MAX_DUE_DATE;
+}
+
+const taskDueDate = z
+  .string({ error: DUE_DATE_MESSAGE })
+  .refine(isDueDate, { error: DUE_DATE_MESSAGE })
+  .nullable();
+
+// The first issue decides the error code, so a body with several invalid
+// fields answers for the first one (in the order of the schema's keys).
+function fieldError(field: PropertyKey | undefined, fallback: string) {
+  if (field === 'title') return 'invalid_title';
+  if (field === 'completed') return 'invalid_completed';
+  if (field === 'dueDate') return 'invalid_due_date';
+  return fallback;
+}
+
+// A missing or null dueDate both mean "no due date".
+const createTaskBody = z.object(
+  { title: taskTitle, dueDate: taskDueDate.optional() },
+  { error: 'Send a JSON object with a title.' },
+);
+// Any of the fields may be sent alone. Unknown keys (such as an owner or an id) are dropped.
+const UPDATE_FIELDS_MESSAGE =
+  'Send a JSON object with a title, a completed value, a due date (dueDate), or any of them together.';
 const updateTaskBody = z.object(
   {
     title: taskTitle.optional(),
     completed: z.boolean({ error: 'Completed must be true or false.' }).optional(),
+    dueDate: taskDueDate.optional(),
   },
   { error: UPDATE_FIELDS_MESSAGE },
 );
@@ -54,6 +95,7 @@ const taskColumns = {
   id: tasks.id,
   title: tasks.title,
   completed: tasks.completed,
+  dueDate: tasks.dueDate,
   createdAt: tasks.createdAt,
   updatedAt: tasks.updatedAt,
 };
@@ -118,11 +160,16 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string) {
     }
     const parsed = createTaskBody.safeParse(body);
     if (!parsed.success) {
-      return c.json({ error: 'invalid_title', message: parsed.error.issues[0].message }, 400);
+      const [issue] = parsed.error.issues;
+      return c.json({ error: fieldError(issue.path[0], 'invalid_title'), message: issue.message }, 400);
     }
     const [task] = await db
       .insert(tasks)
-      .values({ userId: sessionUserId(c), title: parsed.data.title })
+      .values({
+        userId: sessionUserId(c),
+        title: parsed.data.title,
+        dueDate: parsed.data.dueDate ?? null,
+      })
       .returning(taskColumns);
     return c.json({ task }, 201);
   });
@@ -137,16 +184,10 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string) {
     const parsed = updateTaskBody.safeParse(body);
     if (!parsed.success) {
       const [issue] = parsed.error.issues;
-      const error =
-        issue.path[0] === 'title'
-          ? 'invalid_title'
-          : issue.path[0] === 'completed'
-            ? 'invalid_completed'
-            : 'invalid_update';
-      return c.json({ error, message: issue.message }, 400);
+      return c.json({ error: fieldError(issue.path[0], 'invalid_update'), message: issue.message }, 400);
     }
-    const { title, completed } = parsed.data;
-    if (title === undefined && completed === undefined) {
+    const { title, completed, dueDate } = parsed.data;
+    if (title === undefined && completed === undefined && dueDate === undefined) {
       return c.json({ error: 'invalid_update', message: UPDATE_FIELDS_MESSAGE }, 400);
     }
     // Unknown ids and other users' tasks are indistinguishable to the caller.
@@ -158,6 +199,7 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string) {
             .set({
               ...(title === undefined ? {} : { title }),
               ...(completed === undefined ? {} : { completed }),
+              ...(dueDate === undefined ? {} : { dueDate }),
               updatedAt: sql`now()`,
             })
             .where(and(eq(tasks.id, id), eq(tasks.userId, sessionUserId(c))))

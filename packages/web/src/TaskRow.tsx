@@ -1,17 +1,30 @@
 import type { FormEvent, KeyboardEvent, Ref } from 'react';
+import { MAX_DUE_DATE, MIN_DUE_DATE, dueLabel, dueStatus } from './dueDate';
 
-export type Task = { id: number; title: string; completed: boolean };
+// dueDate is a calendar day, "YYYY-MM-DD", or null for no due date.
+export type Task = { id: number; title: string; completed: boolean; dueDate: string | null };
 
 // What a row is doing besides showing its task. Only one row edits at a time
 // and only one asks for a delete confirmation at a time; Tasks owns that state.
 export type RowMode =
   | { kind: 'view' }
-  | { kind: 'edit'; text: string; error: string; saving: boolean }
+  // dueDate is the date field's value: "YYYY-MM-DD", or empty for none. The
+  // error belongs to the field named by errorField.
+  | {
+      kind: 'edit';
+      text: string;
+      dueDate: string;
+      error: string;
+      errorField: 'title' | 'dueDate';
+      saving: boolean;
+    }
   | { kind: 'confirm-delete'; deleting: boolean };
 
 type Props = {
   task: Task;
   mode: RowMode;
+  // The browser's local date, "YYYY-MM-DD", for the due date label.
+  today: string;
   // A completion change for this task is waiting for the server.
   updating: boolean;
   // Edit or Delete would be ignored now: another row is saving or deleting, or
@@ -22,6 +35,8 @@ type Props = {
   onToggle: (completed: boolean) => void;
   onStartEdit: () => void;
   onEditText: (text: string) => void;
+  onEditDueDate: (dueDate: string) => void;
+  onRemoveDueDate: () => void;
   onSave: () => void;
   onCancelEdit: () => void;
   onStartDelete: () => void;
@@ -48,6 +63,7 @@ const rowButton =
 export function TaskRow({
   task,
   mode,
+  today,
   updating,
   editLocked,
   deleteLocked,
@@ -55,6 +71,8 @@ export function TaskRow({
   onToggle,
   onStartEdit,
   onEditText,
+  onEditDueDate,
+  onRemoveDueDate,
   onSave,
   onCancelEdit,
   onStartDelete,
@@ -62,7 +80,9 @@ export function TaskRow({
   onCancelDelete,
 }: Props) {
   if (mode.kind === 'edit') {
-    const errorId = `task-${task.id}-title-error`;
+    const errorId = `task-${task.id}-edit-error`;
+    const titleError = mode.error !== '' && mode.errorField === 'title';
+    const dueDateError = mode.error !== '' && mode.errorField === 'dueDate';
     const submit = (event: FormEvent) => {
       event.preventDefault();
       onSave();
@@ -82,12 +102,38 @@ export function TaskRow({
             onChange={(event) => onEditText(event.target.value)}
             readOnly={mode.saving}
             autoComplete="off"
-            aria-invalid={mode.error ? true : undefined}
-            aria-describedby={mode.error ? errorId : undefined}
+            aria-invalid={titleError || undefined}
+            aria-describedby={titleError ? errorId : undefined}
             className="min-w-48 flex-1 rounded-md border border-border bg-card px-3 py-1.5 text-card-foreground read-only:opacity-60"
           />
+          <input
+            type="date"
+            data-action="edit-due-date"
+            aria-label={`Due date for "${task.title}"`}
+            value={mode.dueDate}
+            min={MIN_DUE_DATE}
+            max={MAX_DUE_DATE}
+            onChange={(event) => onEditDueDate(event.target.value)}
+            readOnly={mode.saving}
+            aria-invalid={dueDateError || undefined}
+            aria-describedby={dueDateError ? errorId : undefined}
+            className="rounded-md border border-border bg-card px-3 py-1.5 text-card-foreground read-only:opacity-60"
+          />
+          {mode.dueDate !== '' && (
+            <button
+              type="button"
+              data-action="remove-due-date"
+              aria-label={`Remove due date for "${task.title}"`}
+              aria-disabled={mode.saving || undefined}
+              onClick={onRemoveDueDate}
+              className={rowButton}
+            >
+              Remove due date
+            </button>
+          )}
           <button
             type="submit"
+            data-action="save"
             aria-disabled={mode.saving || undefined}
             className={`${rowButton} border-primary bg-primary text-primary-foreground`}
           >
@@ -95,6 +141,7 @@ export function TaskRow({
           </button>
           <button
             type="button"
+            data-action="cancel-edit"
             onClick={onCancelEdit}
             aria-disabled={mode.saving || undefined}
             className={rowButton}
@@ -112,22 +159,45 @@ export function TaskRow({
   }
 
   const deleting = mode.kind === 'confirm-delete' && mode.deleting;
+  const dueId = `task-${task.id}-due`;
+  // A completed task shows its due date but is never marked overdue.
+  const overdue = task.dueDate !== null && !task.completed && dueStatus(task.dueDate, today) === 'overdue';
   return (
     <li ref={rowRef} className="flex flex-wrap items-center justify-end gap-x-2 gap-y-2 px-5 py-3">
-      <label className="flex min-w-48 flex-1 cursor-pointer items-center gap-3">
-        <input
-          type="checkbox"
-          checked={task.completed}
-          aria-disabled={updating || deleting || undefined}
-          onChange={(event) => onToggle(event.target.checked)}
-          className="size-5 shrink-0 accent-primary aria-disabled:opacity-50"
-        />
-        <span
-          className={`min-w-0 break-words ${task.completed ? 'text-muted-foreground line-through' : ''}`}
-        >
-          {task.title}
-        </span>
-      </label>
+      <div className="flex min-w-48 flex-1 flex-col gap-0.5">
+        <label className="flex cursor-pointer items-center gap-3">
+          <input
+            type="checkbox"
+            data-action="toggle"
+            checked={task.completed}
+            aria-disabled={updating || deleting || undefined}
+            aria-describedby={task.dueDate === null ? undefined : dueId}
+            onChange={(event) => onToggle(event.target.checked)}
+            className="size-5 shrink-0 accent-primary aria-disabled:opacity-50"
+          />
+          <span
+            className={`min-w-0 break-words ${task.completed ? 'text-muted-foreground line-through' : ''}`}
+          >
+            {task.title}
+          </span>
+        </label>
+        {task.dueDate !== null && (
+          // Indented to line up with the title: the checkbox (1.25rem) plus the gap (0.75rem).
+          <p
+            id={dueId}
+            className={`pl-8 text-sm ${overdue ? 'text-destructive' : 'text-muted-foreground'}`}
+          >
+            {/* Overdue is said in words, not only by the colour. */}
+            {overdue && (
+              <>
+                <span className="font-semibold">Overdue</span>
+                {' \u00B7 '}
+              </>
+            )}
+            <span>{dueLabel(task.dueDate, today)}</span>
+          </p>
+        )}
+      </div>
       {mode.kind === 'confirm-delete' ? (
         <div
           role="group"

@@ -1,5 +1,6 @@
 import {
   boolean,
+  date,
   index,
   integer,
   pgTable,
@@ -85,6 +86,9 @@ export const tasks = pgTable(
       .references(() => users.id, { onDelete: 'cascade' }),
     title: text('title').notNull(),
     completed: boolean('completed').default(false).notNull(),
+    // A calendar date without a time or timezone. String mode keeps it as
+    // "YYYY-MM-DD" end to end, so no timezone conversion can shift the day.
+    dueDate: date('due_date', { mode: 'string' }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },

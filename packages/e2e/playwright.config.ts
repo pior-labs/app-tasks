@@ -20,7 +20,18 @@ export default defineConfig({
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
   },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  projects: [
+    {
+      name: 'chromium',
+      use: {
+        ...devices['Desktop Chrome'],
+        // Chromium orders the segments of a date field (month, day, year) by
+        // the LANGUAGE environment variable, not by the context locale. Pin it
+        // so typing a date with the keyboard works the same on every machine.
+        launchOptions: { env: { ...process.env, LANGUAGE: 'en_US' } },
+      },
+    },
+  ],
   webServer: [
     {
       // The real Hono API on the test fixture: a new tasks_test_* database and
