@@ -15,6 +15,13 @@
       "when": 1794601875798,
       "tag": "0001_nappy_zzzax",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794876476231,
+      "tag": "0002_fine_steve_rogers",
+      "breakpoints": true
     }
   ]
 }
