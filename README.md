@@ -59,21 +59,30 @@ CI has successfully installed the published design system with its Actions token
 
 ## Authentication
 
-The `auth-pior` OAuth client uses discovery, PKCE, issuer validation, and
-authenticated UserInfo. Provider identities are linked by subject; email-based
+The `auth-pior` OAuth client uses Better Auth 1.7 with discovery, PKCE and
+required ID-token verification: each ID token's signature, issuer, audience and
+nonce are checked against the issuer and JWKS that discovery publishes. The
+profile comes from authenticated UserInfo, whose subject must match the
+verified ID token. Provider identities are linked by that subject; email-based
 account linking is disabled. Local users, sessions, accounts and OAuth state
 are persisted in Tasks' own database, alongside the task-domain `tasks` table.
 
 `GET /api/me` requires an unexpired local session and returns only ID/name/email.
 `/health` and `/api/health` are public liveness endpoints. Other API routes after
-the auth boundary require a session. Sign-out revokes only the Tasks session.
+the auth boundary require a session. Sign-out revokes only the Tasks session;
+provider logout is disabled. The web app starts sign-in with
+`POST /api/auth/sign-in/social` and `{ "provider": "auth-pior" }`.
 Cookies use the unique `tasks` prefix: `tasks.session_token` and the pinned
 library's emitted `tasks.state`, with HttpOnly/SameSite=Lax and Secure on HTTPS.
 
-Exact callbacks registered by the companion service-auth change:
+Exact callbacks used by Better Auth 1.7, registered in service-auth:
 
-- http://localhost:5173/api/auth/oauth2/callback/auth-pior
-- https://tasks.szarans.ca/api/auth/oauth2/callback/auth-pior
+- http://localhost:5173/api/auth/callback/auth-pior
+- https://tasks.szarans.ca/api/auth/callback/auth-pior
+
+service-auth also keeps the Better Auth 1.6 paths
+(`/api/auth/oauth2/callback/auth-pior`) registered until every application has
+upgraded, so reverting this upgrade still signs in (workspace decision 0003).
 
 ## Tasks
 
@@ -231,7 +240,9 @@ well: `TZ=Pacific/Auckland pnpm --filter @tasks/api test`.
 
 Each API test file creates/migrates/drops its own unique disposable
 `tasks_test_*` database. They never truncate the development database. Auth
-tests exercise PKCE callbacks, state and issuer checks, replay, invalid profiles,
+tests exercise PKCE callbacks, state and issuer checks, ID-token verification
+(unsigned, wrong key, issuer, audience, nonce, expiry and subject), replay,
+invalid profiles,
 session persistence/renewal/expiry, cookie isolation, CSRF and sign-out using a
 fixture provider. Task tests cover create/list, title validation, completing and
 clearing, renaming (with the create title cases reused against `PATCH`), due

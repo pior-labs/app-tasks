@@ -14,13 +14,12 @@
   },
   "dependencies": {
     "@hono/node-server": "^2.0.0",
+    "better-auth": "1.7.25",
     "dotenv": "^16.4.7",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.7.2",
     "postgres": "^3.4.9",
-    "zod": "^4.4.2",
-    "better-auth": "1.6.20",
-    "@better-auth/drizzle-adapter": "1.6.20"
+    "zod": "^4.4.2"
   },
   "devDependencies": {
     "@types/node": "^22.13.4",
