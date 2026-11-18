@@ -23,9 +23,9 @@ export function App() {
     setBusy(true);
     setError('');
     try {
-      const response = await fetch(user ? '/api/auth/sign-out' : '/api/auth/sign-in/oauth2', {
+      const response = await fetch(user ? '/api/auth/sign-out' : '/api/auth/sign-in/social', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(user ? {} : { providerId: 'auth-pior', callbackURL: '/', errorCallbackURL: '/?error=sign-in' }),
+        body: JSON.stringify(user ? {} : { provider: 'auth-pior', callbackURL: '/', errorCallbackURL: '/?error=sign-in' }),
       });
       if (!response.ok) throw new Error();
       // An explicit sign-out is not an ended session, even if a task request got a 401 meanwhile.

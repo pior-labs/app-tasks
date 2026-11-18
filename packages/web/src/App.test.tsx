@@ -98,12 +98,12 @@ describe('signed-out view', () => {
 
   test('sign-in starts the SSO flow', async () => {
     reply('GET /api/me', json({ error: 'unauthorized' }, 401));
-    reply('POST /api/auth/sign-in/oauth2', json({ url: '#fixture-sso' }));
+    reply('POST /api/auth/sign-in/social', json({ url: '#fixture-sso' }));
     render(<App />);
     await userEvent.click(await screen.findByRole('button', { name: 'Sign in with Pior Labs' }));
     await waitFor(() => expect(location.hash).toBe('#fixture-sso'));
-    expect(callsTo('POST /api/auth/sign-in/oauth2')[0].body).toEqual({
-      providerId: 'auth-pior',
+    expect(callsTo('POST /api/auth/sign-in/social')[0].body).toEqual({
+      provider: 'auth-pior',
       callbackURL: '/',
       errorCallbackURL: '/?error=sign-in',
     });

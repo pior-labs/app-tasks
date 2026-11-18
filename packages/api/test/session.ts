@@ -15,11 +15,11 @@ export function cookie(response: Response) {
 
 // Complete the fixture SSO flow and return the application session cookie.
 export async function signIn(fixture: Fixture, user = 0) {
-  const started = await fixture.app.request(`${appOrigin}/api/auth/sign-in/oauth2`, {
+  const started = await fixture.app.request(`${appOrigin}/api/auth/sign-in/social`, {
     method: 'POST',
     headers: { Origin: appOrigin, 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      providerId: 'auth-pior',
+      provider: 'auth-pior',
       callbackURL: '/',
       errorCallbackURL: '/?error=sign-in',
     }),
