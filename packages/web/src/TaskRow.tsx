@@ -1,8 +1,17 @@
 import type { FormEvent, KeyboardEvent, Ref } from 'react';
 import { MAX_DUE_DATE, MIN_DUE_DATE, dueLabel, dueStatus } from './dueDate';
+import { RepeatControl, RepeatHint } from './RepeatControl';
+import { type Repeat, type RepeatForm, repeatLabel } from './repeat';
 
-// dueDate is a calendar day, "YYYY-MM-DD", or null for no due date.
-export type Task = { id: number; title: string; completed: boolean; dueDate: string | null };
+// dueDate is a calendar day, "YYYY-MM-DD", or null for no due date. repeat is
+// null for a task that does not repeat; only a task with a due date repeats.
+export type Task = {
+  id: number;
+  title: string;
+  completed: boolean;
+  dueDate: string | null;
+  repeat: Repeat | null;
+};
 
 // What a row is doing besides showing its task. Only one row edits at a time
 // and only one asks for a delete confirmation at a time; Tasks owns that state.
@@ -14,8 +23,9 @@ export type RowMode =
       kind: 'edit';
       text: string;
       dueDate: string;
+      repeat: RepeatForm;
       error: string;
-      errorField: 'title' | 'dueDate';
+      errorField: 'title' | 'dueDate' | 'repeat';
       saving: boolean;
     }
   | { kind: 'confirm-delete'; deleting: boolean };
@@ -35,8 +45,10 @@ type Props = {
   onToggle: (completed: boolean) => void;
   onStartEdit: () => void;
   onEditText: (text: string) => void;
-  onEditDueDate: (dueDate: string) => void;
+  // badInput: the field holds a partly typed date, which is not "no date".
+  onEditDueDate: (dueDate: string, badInput: boolean) => void;
   onRemoveDueDate: () => void;
+  onEditRepeat: (repeat: RepeatForm) => void;
   onSave: () => void;
   onCancelEdit: () => void;
   onStartDelete: () => void;
@@ -73,6 +85,7 @@ export function TaskRow({
   onEditText,
   onEditDueDate,
   onRemoveDueDate,
+  onEditRepeat,
   onSave,
   onCancelEdit,
   onStartDelete,
@@ -83,6 +96,9 @@ export function TaskRow({
     const errorId = `task-${task.id}-edit-error`;
     const titleError = mode.error !== '' && mode.errorField === 'title';
     const dueDateError = mode.error !== '' && mode.errorField === 'dueDate';
+    const repeatError = mode.error !== '' && mode.errorField === 'repeat';
+    const fieldClass =
+      'rounded-md border border-border bg-card px-3 py-1.5 text-card-foreground';
     const submit = (event: FormEvent) => {
       event.preventDefault();
       onSave();
@@ -113,7 +129,7 @@ export function TaskRow({
             value={mode.dueDate}
             min={MIN_DUE_DATE}
             max={MAX_DUE_DATE}
-            onChange={(event) => onEditDueDate(event.target.value)}
+            onChange={(event) => onEditDueDate(event.target.value, event.target.validity?.badInput ?? false)}
             readOnly={mode.saving}
             aria-invalid={dueDateError || undefined}
             aria-describedby={dueDateError ? errorId : undefined}
@@ -131,6 +147,21 @@ export function TaskRow({
               Remove due date
             </button>
           )}
+          <RepeatControl
+            idBase={`task-${task.id}`}
+            names={{
+              choice: `Repeats for "${task.title}"`,
+              every: `Repeat interval for "${task.title}"`,
+              unit: `Repeat unit for "${task.title}"`,
+            }}
+            form={mode.repeat}
+            available={mode.dueDate !== ''}
+            locked={mode.saving}
+            invalid={repeatError}
+            errorId={errorId}
+            className={fieldClass}
+            onChange={onEditRepeat}
+          />
           <button
             type="submit"
             data-action="save"
@@ -148,6 +179,7 @@ export function TaskRow({
           >
             Cancel
           </button>
+          {mode.dueDate === '' && <RepeatHint idBase={`task-${task.id}`} className="basis-full text-right" />}
           {mode.error && (
             <p id={errorId} role="alert" className="basis-full text-sm text-destructive">
               {mode.error}
@@ -195,6 +227,12 @@ export function TaskRow({
               </>
             )}
             <span>{dueLabel(task.dueDate, today)}</span>
+            {task.repeat && (
+              <>
+                {' \u00B7 '}
+                <span className="whitespace-nowrap">{repeatLabel(task.repeat)}</span>
+              </>
+            )}
           </p>
         )}
       </div>
