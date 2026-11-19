@@ -225,7 +225,11 @@ export async function createFixture(baseURL = 'http://localhost:5173') {
       clientSecret: 'fixture-client-secret',
       secret: 'fixture-session-secret-at-least-32-characters',
     });
-    const app = createApp(auth, drizzle(client, { schema }), baseURL);
+    // The server clock. null follows the real clock; otherwise it is the real
+    // clock shifted by a fixed offset, so time keeps running from a set moment.
+    let clockOffset: number | null = null;
+    const now = () => new Date(Date.now() + (clockOffset ?? 0));
+    const app = createApp(auth, drizzle(client, { schema }), baseURL, { now });
     return {
       app,
       auth,
@@ -246,6 +250,12 @@ export async function createFixture(baseURL = 'http://localhost:5173') {
       setIdTokenMode: (value: IdTokenMode) => {
         idTokenMode = value;
       },
+      // Sets the server clock to `moment` (it keeps running from there), or
+      // back to the real clock with null.
+      setNow: (moment: Date | null) => {
+        clockOffset = moment === null ? null : moment.getTime() - Date.now();
+      },
+      now,
     };
   } catch (error) {
     await close();

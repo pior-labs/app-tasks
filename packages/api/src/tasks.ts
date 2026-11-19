@@ -5,6 +5,16 @@ import { z } from 'zod';
 import type { AppEnv } from './app.js';
 import * as schema from './db/schema.js';
 import { tasks } from './db/schema.js';
+import {
+  MAX_REPEAT_EVERY,
+  MIN_REPEAT_EVERY,
+  REPEAT_UNITS,
+  type RepeatUnit,
+  addDays,
+  isCalendarDate,
+  nextDueDate,
+  utcDate,
+} from './repeat.js';
 
 export type AppDatabase = PostgresJsDatabase<typeof schema>;
 
@@ -49,14 +59,8 @@ export const MAX_DUE_DATE = '2100-12-31';
 const DUE_DATE_MESSAGE = `A due date must be a real calendar date from ${MIN_DUE_DATE} through ${MAX_DUE_DATE}, written as YYYY-MM-DD, or null.`;
 
 function isDueDate(value: string) {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
-  if (!match) return false;
-  const [year, month, day] = match.slice(1).map(Number);
-  const date = new Date(Date.UTC(year, month - 1, day));
-  const exists =
-    date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
   // Fixed-width text compares in calendar order.
-  return exists && value >= MIN_DUE_DATE && value <= MAX_DUE_DATE;
+  return isCalendarDate(value) && value >= MIN_DUE_DATE && value <= MAX_DUE_DATE;
 }
 
 const taskDueDate = z
@@ -64,41 +68,95 @@ const taskDueDate = z
   .refine(isDueDate, { error: DUE_DATE_MESSAGE })
   .nullable();
 
+// The one definition of a valid repeat, used by both create and update: an
+// object with exactly an integer `every` from 1 to 99 and one of the units,
+// or null for "does not repeat". A repeat also needs a due date, which the
+// routes check against the task as it will be stored.
+const REPEAT_MESSAGE = `A repeat must be null or an object with exactly an integer "every" from ${MIN_REPEAT_EVERY} to ${MAX_REPEAT_EVERY} and a "unit" of ${REPEAT_UNITS.join(', ')}.`;
+const REPEAT_NEEDS_DUE_DATE_MESSAGE = 'A repeating task needs a due date. Set a due date, or send "repeat": null.';
+const taskRepeat = z
+  .strictObject(
+    {
+      every: z.int({ error: REPEAT_MESSAGE }).min(MIN_REPEAT_EVERY, { error: REPEAT_MESSAGE }).max(MAX_REPEAT_EVERY, { error: REPEAT_MESSAGE }),
+      unit: z.enum(REPEAT_UNITS, { error: REPEAT_MESSAGE }),
+    },
+    { error: REPEAT_MESSAGE },
+  )
+  .nullable();
+type Repeat = { every: number; unit: RepeatUnit } | null;
+const invalidRepeat = (message: string) => ({ error: 'invalid_repeat', message });
+
+// "Today" for the fixed schedule is the user's local date, which only the
+// browser knows. It is accepted within one day of the server's UTC date, which
+// covers every timezone from UTC-12 to UTC+14.
+const TODAY_MESSAGE =
+  'today must be your local date, written as YYYY-MM-DD, within one day of the server\'s date.';
+function acceptedToday(value: unknown, serverToday: string): string | null {
+  if (typeof value !== 'string' || !isCalendarDate(value)) return null;
+  return value >= addDays(serverToday, -1) && value <= addDays(serverToday, 1) ? value : null;
+}
+
 // The first issue decides the error code, so a body with several invalid
 // fields answers for the first one (in the order of the schema's keys).
 function fieldError(field: PropertyKey | undefined, fallback: string) {
   if (field === 'title') return 'invalid_title';
   if (field === 'completed') return 'invalid_completed';
   if (field === 'dueDate') return 'invalid_due_date';
+  if (field === 'repeat') return 'invalid_repeat';
   return fallback;
 }
 
-// A missing or null dueDate both mean "no due date".
+// A missing or null dueDate both mean "no due date"; the same for repeat.
 const createTaskBody = z.object(
-  { title: taskTitle, dueDate: taskDueDate.optional() },
+  { title: taskTitle, dueDate: taskDueDate.optional(), repeat: taskRepeat.optional() },
   { error: 'Send a JSON object with a title.' },
 );
-// Any of the fields may be sent alone. Unknown keys (such as an owner or an id) are dropped.
+// Any of the fields may be sent alone. Unknown keys (such as an owner or an id)
+// are dropped. `today` is read separately: it only matters when completing.
 const UPDATE_FIELDS_MESSAGE =
-  'Send a JSON object with a title, a completed value, a due date (dueDate), or any of them together.';
+  'Send a JSON object with a title, a completed value, a due date (dueDate), a repeat, or any of them together.';
 const updateTaskBody = z.object(
   {
     title: taskTitle.optional(),
     completed: z.boolean({ error: 'Completed must be true or false.' }).optional(),
     dueDate: taskDueDate.optional(),
+    repeat: taskRepeat.optional(),
+    today: z.unknown().optional(),
   },
   { error: UPDATE_FIELDS_MESSAGE },
 );
 
-// Never expose user_id: the owner is implied by the session.
+// Never expose user_id, repeat_anchor or repeated_from_id: the owner is implied
+// by the session, and the other two are internal to the schedule.
 const taskColumns = {
   id: tasks.id,
   title: tasks.title,
   completed: tasks.completed,
   dueDate: tasks.dueDate,
+  repeatEvery: tasks.repeatEvery,
+  repeatUnit: tasks.repeatUnit,
   createdAt: tasks.createdAt,
   updatedAt: tasks.updatedAt,
 };
+type TaskRow = {
+  id: number;
+  title: string;
+  completed: boolean;
+  dueDate: string | null;
+  repeatEvery: number | null;
+  repeatUnit: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+function repeatOf(row: { repeatEvery: number | null; repeatUnit: string | null }): Repeat {
+  return row.repeatEvery === null || row.repeatUnit === null
+    ? null
+    : { every: row.repeatEvery, unit: row.repeatUnit as RepeatUnit };
+}
+// The API shape of a task.
+function toTask({ repeatEvery, repeatUnit, ...task }: TaskRow) {
+  return { ...task, repeat: repeatOf({ repeatEvery, repeatUnit }) };
+}
 
 const malformedJson = Symbol('malformed JSON');
 async function readJson(c: Context): Promise<unknown> {
@@ -127,7 +185,7 @@ function taskId(raw: string): number | null {
   return /^[1-9]\d{0,15}$/.test(raw) ? Number(raw) : null;
 }
 
-export function createTaskRoutes(db: AppDatabase, appOrigin: string) {
+export function createTaskRoutes(db: AppDatabase, appOrigin: string, now: () => Date) {
   const allowedOrigin = new URL(appOrigin).origin;
   const routes = new Hono<AppEnv>();
 
@@ -150,7 +208,7 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string) {
       .from(tasks)
       .where(eq(tasks.userId, sessionUserId(c)))
       .orderBy(desc(tasks.createdAt), desc(tasks.id));
-    return c.json({ tasks: rows });
+    return c.json({ tasks: rows.map(toTask) });
   });
 
   routes.post('/', async (c) => {
@@ -163,15 +221,21 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string) {
       const [issue] = parsed.error.issues;
       return c.json({ error: fieldError(issue.path[0], 'invalid_title'), message: issue.message }, 400);
     }
+    const dueDate = parsed.data.dueDate ?? null;
+    const repeat = parsed.data.repeat ?? null;
+    if (repeat && dueDate === null) return c.json(invalidRepeat(REPEAT_NEEDS_DUE_DATE_MESSAGE), 400);
     const [task] = await db
       .insert(tasks)
       .values({
         userId: sessionUserId(c),
         title: parsed.data.title,
-        dueDate: parsed.data.dueDate ?? null,
+        dueDate,
+        repeatEvery: repeat?.every ?? null,
+        repeatUnit: repeat?.unit ?? null,
+        repeatAnchor: repeat ? dueDate : null,
       })
       .returning(taskColumns);
-    return c.json({ task }, 201);
+    return c.json({ task: toTask(task) }, 201);
   });
 
   routes.patch('/:id', async (c) => {
@@ -186,26 +250,125 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string) {
       const [issue] = parsed.error.issues;
       return c.json({ error: fieldError(issue.path[0], 'invalid_update'), message: issue.message }, 400);
     }
-    const { title, completed, dueDate } = parsed.data;
-    if (title === undefined && completed === undefined && dueDate === undefined) {
+    const { title, completed, dueDate, repeat } = parsed.data;
+    if (title === undefined && completed === undefined && dueDate === undefined && repeat === undefined) {
       return c.json({ error: 'invalid_update', message: UPDATE_FIELDS_MESSAGE }, 400);
     }
     // Unknown ids and other users' tasks are indistinguishable to the caller.
-    const [task] =
-      id > MAX_TASK_ID
-        ? []
-        : await db
-            .update(tasks)
-            .set({
-              ...(title === undefined ? {} : { title }),
-              ...(completed === undefined ? {} : { completed }),
-              ...(dueDate === undefined ? {} : { dueDate }),
-              updatedAt: sql`now()`,
+    if (id > MAX_TASK_ID) return c.json(taskNotFound, 404);
+    const userId = sessionUserId(c);
+    const serverToday = utcDate(now());
+    const ownTask = and(eq(tasks.id, id), eq(tasks.userId, userId));
+
+    // One transaction: the update, and the next occurrence created or removed
+    // with it. The row is locked first, so concurrent changes to one task run
+    // one after another and see each other's result.
+    const result = await db.transaction(async (tx) => {
+      const [current] = await tx
+        .select({
+          completed: tasks.completed,
+          dueDate: tasks.dueDate,
+          repeatEvery: tasks.repeatEvery,
+          repeatUnit: tasks.repeatUnit,
+          repeatAnchor: tasks.repeatAnchor,
+        })
+        .from(tasks)
+        .where(ownTask)
+        .for('update');
+      if (!current) return { status: 404 as const, body: taskNotFound };
+
+      const currentRepeat = repeatOf(current);
+      const newRepeat = repeat === undefined ? currentRepeat : repeat;
+      const newDueDate = dueDate === undefined ? current.dueDate : dueDate;
+      if (newRepeat && newDueDate === null) {
+        return { status: 400 as const, body: invalidRepeat(REPEAT_NEEDS_DUE_DATE_MESSAGE) };
+      }
+      const completing = completed === true && !current.completed;
+      const reopening = completed === false && current.completed;
+      let today = serverToday;
+      if (completing && parsed.data.today !== undefined) {
+        const accepted = acceptedToday(parsed.data.today, serverToday);
+        if (accepted === null) {
+          return { status: 400 as const, body: { error: 'invalid_today', message: TODAY_MESSAGE } };
+        }
+        today = accepted;
+      }
+      // The schedule restarts from the due date when the repeat is set or
+      // changed, and whenever the due date of a repeating task changes.
+      const repeatChanged =
+        repeat !== undefined &&
+        (currentRepeat === null ||
+          repeat === null ||
+          repeat.every !== currentRepeat.every ||
+          repeat.unit !== currentRepeat.unit);
+      const newAnchor = !newRepeat
+        ? null
+        : repeatChanged || newDueDate !== current.dueDate || current.repeatAnchor === null
+          ? newDueDate
+          : current.repeatAnchor;
+
+      const [task] = await tx
+        .update(tasks)
+        .set({
+          ...(title === undefined ? {} : { title }),
+          ...(completed === undefined ? {} : { completed }),
+          ...(dueDate === undefined ? {} : { dueDate }),
+          ...(repeat === undefined ? {} : { repeatEvery: repeat?.every ?? null, repeatUnit: repeat?.unit ?? null }),
+          repeatAnchor: newAnchor,
+          updatedAt: sql`now()`,
+        })
+        .where(ownTask)
+        .returning(taskColumns);
+
+      let nextTask: TaskRow | null = null;
+      if (completing && newRepeat && newDueDate !== null && newAnchor !== null) {
+        // Completing again while an earlier next occurrence still exists (it
+        // was completed itself, so un-completing kept it) creates no second one.
+        const [existing] = await tx
+          .select({ id: tasks.id })
+          .from(tasks)
+          .where(and(eq(tasks.repeatedFromId, id), eq(tasks.userId, userId)));
+        const next = nextDueDate({
+          anchor: newAnchor,
+          dueDate: newDueDate,
+          today,
+          every: newRepeat.every,
+          unit: newRepeat.unit,
+        });
+        if (!existing && next <= MAX_DUE_DATE) {
+          // The unique repeated_from_id backs this up: a conflicting insert
+          // creates nothing instead of a duplicate.
+          [nextTask = null] = await tx
+            .insert(tasks)
+            .values({
+              userId,
+              title: task.title,
+              dueDate: next,
+              repeatEvery: newRepeat.every,
+              repeatUnit: newRepeat.unit,
+              repeatAnchor: newAnchor,
+              repeatedFromId: id,
             })
-            .where(and(eq(tasks.id, id), eq(tasks.userId, sessionUserId(c))))
+            .onConflictDoNothing({ target: tasks.repeatedFromId })
             .returning(taskColumns);
-    if (!task) return c.json(taskNotFound, 404);
-    return c.json({ task });
+        }
+      }
+      let removedTaskId: number | null = null;
+      if (reopening) {
+        // Undo: the next occurrence goes away while it is still open. One that
+        // was completed meanwhile is kept.
+        const [removed] = await tx
+          .delete(tasks)
+          .where(and(eq(tasks.repeatedFromId, id), eq(tasks.userId, userId), eq(tasks.completed, false)))
+          .returning({ id: tasks.id });
+        removedTaskId = removed?.id ?? null;
+      }
+      return {
+        status: 200 as const,
+        body: { task: toTask(task), nextTask: nextTask && toTask(nextTask), removedTaskId },
+      };
+    });
+    return c.json(result.body, result.status);
   });
 
   routes.delete('/:id', async (c) => {
