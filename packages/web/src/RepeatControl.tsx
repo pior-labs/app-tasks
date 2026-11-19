@@ -5,6 +5,7 @@ import {
   REPEAT_NEEDS_DUE_DATE_HINT,
   REPEAT_UNITS,
   type RepeatChoice,
+  type Repeat,
   type RepeatForm,
   type RepeatUnit,
   UNIT_LABELS,
@@ -19,6 +20,9 @@ type Props = {
   names: { choice: string; every: string; unit: string };
   visibleLabels?: boolean;
   form: RepeatForm;
+  // The repeat before this edit (the stored one; null in the add form). Custom
+  // starts from it.
+  seed: Repeat | null;
   // A repeat needs a due date. Without one the select is marked unavailable
   // and described by the hint, which the caller shows (see RepeatHint).
   available: boolean;
@@ -41,6 +45,7 @@ export function RepeatControl({
   names,
   visibleLabels = false,
   form,
+  seed,
   available,
   locked,
   invalid,
@@ -72,7 +77,7 @@ export function RepeatControl({
           aria-invalid={(invalid && form.choice !== 'custom') || undefined}
           aria-describedby={describedBy || undefined}
           onChange={(event) => {
-            if (!ignored) onChange(chooseRepeat(form, event.target.value as RepeatChoice));
+            if (!ignored) onChange(chooseRepeat(form, event.target.value as RepeatChoice, seed));
           }}
           className={`${className} aria-disabled:opacity-60`}
         >

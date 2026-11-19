@@ -48,12 +48,19 @@ export function repeatForm(repeat: Repeat | null | undefined): RepeatForm {
   return { choice: 'custom', every: String(repeat.every), unit: repeat.unit };
 }
 
-// A new choice in the select. Custom starts from the current repeat, so
-// switching from Weekly to Custom shows "every 1 weeks" ready to change.
-export function chooseRepeat(form: RepeatForm, choice: RepeatChoice): RepeatForm {
+// A new choice in the select. Custom starts from `seed`, the repeat the task
+// had before this edit (null in the add form), not from the presets passed on
+// the way: arrowing down from Weekly passes Monthly and Yearly, and each step
+// is a change. Without a seed Custom starts at every 1 week.
+export function chooseRepeat(form: RepeatForm, choice: RepeatChoice, seed: Repeat | null): RepeatForm {
   const unit = PRESET_UNITS[choice];
   if (unit) return { choice, every: '1', unit };
-  if (choice === 'custom') return { ...form, choice };
+  if (choice === 'custom') {
+    if (form.choice === 'custom') return form;
+    return seed
+      ? { choice, every: String(seed.every), unit: seed.unit }
+      : { choice, every: NO_REPEAT.every, unit: NO_REPEAT.unit };
+  }
   return { ...NO_REPEAT };
 }
 
@@ -67,6 +74,37 @@ export function repeatFromForm(form: RepeatForm): { repeat: Repeat | null } | { 
     return { problem: REPEAT_EVERY_MESSAGE };
   }
   return { repeat: { every, unit: form.unit } };
+}
+
+// Whether the next occurrence of a task due on `dueDate`, completed on
+// `today`, would fall after `limit` ("YYYY-MM-DD"), the last supported due
+// date. The server counts from its stored anchor, which can move a month-end
+// day later in the same month (an anchor on the 31st gives March 31 after
+// February 28) but never into another month, so months and years are compared
+// by month. This is exact unless "today" is itself in the limit's month, which
+// the server's one-day window rules out before December 2100.
+export function nextIsBeyond(dueDate: string, today: string, repeat: Repeat, limit: string): boolean {
+  const parse = (text: string) => {
+    const [year, month, date] = text.split('-').map(Number);
+    return { year, month, date, day: Date.UTC(year, month - 1, date) / 86_400_000 };
+  };
+  const due = parse(dueDate);
+  const end = parse(limit);
+  // The next occurrence is the first one after the due date and after yesterday.
+  const after = Math.max(due.day, parse(today).day - 1);
+  if (repeat.unit === 'day' || repeat.unit === 'week') {
+    const step = repeat.every * (repeat.unit === 'week' ? 7 : 1);
+    return due.day + (Math.floor((after - due.day) / step) + 1) * step > end.day;
+  }
+  const step = repeat.every * (repeat.unit === 'year' ? 12 : 1);
+  const dueMonth = due.year * 12 + due.month - 1;
+  for (let month = dueMonth + step; ; month += step) {
+    const year = Math.floor(month / 12);
+    const lastDay = new Date(Date.UTC(year, (month % 12) + 1, 0)).getUTCDate();
+    if (Date.UTC(year, month % 12, Math.min(due.date, lastDay)) / 86_400_000 > after) {
+      return month > end.year * 12 + end.month - 1;
+    }
+  }
 }
 
 export function sameRepeat(a: Repeat | null | undefined, b: Repeat | null | undefined) {

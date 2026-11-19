@@ -155,6 +155,7 @@ export function TaskRow({
               unit: `Repeat unit for "${task.title}"`,
             }}
             form={mode.repeat}
+            seed={task.repeat}
             available={mode.dueDate !== ''}
             locked={mode.saving}
             invalid={repeatError}

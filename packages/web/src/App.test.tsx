@@ -2038,13 +2038,88 @@ describe('repeating tasks', () => {
     render(<App />);
     await userEvent.click(await screen.findByRole('checkbox', { name: 'Last one' }));
     await waitFor(() => expect(screen.queryByRole('checkbox', { name: 'Last one' })).toBeNull());
-    expect(status()).toBe('"Last one" was moved to Completed. No further occurrence was created.');
+    expect(status()).toBe(
+      '"Last one" was moved to Completed. No further occurrence was created, because it would be after December 31, 2100.',
+    );
     // The usual focus rule: the next row in page order.
     await waitFor(() => expect(document.activeElement).toBe(checkbox('Other')));
     await userEvent.click(checkbox('Plain'));
     await waitFor(() => expect(screen.queryByRole('checkbox', { name: 'Plain' })).toBeNull());
     expect(status()).toBe('"Plain" was moved to Completed.');
     expect(callsTo('PATCH /api/tasks/2')[0].body).toEqual({ completed: true, today: '2026-11-20' });
+  });
+
+  test('re-ticking a task whose next occurrence was kept says it already exists (R1-F1)', async () => {
+    const plants = (completed: boolean) => task(2, 'Water the plants', '2026-11-20', weekly, completed);
+    signedIn([task(9, 'Water the plants', '2026-11-27', weekly, true), plants(true)]);
+    reply(
+      'PATCH /api/tasks/2',
+      // Un-ticked: its next occurrence was completed, so the server kept it.
+      json({ task: plants(false), nextTask: null, removedTaskId: null }),
+      // Ticked again: the next occurrence already exists, so none is created.
+      json({ task: plants(true), nextTask: null, removedTaskId: null }),
+    );
+    render(<App />);
+    await expandCompleted();
+    await userEvent.click(within(group(/^Completed/)).getAllByRole('checkbox', { name: 'Water the plants' })[1]);
+    await waitFor(() => expect(rowTitles(group('Today'))).toEqual(['Water the plants']));
+    await userEvent.click(within(group('Today')).getByRole('checkbox', { name: 'Water the plants' }));
+    await waitFor(() => expect(screen.queryByRole('list', { name: 'Today' })).toBeNull());
+    expect(status()).toBe('"Water the plants" was moved to Completed. Its next occurrence already exists.');
+  });
+
+  test('ticking a task whose next date would be after 2100 says why none was created (R1-F1)', async () => {
+    const cases = [
+      [task(3, 'Daily end', '2100-12-31', { every: 1, unit: 'day' }), true],
+      [task(4, 'Monthly end', '2100-12-05', { every: 1, unit: 'month' }), true],
+      [task(5, 'Monthly last', '2100-11-30', { every: 1, unit: 'month' }), false],
+      [task(6, 'Yearly', '2100-01-31', { every: 1, unit: 'year' }), true],
+    ] as const;
+    signedIn(cases.map(([item]) => item));
+    for (const [item] of cases) {
+      reply(`PATCH /api/tasks/${item.id}`, json({ task: { ...item, completed: true }, nextTask: null, removedTaskId: null }));
+    }
+    render(<App />);
+    await screen.findByRole('list', { name: 'Upcoming' });
+    for (const [item, beyond] of cases) {
+      await userEvent.click(checkbox(item.title));
+      await waitFor(() => expect(screen.queryByRole('checkbox', { name: item.title })).toBeNull());
+      expect(status()).toBe(
+        beyond
+          ? `"${item.title}" was moved to Completed. No further occurrence was created, because it would be after December 31, 2100.`
+          : `"${item.title}" was moved to Completed. Its next occurrence already exists.`,
+      );
+    }
+  });
+
+  test('Custom starts from the stored repeat, not from presets passed on the way (R1-F2)', async () => {
+    signedIn([task(4, 'Bins out', '2026-11-24', weekly), task(3, 'Every 5 days', '2026-11-24', { every: 5, unit: 'day' })]);
+    render(<App />);
+    await startEditing('Bins out');
+    // Arrowing down from Weekly passes Monthly and Yearly before Custom.
+    for (const choice of ['monthly', 'yearly', 'custom']) {
+      fireEvent.change(select('Repeats for "Bins out"'), { target: { value: choice } });
+    }
+    expect((screen.getByRole('spinbutton', { name: 'Repeat interval for "Bins out"' }) as HTMLInputElement).value).toBe('1');
+    expect(select('Repeat unit for "Bins out"').value).toBe('week');
+    await userEvent.click(button('Cancel'));
+
+    // A stored custom repeat comes back after passing through presets.
+    await startEditing('Every 5 days');
+    for (const choice of ['none', 'daily', 'custom']) {
+      fireEvent.change(select('Repeats for "Every 5 days"'), { target: { value: choice } });
+    }
+    expect((screen.getByRole('spinbutton', { name: 'Repeat interval for "Every 5 days"' }) as HTMLInputElement).value).toBe('5');
+    expect(select('Repeat unit for "Every 5 days"').value).toBe('day');
+    await userEvent.click(button('Cancel'));
+
+    // The add form has no stored repeat: Custom starts at every 1 week.
+    fireEvent.change(screen.getByLabelText('Due date'), { target: { value: '2026-11-24' } });
+    for (const choice of ['monthly', 'yearly', 'custom']) {
+      fireEvent.change(select('Repeats'), { target: { value: choice } });
+    }
+    expect((screen.getByRole('spinbutton', { name: 'Every' }) as HTMLInputElement).value).toBe('1');
+    expect(select('Repeat unit').value).toBe('week');
   });
 
   test('the local date at the moment of ticking is sent as today', async () => {

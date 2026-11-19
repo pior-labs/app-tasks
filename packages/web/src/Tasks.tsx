@@ -9,7 +9,15 @@ import {
   msUntilNextLocalMidnight,
 } from './dueDate';
 import { RepeatControl, RepeatHint } from './RepeatControl';
-import { NO_REPEAT, type Repeat, type RepeatForm, repeatForm, repeatFromForm, sameRepeat } from './repeat';
+import {
+  NO_REPEAT,
+  type Repeat,
+  type RepeatForm,
+  nextIsBeyond,
+  repeatForm,
+  repeatFromForm,
+  sameRepeat,
+} from './repeat';
 import { type RowMode, type Task, TaskRow } from './TaskRow';
 import { groupTasks, visibleTasks } from './taskGroups';
 
@@ -79,8 +87,16 @@ function nextDueMessage(next: Task, today: string) {
   const when = next.dueDate === null ? '' : dueLabel(next.dueDate, today).replace(/^Due /, '');
   return `"${next.title}" is next due ${when}.`;
 }
-function noNextMessage(task: Task) {
-  return `"${task.title}" was moved to Completed. No further occurrence was created.`;
+// The server creates no next occurrence for a repeating task only when its
+// date would be after the last supported due date, or when the occurrence
+// created from this task already exists (it was kept when the task was
+// un-ticked, or another tab completed the task first).
+function noNextMessage(task: Task, today: string) {
+  const beyond =
+    task.dueDate !== null && task.repeat !== null && nextIsBeyond(task.dueDate, today, task.repeat, MAX_DUE_DATE);
+  return beyond
+    ? `"${task.title}" was moved to Completed. No further occurrence was created, because it would be after December 31, 2100.`
+    : `"${task.title}" was moved to Completed. Its next occurrence already exists.`;
 }
 function removedNextMessage(task: Task) {
   return `"${task.title}" is open again, and its next occurrence was removed.`;
@@ -320,13 +336,14 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
     setUpdatingIds((ids) => [...ids, task.id]);
     setUpdateError('');
     setNotice('');
+    const sentToday = localDate(new Date());
     try {
       const response = await fetch(`/api/tasks/${task.id}`, {
         method: 'PATCH',
         headers: jsonHeaders,
         // Completing sends the browser's local date, which decides where a
         // repeating task's schedule goes next.
-        body: JSON.stringify(completed ? { completed, today: localDate(new Date()) } : { completed }),
+        body: JSON.stringify(completed ? { completed, today: sentToday } : { completed }),
       });
       if (!mounted.current) return;
       if (response.status === 401) return onSignedOut();
@@ -359,7 +376,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
         }
       }
       if (nextTask) setNotice(nextDueMessage(nextTask, todayRef.current));
-      else if (updated.completed && updated.repeat) setNotice(noNextMessage(updated));
+      else if (updated.completed && updated.repeat) setNotice(noNextMessage(updated, sentToday));
       else if (removedTaskId !== null) setNotice(removedNextMessage(updated));
       else if (leavesView) setNotice(movedMessage(updated));
       // A delete question cannot stay open on a row nobody can see.
@@ -675,6 +692,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
             visibleLabels
             names={{ choice: 'Repeats', every: 'Every', unit: 'Repeat unit' }}
             form={repeat}
+            seed={null}
             available={dueDate !== ''}
             locked={creating}
             invalid={createError?.field === 'repeat'}
