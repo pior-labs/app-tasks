@@ -6,8 +6,9 @@ due date and delete a task. Open tasks are grouped by when they are due.
 Deletion is permanent: there is no archive or undo. Notes, projects and
 priorities are not implemented.
 
-React 19/Vite, Hono, PostgreSQL/Drizzle, pnpm 10.34.5, published
-`@pior-labs/design-system`, and Better Auth 1.7 application sessions.
+React/Vite, Hono, PostgreSQL/Drizzle, pnpm, published
+`@pior-labs/design-system`, and Better Auth application sessions. Versions are
+defined in `.node-version`, `packageManager` and each package's `package.json`.
 The starting source is `pior-labs/template-webapp` revision
 `9b719955088ab31dd294ad84f7a9f1a0ac5a5e72`. The private GitHub repository was
 generated using GitHub template generation; foundation changes are separate
@@ -59,7 +60,7 @@ CI has successfully installed the published design system with its Actions token
 
 ## Authentication
 
-The `auth-pior` OAuth client uses Better Auth 1.7 with discovery, PKCE and
+The `auth-pior` OAuth client uses Better Auth with discovery, PKCE and
 required ID-token verification: each ID token's signature, issuer, audience and
 nonce are checked against the issuer and JWKS that discovery publishes. The
 profile comes from authenticated UserInfo, whose subject must match the
@@ -75,7 +76,7 @@ provider logout is disabled. The web app starts sign-in with
 Cookies use the unique `tasks` prefix: `tasks.session_token` and the pinned
 library's emitted `tasks.state`, with HttpOnly/SameSite=Lax and Secure on HTTPS.
 
-Exact callbacks used by Better Auth 1.7, registered in service-auth:
+Exact callbacks used by Better Auth, registered in service-auth:
 
 - http://localhost:5173/api/auth/callback/auth-pior
 - https://tasks.szarans.ca/api/auth/callback/auth-pior
