@@ -2,7 +2,8 @@
 
 Pior Labs Tasks. A signed-in user can create tasks, see their saved tasks,
 mark a task complete or clear it again, rename a task, give a task an optional
-due date and delete a task. Open tasks are grouped by when they are due.
+due date, make a task with a due date repeat, and delete a task. Open tasks are
+grouped by when they are due.
 Deletion is permanent: there is no archive or undo. Notes, projects and
 priorities are not implemented.
 
@@ -89,7 +90,16 @@ timestamps. `due_date` is a nullable PostgreSQL `date` (a calendar day with no
 time or timezone), added by migration `0002`; existing rows get `NULL`, and
 the migration only adds the column, so an image built before it keeps working
 against the migrated table. Drizzle reads and writes it in string mode, so the
-server never converts it between timezones. The owner is always
+server never converts it between timezones. Migration `0003` adds the repeat
+columns, all nullable, so existing rows do not repeat and an image built before
+it keeps working against the migrated table: `repeat_unit` (`day`, `week`,
+`month` or `year`) and `repeat_every` (1 to 99), set together or both null;
+`repeat_anchor`, the `date` the schedule counts from, set exactly when the task
+repeats; and `repeated_from_id`, the occurrence whose completion created the
+row (a unique foreign key to `tasks.id`, `ON DELETE SET NULL`). Check
+constraints enforce the units, the range and that the three repeat columns are
+set together. `repeat_anchor` and `repeated_from_id` are internal and not
+returned. The owner is always
 taken from the server session, never from the request, and `user_id` is not
 returned. All task routes sit behind the session boundary and return 401
 without a valid session.
@@ -97,15 +107,16 @@ without a valid session.
 | Route | Request | Success |
 | --- | --- | --- |
 | `GET /api/tasks` | none | 200 `{ "tasks": [...] }`, the session user's tasks only, newest first |
-| `POST /api/tasks` | `{ "title": string, "dueDate"?: string or null }` | 201 `{ "task": {...} }`; the title is trimmed, 1 to 200 characters |
-| `PATCH /api/tasks/:id` | any of `{ "title": string }`, `{ "completed": boolean }`, `{ "dueDate": string or null }`, together or alone | 200 `{ "task": {...} }` with the stored task |
+| `POST /api/tasks` | `{ "title": string, "dueDate"?: string or null, "repeat"?: object or null }` | 201 `{ "task": {...} }`; the title is trimmed, 1 to 200 characters |
+| `PATCH /api/tasks/:id` | any of `{ "title": string }`, `{ "completed": boolean }`, `{ "dueDate": string or null }`, `{ "repeat": object or null }`, together or alone, plus an optional `"today"` when completing | 200 `{ "task": {...}, "nextTask": {...} or null, "removedTaskId": number or null }` |
 | `DELETE /api/tasks/:id` | none | 204 with no body; the task is removed permanently |
 
-A task is `{ id, title, completed, dueDate, createdAt, updatedAt }`, where
-`dueDate` is a `"YYYY-MM-DD"` string or `null`. Errors are
+A task is `{ id, title, completed, dueDate, repeat, createdAt, updatedAt }`,
+where `dueDate` is a `"YYYY-MM-DD"` string or `null` and `repeat` is
+`{ "every": n, "unit": "day" | "week" | "month" | "year" }` or `null`. Errors are
 `{ "error": code, "message": text }` with stable codes: 400 `invalid_json`,
-`invalid_title`, `invalid_completed`, `invalid_due_date`, `invalid_update` or
-`invalid_task_id`; 403
+`invalid_title`, `invalid_completed`, `invalid_due_date`, `invalid_repeat`,
+`invalid_today`, `invalid_update` or `invalid_task_id`; 403
 `forbidden_origin` when a `POST`/`PATCH`/`DELETE` does not carry the application
 origin (`BETTER_AUTH_URL`) in `Origin`; 404 `task_not_found` for an id that does
 not exist, was already deleted or belongs to another user (the cases are
@@ -113,13 +124,17 @@ indistinguishable).
 
 `PATCH` changes only the fields that are sent. A title follows the same rules
 as on create, from one shared definition in `packages/api/src/tasks.ts`. A body
-with none of `title`, `completed` and `dueDate` (an empty object, or anything
-that is not an object) is 400 `invalid_update`, and its message names all
-three; before renaming existed such a body was answered with
-`invalid_completed`. If any field is invalid nothing is changed, and the first
-invalid field (in the order title, completed, due date) decides the code. Other fields, such as `userId` or `id`, are ignored. Every successful
-update sets `updatedAt`; `createdAt`, and so the list order, never changes.
-Both writes filter on the session user in the statement that changes the row.
+with none of `title`, `completed`, `dueDate` and `repeat` (an empty object, a
+body with only `today`, or anything that is not an object) is 400
+`invalid_update`, and its message names all four; before renaming existed such
+a body was answered with `invalid_completed`. If any field is invalid nothing
+is changed, and the first invalid field (in the order title, completed, due
+date, repeat) decides the code. Other fields, such as `userId` or `id`, are
+ignored. Every successful update sets `updatedAt`; `createdAt`, and so the list
+order, never changes. All writes filter on the session user in the statements
+that change rows. A `PATCH` locks the task's row and runs in one transaction
+with the next occurrence it creates or removes, so concurrent changes to one
+task run one after another.
 
 Title rules, applied by the API and mirrored by the forms: the title is trimmed;
 a title with nothing visible (only whitespace, control characters or invisible
@@ -137,13 +152,62 @@ due date. Anything else (another format, a day that does not exist, a date
 outside the range, a number or another type) is 400 `invalid_due_date` and
 nothing is created or changed. The forms apply the same range.
 
-The signed-in page shows an add-task form (a title and an optional "Due date"
-field) and the task list, with distinct
+Repeat rules, from one shared definition used by `POST` and `PATCH`: a repeat
+is an object with exactly an integer `every` from 1 to 99 and a `unit` of
+`day`, `week`, `month` or `year`, or `null` for "does not repeat" (a missing
+`repeat` on create means none). Anything else (a missing or extra key, `every`
+0, 100, a fraction or not a number, another unit, or not an object) is 400
+`invalid_repeat` and nothing changes. A repeat needs a due date: a repeat on a
+task without one, or removing the date of a repeating task without also
+sending `"repeat": null`, is also 400 `invalid_repeat`. The schedule is fixed
+to the calendar. It counts from `repeat_anchor`, which is set to the due date
+when a repeat is set or changed and whenever the due date of a repeating task
+changes, so moving a task realigns its schedule. Occurrences are the anchor
+plus whole intervals; months and years keep the anchor's day of month, clamped
+to the last day of shorter months, so a task anchored on January 31 is due
+February 28 (29 in a leap year), then March 31, and a yearly task on February
+29 is due February 28 in common years. Edits apply to the row they are made on
+and to occurrences created from it later.
+
+Completing a repeating task (a `PATCH` that changes `completed` from false to
+true, after applying the other fields in the same body) creates the next
+occurrence for the same user: the same title and repeat, open, and the due date
+of the earliest occurrence that is after the current due date and not before
+"today". Done early, that is the occurrence after the due date; done late,
+missed occurrences are skipped, so overdue repeats do not pile up. It is
+returned as `nextTask` and linked by `repeated_from_id`. If that date would be
+after `2100-12-31`, or an occurrence created from this task already exists, no
+occurrence is created and `nextTask` is `null`; the unique `repeated_from_id`
+makes "one next occurrence per completed occurrence" a database guarantee, also
+for concurrent requests. "Today" is the user's local date: a completing `PATCH`
+may send `"today": "YYYY-MM-DD"`, accepted only within one day of the server's
+UTC date (which covers UTC-12 to UTC+14), else 400 `invalid_today` and nothing
+changes; without it the server uses its UTC date. `today` is ignored by other
+requests. Un-completing (`completed` from true to false) deletes the occurrence
+created from this task if it is still open, even if it was renamed or re-dated,
+and returns its id as `removedTaskId`; one that was completed meanwhile is
+kept, and completing the task again then creates no second copy. Every other
+`PATCH` returns `nextTask` and `removedTaskId` as `null`. Deleting a task
+deletes only that row; its next occurrence stays, with `repeated_from_id`
+cleared. Date arithmetic is plain code in `packages/api/src/repeat.ts`.
+
+The signed-in page shows an add-task form (a title, an optional "Due date"
+field and a "Repeats" control) and the task list, with distinct
 loading, empty, load-failure (with retry), create-failure and update-failure
 states. A checkbox changes only after the server stores the new state. While a
 request is pending its control ignores repeat input but keeps keyboard focus,
-and after a task is added both fields are cleared and focus returns to the
+and after a task is added the fields are cleared and focus returns to the
 title field.
+
+"Repeats" is a native select with "Does not repeat", "Daily", "Weekly",
+"Monthly", "Yearly" and "Custom"; "Custom" reveals an "Every" number field (1 to
+99) and a unit select (days, weeks, months, years). It is available only while
+the form has a due date: without one it is marked `aria-disabled`, ignores
+changes and is described by the visible hint "Set a due date to repeat", and
+removing the date resets it to "Does not repeat" (a partly typed date does
+not). The edit row has the same control, named after the task. A Custom
+interval outside 1 to 99 is refused next to the control without a request, and
+an `invalid_repeat` from the server is shown the same way.
 
 The list is grouped. "Today" is the browser's local date. Open tasks are shown
 under Overdue (due before today), Today, Upcoming (due after today) and No
@@ -166,7 +230,10 @@ yesterday", otherwise a short weekday, day and month in the browser's locale
 (for example "Due Fri, Nov 20"), with the year only outside the current year.
 An overdue row also shows the word "Overdue" in the destructive colour, so
 overdue is not conveyed by colour alone, and the checkbox is described by that
-text. A completed task shows its date without overdue marking. A 401 from a task
+text. A repeating row, open or completed, also shows its repeat after a dot:
+"Repeats daily", "Repeats weekly", "Repeats monthly", "Repeats yearly" or, for
+example, "Repeats every 3 days". A completed task shows its date without
+overdue marking. A 401 from a task
 request returns the page to the signed-out view, except after an explicit
 sign-out.
 
@@ -178,9 +245,11 @@ after the task (for example `Edit "Buy oat milk"`).
   fields do not offer a clear button in every browser), Save and Cancel, one
   row at a time. Enter saves, and Escape anywhere in the form cancels.
   The fields apply the same title and due date rules as the add form and show
-  the message under the row. Only the fields that changed are sent; if neither
-  the trimmed title nor the date changed, edit mode closes without a request.
-  The row shows the new title and date, and moves to its new group, only after
+  the message under the row. Only the fields that changed are sent; if none of
+  the trimmed title, the date and the repeat changed, edit mode closes without
+  a request. Removing the date of a repeating task sends `"repeat": null` with
+  it. The row shows the new title, date and repeat, and moves to its new group,
+  only after
   the server stored them; if saving fails the row stays in edit mode with the
   typed values and an error. While a row is edited its checkbox is hidden.
 - Delete asks in the row ("Delete this task?" with Confirm and Cancel) instead
@@ -201,6 +270,15 @@ after the task (for example `Edit "Buy oat milk"`).
   moved to Completed (an open delete question on that row is closed).
   Completing a task while Completed is expanded, or clearing a completed task,
   keeps focus on that task's checkbox in its new position.
+- Ticking always sends the browser's local date as `today`. Ticking a
+  repeating task moves it to Completed and adds the `nextTask` from the server
+  to its group; the status message says when it is next due (for example
+  `"Water the plants" is next due Wed, Nov 26.`, in the words of the row
+  labels), and focus moves to the new occurrence's checkbox whether or not
+  Completed is expanded. If no occurrence was created, the status message says
+  so. Un-ticking an occurrence whose next occurrence the server removed
+  (`removedTaskId`) removes that row too, with a status message, and focus
+  follows the un-ticked row.
 - When a new day (at local midnight, or when the page becomes visible again)
   moves rows to another group, focus stays on the same control of the moved
   row, and a text field being edited keeps its caret.
@@ -228,9 +306,10 @@ pnpm --filter @tasks/e2e exec playwright install chromium
 pnpm test:e2e
 ```
 
-Due dates are calendar days and must not depend on the server's timezone. To
-check that, run the API tests with the process in a timezone east of UTC as
-well: `TZ=Pacific/Auckland pnpm --filter @tasks/api test`.
+Due dates are calendar days and repeat schedules use the server's UTC date, so
+neither may depend on the server's timezone. To check that, run the API tests
+with the process in a timezone east of UTC as well:
+`TZ=Pacific/Auckland pnpm --filter @tasks/api test`.
 
 `pnpm test` runs the API integration tests and then the web component tests;
 `pnpm verify` runs typecheck, tests and build. Neither needs a browser.
@@ -246,15 +325,29 @@ clearing, renaming (with the create title cases reused against `PATCH`), due
 dates (create, set, change and remove alone or with other fields, the invalid
 cases on both routes, the range boundaries and isolation), deleting, persistence across sign-out, a new session and a second app instance
 on the same database, per-user isolation, session enforcement and the origin
-check. They do not prove hosted SSO.
+check. Repeat tests (`packages/api/test/repeat.test.ts`) pin the server clock
+through the fixture and cover setting, changing and stopping a repeat with the
+anchor checked by SQL, every invalid repeat and the no-due-date cases, the next
+occurrence when completed early, on time, late by less than one interval and by
+several, daily, weekly, every 2 weeks, monthly and yearly, month ends across
+February, April and a leap year, a yearly February 29, a moved due date, the
+2100-12-31 limit, the `today` window edges and its absence (the server's UTC
+date), undo, a kept completed successor, parallel completions creating exactly
+one successor, delete with a successor, and isolation between users. They do
+not prove hosted SSO.
 
 Web component tests (`packages/web/src/*.test.tsx`) use Vitest, jsdom and
 Testing Library with `fetch` stubbed. They cover the signed-out view, the task
 list states, creating, completing, renaming and deleting tasks, due dates in
 the add form and in edit mode, grouping and sorting, the Completed section,
 date labels and overdue marking, the midnight and visibility refresh (with a
-fixed clock), failures, pending states, focus targets and 401 handling. Unit
-tests (`*.test.ts`) cover the date helpers and grouping. They do not run a real browser
+fixed clock), repeats in the add form and in edit mode (presets, Custom,
+unavailable without a date, reset when the date is removed, changed fields
+only, inline errors, row labels), ticking and un-ticking repeating tasks with
+their status messages and focus, and the `today` sent with a fixed clock,
+failures, pending states, focus targets and 401 handling. Unit
+tests (`*.test.ts`) cover the date helpers, grouping and the repeat labels and
+form values. They do not run a real browser
 or the real API.
 
 The end-to-end suite (`packages/e2e`, Playwright, headless Chromium) drives the
@@ -276,7 +369,18 @@ dates into their groups with overdue marking (with screenshots at a narrow and
 a wide viewport attached to the test results), changing and removing a date by
 keyboard and by pointer, completing a task into the collapsed Completed
 section, a page left open across local midnight, and Pacific/Auckland showing
-the stored date without shifting it. The configuration sets the browser's
+the stored date without shifting it. Repeat scenarios create a weekly task and
+complete it on time, early and late by more than one interval (no overdue
+pile-up), with the next occurrence in the right group and focused (with
+screenshots at a narrow and a wide viewport); un-tick a completed occurrence to
+remove the next one; set a custom "every 2 weeks" repeat and stop it with the
+keyboard only; set and reset a repeat in the edit row by pointer; complete a
+monthly task on the 31st across month ends; and, just after local midnight in
+Pacific/Auckland, check that the local date is sent as `today`. Because the API
+checks `today` against its own date, the test API server
+(`packages/api/test/e2e-server.ts`) has a test-only `PUT /e2e/clock` route, and
+each scenario that fixes the browser clock sets the API clock to the same
+moment; every test starts with the real clock on both sides. The configuration sets the browser's
 `LANGUAGE` to `en_US`, because Chromium orders the parts of a date field by
 that variable rather than by the context locale. `@playwright/test` is a dev dependency of
 `@tasks/e2e` only, so it is installed neither with the API or web package nor
@@ -372,6 +476,13 @@ unit tests and the end-to-end suite passed locally on Node 24 against
 disposable databases, and migration `0002` was applied to a disposable
 database already at `0001` with existing rows. Migration `0002` is not yet
 applied in production; the next deploy applies it.
+
+Recurring tasks verification evidence: typecheck, production builds, the API
+tests (also with the process under `TZ=Pacific/Auckland`), the web component
+and unit tests and the end-to-end suite passed locally on Node 26 against
+disposable databases, and migration `0003` was applied to a disposable database
+already at `0002` with existing rows. Migration `0003` is not yet applied in
+production; the next deploy applies it.
 
 Foundation verification evidence: migration `0000` applied to `tasks_dev`; typecheck,
 production build and eight disposable-database auth tests passed. Frontend and
