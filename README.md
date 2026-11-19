@@ -204,10 +204,12 @@ title field.
 99) and a unit select (days, weeks, months, years), starting from the task's
 stored repeat (every 1 week in the add form or for a task that did not repeat),
 not from presets passed on the way. It is available only while
-the form has a due date: without one it is marked `aria-disabled`, ignores
-changes and is described by the visible hint "Set a due date to repeat", and
-removing the date resets it to "Does not repeat" (a partly typed date does
-not). The edit row has the same control, named after the task. A Custom
+the form has a due date: without one the select (and any Custom field) is
+`disabled`, so it is dimmed, cannot be opened or changed and is skipped by Tab,
+and it is described by the visible hint "Set a due date to repeat"; removing
+the date resets it to "Does not repeat" (a partly typed date does not). While
+a request is pending it is locked with `aria-disabled` like the other pending
+controls, so it keeps keyboard focus. The edit row has the same control, named after the task. A Custom
 interval outside 1 to 99 is refused next to the control without a request, and
 an `invalid_repeat` from the server is shown the same way.
 
@@ -346,7 +348,8 @@ list states, creating, completing, renaming and deleting tasks, due dates in
 the add form and in edit mode, grouping and sorting, the Completed section,
 date labels and overdue marking, the midnight and visibility refresh (with a
 fixed clock), repeats in the add form and in edit mode (presets, Custom,
-unavailable without a date, reset when the date is removed, changed fields
+disabled without a date and enabled with one, the `aria-disabled` lock while
+pending, reset when the date is removed, changed fields
 only, inline errors, row labels), ticking and un-ticking repeating tasks with
 their status messages and focus, and the `today` sent with a fixed clock,
 failures, pending states, focus targets and 401 handling. Unit
@@ -381,7 +384,9 @@ remove the next one; set a custom "every 2 weeks" repeat and stop it with the
 keyboard only; set and reset a repeat in the edit row by pointer; complete a
 monthly task on the 31st across month ends; and, just after local midnight in
 Pacific/Auckland, check that the local date is sent as `today`. Further
-scenarios check that arrowing from Weekly to Custom starts at every 1 week,
+scenarios check that without a due date the Repeats select is disabled, dimmed
+and skipped by Tab and becomes enabled once a date is set (with screenshots at
+a narrow and a wide viewport), that arrowing from Weekly to Custom starts at every 1 week,
 that rapid repeated ticks complete once and create one next occurrence, that a
 page left open across local midnight sends the new date, and that the local
 date is accepted at UTC+14 and UTC-12. Because the API

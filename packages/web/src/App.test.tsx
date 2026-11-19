@@ -1770,10 +1770,11 @@ describe('repeating tasks', () => {
     const title = (await screen.findByLabelText('New task')) as HTMLInputElement;
     const date = screen.getByLabelText('Due date') as HTMLInputElement;
     const repeats = select('Repeats');
-    // No date yet: the control is marked unavailable, says why, and ignores changes.
+    // No date yet: the control is disabled, cannot be changed, and says why.
     expect(repeats.value).toBe('none');
-    expect(repeats.getAttribute('aria-disabled')).toBe('true');
-    expect(repeats.disabled).toBe(false);
+    expect(repeats.disabled).toBe(true);
+    expect(repeats.getAttribute('aria-disabled')).toBeNull();
+    expect(repeats.className).toContain('disabled:opacity-60');
     const hint = screen.getByText('Set a due date to repeat');
     expect(repeats.getAttribute('aria-describedby')).toBe(hint.id);
     await userEvent.selectOptions(repeats, 'weekly');
@@ -1790,6 +1791,7 @@ describe('repeating tasks', () => {
     // With a date it is available.
     await userEvent.type(title, 'Bins out');
     fireEvent.change(date, { target: { value: '2026-11-24' } });
+    expect(repeats.disabled).toBe(false);
     expect(repeats.getAttribute('aria-disabled')).toBeNull();
     expect(screen.queryByText('Set a due date to repeat')).toBeNull();
     await userEvent.selectOptions(repeats, 'weekly');
@@ -1800,7 +1802,7 @@ describe('repeating tasks', () => {
     // Stored: the row shows it, and the form is reset, repeat included.
     await waitFor(() => expect(description('Bins out')).toMatch(/Repeats weekly$/));
     expect(select('Repeats').value).toBe('none');
-    expect(select('Repeats').getAttribute('aria-disabled')).toBe('true');
+    expect(select('Repeats').disabled).toBe(true);
 
     // Custom reveals the number and the unit.
     await userEvent.type(title, 'Gutters');
@@ -1838,7 +1840,7 @@ describe('repeating tasks', () => {
     await userEvent.selectOptions(select('Repeats'), 'monthly');
     fireEvent.change(date, { target: { value: '' } });
     expect(select('Repeats').value).toBe('none');
-    expect(select('Repeats').getAttribute('aria-disabled')).toBe('true');
+    expect(select('Repeats').disabled).toBe(true);
     fireEvent.change(date, { target: { value: '2026-11-30' } });
     expect(select('Repeats').value).toBe('none');
     await userEvent.click(button('Add task'));
@@ -1875,6 +1877,7 @@ describe('repeating tasks', () => {
     const repeats = () => select('Repeats for "Bins out"');
     const row4 = () => repeats().closest('li')!;
     expect(repeats().value).toBe('weekly');
+    expect(repeats().disabled).toBe(false);
     expect(repeats().getAttribute('aria-disabled')).toBeNull();
     // Unchanged: no request.
     await userEvent.click(button('Save'));
@@ -1917,12 +1920,13 @@ describe('repeating tasks', () => {
     await waitFor(() => expect(description('Bins out')).toMatch(/Repeats weekly$/));
     expect(callsTo('PATCH /api/tasks/4')[3].body).toEqual({ dueDate: '2026-11-26', repeat: weekly });
 
-    // Remove due date resets the repeat: the control is unavailable with the
+    // Remove due date resets the repeat: the control is disabled with the
     // hint, and both are sent.
     await userEvent.click(button('Edit "Bins out"'));
     await userEvent.click(button('Remove due date for "Bins out"'));
     expect(repeats().value).toBe('none');
-    expect(repeats().getAttribute('aria-disabled')).toBe('true');
+    expect(repeats().disabled).toBe(true);
+    expect(repeats().getAttribute('aria-disabled')).toBeNull();
     const hint = document.getElementById(repeats().getAttribute('aria-describedby')!)!;
     expect(hint.textContent).toBe('Set a due date to repeat');
     expect(row4().contains(hint)).toBe(true);
@@ -1937,10 +1941,11 @@ describe('repeating tasks', () => {
     signedIn([task(4, 'Bins out', '2026-11-24', weekly), task(3, 'Undated', null)]);
     reply('PATCH /api/tasks/4', json({ error: 'invalid_repeat', message: 'A repeating task needs a due date.' }, 400));
     render(<App />);
-    // A task without a date: the control is unavailable with the hint.
+    // A task without a date: the control is disabled with the hint.
     await startEditing('Undated');
     const repeats = select('Repeats for "Undated"');
-    expect(repeats.getAttribute('aria-disabled')).toBe('true');
+    expect(repeats.disabled).toBe(true);
+    expect(repeats.getAttribute('aria-disabled')).toBeNull();
     expect(within(repeats.closest('li')!).getByText('Set a due date to repeat').id).toBe(
       repeats.getAttribute('aria-describedby'),
     );
@@ -1970,6 +1975,51 @@ describe('repeating tasks', () => {
     expect(every.getAttribute('aria-invalid')).toBe('true');
     expect(every.value).toBe('3');
     expect(rowTitles(group('Upcoming'))).toEqual(['editing: Bins out']);
+  });
+
+  test('the Repeats controls are disabled without a date and keep the aria-disabled lock while pending (D-11)', async () => {
+    signedIn([task(4, 'Bins out', '2026-11-24', { every: 2, unit: 'week' })]);
+    const save = pending();
+    reply('PATCH /api/tasks/4', save.response);
+    const create = pending();
+    reply('POST /api/tasks', create.response);
+    render(<App />);
+    await startEditing('Bins out');
+    const repeats = () => select('Repeats for "Bins out"');
+    const every = () => screen.getByRole('spinbutton', { name: 'Repeat interval for "Bins out"' }) as HTMLInputElement;
+    const unit = () => select('Repeat unit for "Bins out"');
+    // With a date: enabled, Custom fields included.
+    expect(repeats().value).toBe('custom');
+    for (const control of [repeats(), every(), unit()]) expect(control.disabled).toBe(false);
+
+    // Pending save: locked with aria-disabled and readOnly, not disabled, so focus stays.
+    repeats().focus();
+    fireEvent.change(every(), { target: { value: '3' } });
+    fireEvent.submit(repeats().closest('form')!);
+    await waitFor(() => expect(repeats().getAttribute('aria-disabled')).toBe('true'));
+    expect(repeats().disabled).toBe(false);
+    expect(unit().disabled).toBe(false);
+    expect(unit().getAttribute('aria-disabled')).toBe('true');
+    expect(every().disabled).toBe(false);
+    expect(every().readOnly).toBe(true);
+    expect(document.activeElement).toBe(repeats());
+    fireEvent.change(repeats(), { target: { value: 'daily' } });
+    expect(repeats().value).toBe('custom');
+    save.finish(json({ task: task(4, 'Bins out', '2026-11-24', { every: 3, unit: 'week' }) }));
+    await waitFor(() => expect(description('Bins out')).toMatch(/Repeats every 3 weeks$/));
+
+    // The add form while creating: a date is set, so the lock is aria-disabled.
+    await userEvent.type(screen.getByLabelText('New task'), 'Gutters');
+    fireEvent.change(screen.getByLabelText('Due date'), { target: { value: '2026-11-30' } });
+    await userEvent.selectOptions(select('Repeats'), 'weekly');
+    await userEvent.click(button('Add task'));
+    expect(select('Repeats').getAttribute('aria-disabled')).toBe('true');
+    expect(select('Repeats').disabled).toBe(false);
+    create.finish(json({ task: task(5, 'Gutters', '2026-11-30', weekly) }, 201));
+    await waitFor(() => expect(description('Gutters')).toMatch(/Repeats weekly$/));
+    // Reset after creating: no date, so disabled again.
+    expect(select('Repeats').disabled).toBe(true);
+    expect(select('Repeats').getAttribute('aria-disabled')).toBeNull();
   });
 
   test('ticking a repeating task adds the next occurrence and moves focus to it (Completed collapsed)', async () => {

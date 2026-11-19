@@ -69,7 +69,8 @@ const rowButton =
   'shrink-0 rounded-md border border-border px-3 py-1.5 text-sm font-medium aria-disabled:opacity-50';
 
 // Pending controls are locked with readOnly and aria-disabled instead of
-// disabled, because a disabled control loses keyboard focus. Tasks ignores the
+// disabled, because a disabled control loses keyboard focus. (Without a due
+// date the Repeats controls are disabled outright; see RepeatControl.) Tasks ignores the
 // repeat input. The data-action attributes let Tasks move focus between the
 // controls of a row.
 export function TaskRow({

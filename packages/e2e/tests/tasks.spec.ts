@@ -778,8 +778,8 @@ test.describe('repeating tasks west of UTC', () => {
     await signIn(page, 'Household One');
     const bodies = recordBodies(page);
 
-    // Without a date the control is unavailable and says why.
-    await expect(addRepeats(page)).toHaveAttribute('aria-disabled', 'true');
+    // Without a date the control is disabled and says why.
+    await expect(addRepeats(page)).toBeDisabled();
     await expect(page.getByText('Set a due date to repeat')).toBeVisible();
     await expect(addRepeats(page)).toHaveAccessibleDescription('Set a due date to repeat');
 
@@ -880,6 +880,69 @@ test.describe('repeating tasks west of UTC', () => {
     await expect(openCheckbox(page, 'Upcoming', 'Undo: feed the cat')).toBeVisible();
   });
 
+  test('without a due date the Repeats select is disabled and skipped by Tab, and a date enables it', async ({
+    page,
+  }, testInfo) => {
+    await signIn(page, 'Household One');
+    const writes = recordBodies(page);
+    const repeats = addRepeats(page);
+    await expect(repeats).toBeDisabled();
+    await expect(repeats).toHaveValue('none');
+    await expect(page.getByText('Set a due date to repeat')).toBeVisible();
+    // It looks disabled: dimmed and with the not-allowed cursor.
+    expect(
+      await repeats.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return { opacity: Number(style.opacity), cursor: style.cursor };
+      }),
+    ).toEqual({ opacity: 0.6, cursor: 'not-allowed' });
+    // Screenshots of the add form without a date, narrow and wide.
+    for (const [name, width] of [
+      ['repeat-no-date-narrow', 375],
+      ['repeat-no-date-wide', 1280],
+    ] as const) {
+      await page.setViewportSize({ width, height: 900 });
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth),
+      ).toBe(true);
+      const path = testInfo.outputPath(`${name}.png`);
+      await page.locator('form').filter({ has: repeats }).screenshot({ path });
+      await testInfo.attach(name, { path, contentType: 'image/png' });
+    }
+
+    // Keyboard: Tab goes from the date field to Add task, never stopping on
+    // Repeats, and Shift+Tab goes straight back to the date field.
+    await page.getByLabel('New task').fill('Disabled: wash the car');
+    const visited: string[] = [];
+    for (let presses = 0; presses < 8; presses++) {
+      await page.keyboard.press('Tab');
+      visited.push(await page.evaluate(() => document.activeElement?.id || document.activeElement?.tagName || ''));
+      if (await page.getByRole('button', { name: 'Add task' }).evaluate((element) => element === document.activeElement)) break;
+    }
+    await expect(page.getByRole('button', { name: 'Add task' })).toBeFocused();
+    expect(visited).not.toContain('new-task-repeat');
+    await page.keyboard.press('Shift+Tab');
+    await expect(page.getByLabel('Due date', { exact: true })).toBeFocused();
+    // The pointer cannot open it either: a click does not focus or change it.
+    await repeats.click({ force: true });
+    await page.keyboard.press('ArrowDown');
+    await expect(repeats).not.toBeFocused();
+    await expect(repeats).toHaveValue('none');
+
+    // A date enables it, and it now takes a choice.
+    await page.getByLabel('Due date', { exact: true }).fill('2026-11-21');
+    await expect(repeats).toBeEnabled();
+    await expect(page.getByText('Set a due date to repeat')).toHaveCount(0);
+    await repeats.selectOption({ label: 'Daily' });
+    await expect(repeats).toHaveValue('daily');
+    // Clearing the date disables it again and resets it.
+    await page.getByLabel('Due date', { exact: true }).fill('');
+    await expect(repeats).toBeDisabled();
+    await expect(repeats).toHaveValue('none');
+    await expect(page.getByText('Set a due date to repeat')).toBeVisible();
+    expect(writes).toEqual([]);
+  });
+
   test('sets a custom "every 2 weeks" repeat with the keyboard only, then stops it', async ({ page }) => {
     await signIn(page, 'Household One');
     const bodies = recordBodies(page);
@@ -949,11 +1012,12 @@ test.describe('repeating tasks west of UTC', () => {
     await addTask(page, 'Edit: descale the kettle');
     const bodies = recordPatchBodies(page);
     await editButton(page, 'Edit: descale the kettle').click();
-    // No date: unavailable, with the hint.
+    // No date: disabled, with the hint.
     const repeats = rowRepeats(page, 'Edit: descale the kettle');
-    await expect(repeats).toHaveAttribute('aria-disabled', 'true');
+    await expect(repeats).toBeDisabled();
     await expect(repeats).toHaveAccessibleDescription('Set a due date to repeat');
     await dueDateField(page, 'Edit: descale the kettle').fill('2026-11-25');
+    await expect(repeats).toBeEnabled();
     await expect(repeats).not.toHaveAttribute('aria-disabled');
     await repeats.selectOption({ label: 'Custom' });
     await page.getByRole('spinbutton', { name: 'Repeat interval for "Edit: descale the kettle"' }).fill('3');
@@ -980,7 +1044,7 @@ test.describe('repeating tasks west of UTC', () => {
     await expect(repeats).toHaveValue('custom');
     await page.getByRole('button', { name: 'Remove due date for "Edit: descale the kettle"' }).click();
     await expect(repeats).toHaveValue('none');
-    await expect(repeats).toHaveAttribute('aria-disabled', 'true');
+    await expect(repeats).toBeDisabled();
     await page.getByRole('button', { name: 'Save', exact: true }).click();
     await expect(groupList(page, 'No date').getByText('Edit: descale the kettle')).toBeVisible();
     expect(bodies).toEqual([
