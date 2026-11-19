@@ -80,10 +80,6 @@ Exact callbacks used by Better Auth 1.7, registered in service-auth:
 - http://localhost:5173/api/auth/callback/auth-pior
 - https://tasks.szarans.ca/api/auth/callback/auth-pior
 
-service-auth also keeps the Better Auth 1.6 paths
-(`/api/auth/oauth2/callback/auth-pior`) registered until every application has
-upgraded, so reverting this upgrade still signs in (workspace decision 0003).
-
 ## Tasks
 
 Each row in `tasks` belongs to one app-local user (`user_id`, cascade delete)
