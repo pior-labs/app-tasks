@@ -1046,3 +1046,93 @@ test.describe('repeating tasks east of UTC', () => {
     ]);
   });
 });
+
+test.describe('repeating tasks, more edges west of UTC', () => {
+  test.use({ timezoneId: 'America/Toronto', locale: 'en-US' });
+
+  test.beforeEach(async ({ page, request }) => {
+    // Friday 2026-11-20, noon in Toronto (17:00 UTC).
+    await fixClock(page, request, new Date('2026-11-20T12:00:00-05:00'));
+  });
+
+  test('arrowing from Weekly down to Custom starts Custom at every 1 week', async ({ page }) => {
+    await signIn(page, 'Household One');
+    await addRepeatingTask(page, 'Arrows: sweep the porch', '2026-11-24', 'Weekly');
+    await editButton(page, 'Arrows: sweep the porch').click();
+    const repeats = rowRepeats(page, 'Arrows: sweep the porch');
+    await repeats.focus();
+    // Monthly, Yearly, then Custom: each step is a change.
+    for (let step = 0; step < 3; step++) await page.keyboard.press('ArrowDown');
+    await expect(repeats).toHaveValue('custom');
+    await expect(page.getByRole('spinbutton', { name: 'Repeat interval for "Arrows: sweep the porch"' })).toHaveValue('1');
+    await expect(page.getByRole('combobox', { name: 'Repeat unit for "Arrows: sweep the porch"' })).toHaveValue('week');
+    await page.keyboard.press('Escape');
+  });
+
+  test('rapid repeated ticks complete the task once and create one next occurrence', async ({ page }) => {
+    await signIn(page, 'Household One');
+    const bodies = recordPatchBodies(page);
+    await addRepeatingTask(page, 'Rapid: wipe the counters', '2026-11-20', 'Daily');
+    // Five clicks in the same moment, before the server answers the first,
+    // with focus on the checkbox as after a real click.
+    await openCheckbox(page, 'Today', 'Rapid: wipe the counters').evaluate((element) => {
+      (element as HTMLElement).focus();
+      for (let click = 0; click < 5; click++) (element as HTMLElement).click();
+    });
+    await expect(statusMessage(page)).toHaveText('"Rapid: wipe the counters" is next due tomorrow.');
+    await expect(openCheckbox(page, 'Upcoming', 'Rapid: wipe the counters')).toBeFocused();
+    expect(bodies).toEqual([{ completed: true, today: '2026-11-20' }]);
+    const response = await page.request.get('/api/tasks');
+    const { tasks } = (await response.json()) as { tasks: { title: string; dueDate: string; completed: boolean }[] };
+    expect(
+      tasks.filter((task) => task.title === 'Rapid: wipe the counters').map(({ dueDate, completed }) => ({ dueDate, completed })),
+    ).toEqual([
+      { dueDate: '2026-11-21', completed: false },
+      { dueDate: '2026-11-20', completed: true },
+    ]);
+  });
+
+  test('a page left open across local midnight sends the new date when completing', async ({ page, request }) => {
+    // 23:59:30 on Friday in Toronto.
+    await fixClock(page, request, new Date('2026-11-20T23:59:30-05:00'));
+    await signIn(page, 'Household One');
+    const bodies = recordPatchBodies(page);
+    await addRepeatingTask(page, 'Overnight: take the vitamins', '2026-11-20', 'Daily');
+    await expect(openCheckbox(page, 'Today', 'Overnight: take the vitamins')).toBeVisible();
+    // Local midnight passes with the page open: the task is now overdue.
+    await page.clock.runFor(60_000);
+    await expect(openCheckbox(page, 'Overdue', 'Overnight: take the vitamins')).toBeVisible();
+    await openCheckbox(page, 'Overdue', 'Overnight: take the vitamins').click();
+    expect(bodies).toEqual([{ completed: true, today: '2026-11-21' }]);
+    // The next one is due today (the new day), not yesterday.
+    await expect(statusMessage(page)).toHaveText('"Overnight: take the vitamins" is next due today.');
+    await expect(openCheckbox(page, 'Today', 'Overnight: take the vitamins')).toBeFocused();
+  });
+});
+
+// The browser's date may be one day ahead of the server's UTC date (UTC+14)
+// or one day behind it (UTC-12); both are accepted and decide the next date.
+for (const { zone, label, time, today, next } of [
+  { zone: 'Pacific/Kiritimati', label: 'UTC+14', time: '2026-11-21T00:30:00+14:00', today: '2026-11-21', next: 'Due today' },
+  { zone: 'Etc/GMT+12', label: 'UTC-12', time: '2026-11-20T23:30:00-12:00', today: '2026-11-20', next: 'Due today' },
+]) {
+  test.describe(`repeating tasks at ${label}`, () => {
+    test.use({ timezoneId: zone, locale: 'en-US' });
+
+    test(`the local date is sent and accepted at ${label}`, async ({ page, request }) => {
+      await fixClock(page, request, new Date(time));
+      await signIn(page, 'Household One');
+      const bodies = recordPatchBodies(page);
+      const title = `${label}: water the cactus`;
+      await addRepeatingTask(page, title, '2026-11-14', 'Daily');
+      await openCheckbox(page, 'Overdue', title).click();
+      expect(bodies).toEqual([{ completed: true, today }]);
+      await expect(statusMessage(page)).toHaveText(`"${title}" is next due today.`);
+      await expect(openCheckbox(page, 'Today', title)).toBeFocused();
+      await expect(rowOf(page, title).getByText(next)).toBeVisible();
+      const response = await page.request.get('/api/tasks');
+      const { tasks } = (await response.json()) as { tasks: { title: string; dueDate: string; completed: boolean }[] };
+      expect(tasks.find((task) => task.title === title && !task.completed)?.dueDate).toBe(today);
+    });
+  });
+}

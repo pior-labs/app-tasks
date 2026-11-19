@@ -201,7 +201,9 @@ title field.
 
 "Repeats" is a native select with "Does not repeat", "Daily", "Weekly",
 "Monthly", "Yearly" and "Custom"; "Custom" reveals an "Every" number field (1 to
-99) and a unit select (days, weeks, months, years). It is available only while
+99) and a unit select (days, weeks, months, years), starting from the task's
+stored repeat (every 1 week in the add form or for a task that did not repeat),
+not from presets passed on the way. It is available only while
 the form has a due date: without one it is marked `aria-disabled`, ignores
 changes and is described by the visible hint "Set a due date to repeat", and
 removing the date resets it to "Does not repeat" (a partly typed date does
@@ -276,7 +278,9 @@ after the task (for example `Edit "Buy oat milk"`).
   `"Water the plants" is next due Wed, Nov 26.`, in the words of the row
   labels), and focus moves to the new occurrence's checkbox whether or not
   Completed is expanded. If no occurrence was created, the status message says
-  so. Un-ticking an occurrence whose next occurrence the server removed
+  why: its date would be after December 31, 2100, or the next occurrence
+  already exists (it was kept when the task was un-ticked, or another tab
+  completed the task first). Un-ticking an occurrence whose next occurrence the server removed
   (`removedTaskId`) removes that row too, with a status message, and focus
   follows the un-ticked row.
 - When a new day (at local midnight, or when the page becomes visible again)
@@ -376,7 +380,11 @@ screenshots at a narrow and a wide viewport); un-tick a completed occurrence to
 remove the next one; set a custom "every 2 weeks" repeat and stop it with the
 keyboard only; set and reset a repeat in the edit row by pointer; complete a
 monthly task on the 31st across month ends; and, just after local midnight in
-Pacific/Auckland, check that the local date is sent as `today`. Because the API
+Pacific/Auckland, check that the local date is sent as `today`. Further
+scenarios check that arrowing from Weekly to Custom starts at every 1 week,
+that rapid repeated ticks complete once and create one next occurrence, that a
+page left open across local midnight sends the new date, and that the local
+date is accepted at UTC+14 and UTC-12. Because the API
 checks `today` against its own date, the test API server
 (`packages/api/test/e2e-server.ts`) has a test-only `PUT /e2e/clock` route, and
 each scenario that fixes the browser clock sets the API clock to the same
