@@ -6,8 +6,8 @@ due date and delete a task. Open tasks are grouped by when they are due.
 Deletion is permanent: there is no archive or undo. Notes, projects and
 priorities are not implemented.
 
-React 19/Vite, Hono, PostgreSQL/Drizzle, pnpm 10.8.1, published
-`@pior-labs/design-system`, and Better Auth 1.6.20 application sessions.
+React 19/Vite, Hono, PostgreSQL/Drizzle, pnpm 10.34.5, published
+`@pior-labs/design-system`, and Better Auth 1.7 application sessions.
 The starting source is `pior-labs/template-webapp` revision
 `9b719955088ab31dd294ad84f7a9f1a0ac5a5e72`. The private GitHub repository was
 generated using GitHub template generation; foundation changes are separate
