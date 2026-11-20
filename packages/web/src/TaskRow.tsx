@@ -9,14 +9,17 @@ import {
 } from 'react';
 import { MAX_DUE_DATE, MIN_DUE_DATE, dueLabel, dueStatus, holdsNoDate } from './dueDate';
 import { RepeatControl, RepeatHint } from './RepeatControl';
+import type { List } from './lists';
 import { type Repeat, type RepeatForm, repeatLabel } from './repeat';
 
 // dueDate is a calendar day, "YYYY-MM-DD", or null for no due date. repeat is
 // null for a task that does not repeat; only a task with a due date repeats.
-// notes is plain text, or null for none.
+// notes is plain text, or null for none. listId is the task's list, or null
+// for Inbox.
 export type Task = {
   id: number;
   title: string;
+  listId: number | null;
   notes: string | null;
   completed: boolean;
   dueDate: string | null;
@@ -28,16 +31,17 @@ export type Task = {
 export type RowMode =
   | { kind: 'view' }
   // dueDate is the date field's value: "YYYY-MM-DD", or empty for none. notes
-  // is the notes field's value, empty for none. The error belongs to the field
-  // named by errorField.
+  // is the notes field's value, empty for none. listId is the List select's
+  // value, null for Inbox. The error belongs to the field named by errorField.
   | {
       kind: 'edit';
       text: string;
       dueDate: string;
       repeat: RepeatForm;
       notes: string;
+      listId: number | null;
       error: string;
-      errorField: 'title' | 'dueDate' | 'repeat' | 'notes';
+      errorField: 'title' | 'dueDate' | 'repeat' | 'notes' | 'list';
       saving: boolean;
     }
   | { kind: 'confirm-delete'; deleting: boolean };
@@ -47,6 +51,10 @@ type Props = {
   mode: RowMode;
   // The browser's local date, "YYYY-MM-DD", for the due date label.
   today: string;
+  // The user's lists, for the List select in edit mode.
+  lists: List[];
+  // The name of the task's list to show in the row, or null for none.
+  listName: string | null;
   // A completion change for this task is waiting for the server.
   updating: boolean;
   // Edit or Delete would be ignored now: another row is saving or deleting, or
@@ -65,6 +73,7 @@ type Props = {
   onRemoveDueDate: () => void;
   onEditRepeat: (repeat: RepeatForm) => void;
   onEditNotes: (notes: string) => void;
+  onEditList: (listId: number | null) => void;
   onSave: () => void;
   onCancelEdit: () => void;
   onStartDelete: () => void;
@@ -149,6 +158,8 @@ export function TaskRow({
   task,
   mode,
   today,
+  lists,
+  listName,
   updating,
   editLocked,
   deleteLocked,
@@ -161,6 +172,7 @@ export function TaskRow({
   onRemoveDueDate,
   onEditRepeat,
   onEditNotes,
+  onEditList,
   onSave,
   onCancelEdit,
   onStartDelete,
@@ -173,6 +185,7 @@ export function TaskRow({
     const dueDateError = mode.error !== '' && mode.errorField === 'dueDate';
     const repeatError = mode.error !== '' && mode.errorField === 'repeat';
     const notesError = mode.error !== '' && mode.errorField === 'notes';
+    const listError = mode.error !== '' && mode.errorField === 'list';
     const fieldClass =
       'rounded-md border border-border bg-card px-3 py-1.5 text-card-foreground';
     const checkEmptied = (event: SyntheticEvent<HTMLInputElement>) => {
@@ -245,6 +258,30 @@ export function TaskRow({
             onChange={onEditRepeat}
           />
           {mode.dueDate === '' && <RepeatHint idBase={`task-${task.id}`} className="basis-full text-right" />}
+          {/* After the date and repeat and before the notes, so title to date stays one Tab (D-7).
+              A select is as wide as its longest option, so it is capped at the row's width: a
+              long list name is cut short inside the control instead of pushing it off a phone screen. */}
+          <select
+            data-action="edit-list"
+            aria-label={`List for "${task.title}"`}
+            value={mode.listId === null ? '' : String(mode.listId)}
+            onChange={(event) => {
+              // A pending save keeps the choice, like readOnly on the text fields.
+              if (mode.saving) return;
+              onEditList(event.target.value === '' ? null : Number(event.target.value));
+            }}
+            aria-disabled={mode.saving || undefined}
+            aria-invalid={listError || undefined}
+            aria-describedby={listError ? errorId : undefined}
+            className={`${fieldClass} min-w-0 max-w-full text-ellipsis aria-disabled:opacity-60`}
+          >
+            <option value="">Inbox</option>
+            {lists.map((list) => (
+              <option key={list.id} value={String(list.id)}>
+                {list.name}
+              </option>
+            ))}
+          </select>
           {/* Full width, after the date and repeat and before Save in Tab order. */}
           <textarea
             data-action="edit-notes"
@@ -329,6 +366,13 @@ export function TaskRow({
                 <span className="whitespace-nowrap">{repeatLabel(task.repeat)}</span>
               </>
             )}
+          </p>
+        )}
+        {listName !== null && (
+          // A muted label after the due date line, outside the checkbox's description.
+          <p data-list-label className="break-words pl-8 text-sm text-muted-foreground">
+            <span className="sr-only">List: </span>
+            {listName}
           </p>
         )}
         {task.notes !== null && (

@@ -1,6 +1,6 @@
 import { and, desc, eq, sql } from 'drizzle-orm';
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
-import { Hono, type Context } from 'hono';
+import { Hono, type Context, type MiddlewareHandler } from 'hono';
 import { z } from 'zod';
 import type { AppEnv } from './app.js';
 import * as schema from './db/schema.js';
@@ -19,15 +19,18 @@ import {
 export type AppDatabase = PostgresJsDatabase<typeof schema>;
 
 export const MAX_TITLE_LENGTH = 200;
-const MAX_TASK_ID = 2_147_483_647; // tasks.id is a 32-bit serial.
+// tasks.id and lists.id are 32-bit serials.
+export const MAX_SERIAL_ID = 2_147_483_647;
+const MAX_TASK_ID = MAX_SERIAL_ID;
 
 // A title needs at least one character a person can see. Whitespace, control
 // characters and Unicode "default ignorable" code points (zero width space and
 // joiners, soft hyphen, direction marks, fillers) render as nothing, so a title
 // made only of those is treated like an empty one. This only decides whether a
 // title is empty: visible titles are stored exactly as sent (after trimming).
-// The web form applies the same rules in packages/web/src/Tasks.tsx.
-const VISIBLE_CHARACTER = /[^\p{White_Space}\p{Cc}\p{Default_Ignorable_Code_Point}]/u;
+// The web forms apply the same rules (VISIBLE_CHARACTER in
+// packages/web/src/text.ts, titleProblem in packages/web/src/Tasks.tsx).
+export const VISIBLE_CHARACTER = /[^\p{White_Space}\p{Cc}\p{Default_Ignorable_Code_Point}]/u;
 
 // The one definition of a valid title, used by both create and rename.
 const taskTitle = z
@@ -125,23 +128,38 @@ function fieldError(field: PropertyKey | undefined, fallback: string) {
   if (field === 'completed') return 'invalid_completed';
   if (field === 'dueDate') return 'invalid_due_date';
   if (field === 'repeat') return 'invalid_repeat';
+  if (field === 'listId') return 'invalid_list';
   return fallback;
 }
 
-// A missing or null dueDate both mean "no due date"; the same for notes and repeat.
+// The one definition of a valid list reference, used by both create and update:
+// a list id, or null for Inbox. Whether the list exists and belongs to the user
+// is decided by the database (tasks_list_fk), so a list deleted at the same
+// moment cannot slip through. Ids beyond the column range cannot exist.
+const LIST_MESSAGE = 'listId must be the id of one of your lists, or null for Inbox.';
+const invalidList = { error: 'invalid_list', message: LIST_MESSAGE };
+const taskListId = z
+  .int({ error: LIST_MESSAGE })
+  .positive({ error: LIST_MESSAGE })
+  .max(MAX_SERIAL_ID, { error: LIST_MESSAGE })
+  .nullable();
+
+// A missing or null dueDate both mean "no due date"; the same for notes and
+// repeat, and a missing or null listId means Inbox.
 const createTaskBody = z.object(
   {
     title: taskTitle,
     notes: taskNotes.optional(),
     dueDate: taskDueDate.optional(),
     repeat: taskRepeat.optional(),
+    listId: taskListId.optional(),
   },
   { error: 'Send a JSON object with a title.' },
 );
 // Any of the fields may be sent alone. Unknown keys (such as an owner or an id)
 // are dropped. `today` is read separately: it only matters when completing.
 const UPDATE_FIELDS_MESSAGE =
-  'Send a JSON object with a title, notes, a completed value, a due date (dueDate), a repeat, or any of them together.';
+  'Send a JSON object with a title, notes, a completed value, a due date (dueDate), a repeat, a list (listId), or any of them together.';
 const updateTaskBody = z.object(
   {
     title: taskTitle.optional(),
@@ -149,6 +167,7 @@ const updateTaskBody = z.object(
     completed: z.boolean({ error: 'Completed must be true or false.' }).optional(),
     dueDate: taskDueDate.optional(),
     repeat: taskRepeat.optional(),
+    listId: taskListId.optional(),
     today: z.unknown().optional(),
   },
   { error: UPDATE_FIELDS_MESSAGE },
@@ -159,6 +178,7 @@ const updateTaskBody = z.object(
 const taskColumns = {
   id: tasks.id,
   title: tasks.title,
+  listId: tasks.listId,
   notes: tasks.notes,
   completed: tasks.completed,
   dueDate: tasks.dueDate,
@@ -170,6 +190,7 @@ const taskColumns = {
 type TaskRow = {
   id: number;
   title: string;
+  listId: number | null;
   notes: string | null;
   completed: boolean;
   dueDate: string | null;
@@ -188,8 +209,9 @@ function toTask({ repeatEvery, repeatUnit, ...task }: TaskRow) {
   return { ...task, repeat: repeatOf({ repeatEvery, repeatUnit }) };
 }
 
-const malformedJson = Symbol('malformed JSON');
-async function readJson(c: Context): Promise<unknown> {
+export const malformedJson = Symbol('malformed JSON');
+export const invalidJson = { error: 'invalid_json', message: 'The request body must be valid JSON.' };
+export async function readJson(c: Context): Promise<unknown> {
   try {
     return await c.req.json();
   } catch {
@@ -197,7 +219,7 @@ async function readJson(c: Context): Promise<unknown> {
   }
 }
 
-function sessionUserId(c: Context<AppEnv>): number {
+export function sessionUserId(c: Context<AppEnv>): number {
   const id = Number(c.get('user').id);
   if (!Number.isSafeInteger(id)) throw new Error('Session user id is not an integer');
   return id;
@@ -211,16 +233,16 @@ const taskNotFound = { error: 'task_not_found', message: 'That task could not be
 
 // A route id is a positive decimal integer. Ids beyond the column range are
 // well formed but cannot exist, so callers answer those with "not found".
-function taskId(raw: string): number | null {
+export function routeId(raw: string): number | null {
   return /^[1-9]\d{0,15}$/.test(raw) ? Number(raw) : null;
 }
+const taskId = routeId;
 
-export function createTaskRoutes(db: AppDatabase, appOrigin: string, now: () => Date) {
+// Session cookies are SameSite=Lax; this additionally rejects cross-site
+// writes. The task and list routes both use it.
+export function allowedOriginOnly(appOrigin: string): MiddlewareHandler<AppEnv> {
   const allowedOrigin = new URL(appOrigin).origin;
-  const routes = new Hono<AppEnv>();
-
-  // Session cookies are SameSite=Lax; this additionally rejects cross-site writes.
-  routes.use('*', async (c, next) => {
+  return async (c, next) => {
     if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) {
       if (c.req.header('Origin') !== allowedOrigin) {
         return c.json(
@@ -230,7 +252,41 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string, now: () => 
       }
     }
     await next();
-  });
+  };
+}
+
+// The PostgreSQL error behind a failed query. Drizzle wraps it as the cause.
+export function databaseError(error: unknown): { code?: string; constraint_name?: string } | null {
+  for (let current = error; current instanceof Error; current = current.cause) {
+    if ('code' in current && typeof current.code === 'string') {
+      return current as { code: string; constraint_name?: string };
+    }
+  }
+  return null;
+}
+// A task pointed at a list that does not exist, or is not the user's.
+const isListReferenceError = (error: unknown) => {
+  const cause = databaseError(error);
+  return cause?.code === '23503' && cause.constraint_name === 'tasks_list_fk';
+};
+
+// Runs a transaction again when PostgreSQL chose it as the victim of a
+// deadlock. Deleting a list locks its tasks and then the list, while a task
+// update locks the task and then (through tasks_list_fk) its list, so the two
+// can rarely wait for each other. The aborted attempt changed nothing.
+export async function retryOnDeadlock<T>(run: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await run();
+    } catch (error) {
+      if (attempt >= 3 || databaseError(error)?.code !== '40P01') throw error;
+    }
+  }
+}
+
+export function createTaskRoutes(db: AppDatabase, appOrigin: string, now: () => Date) {
+  const routes = new Hono<AppEnv>();
+  routes.use('*', allowedOriginOnly(appOrigin));
 
   routes.get('/', async (c) => {
     const rows = await db
@@ -244,7 +300,7 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string, now: () => 
   routes.post('/', async (c) => {
     const body = await readJson(c);
     if (body === malformedJson) {
-      return c.json({ error: 'invalid_json', message: 'The request body must be valid JSON.' }, 400);
+      return c.json(invalidJson, 400);
     }
     const parsed = createTaskBody.safeParse(body);
     if (!parsed.success) {
@@ -254,18 +310,26 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string, now: () => 
     const dueDate = parsed.data.dueDate ?? null;
     const repeat = parsed.data.repeat ?? null;
     if (repeat && dueDate === null) return c.json(invalidRepeat(REPEAT_NEEDS_DUE_DATE_MESSAGE), 400);
-    const [task] = await db
-      .insert(tasks)
-      .values({
-        userId: sessionUserId(c),
-        title: parsed.data.title,
-        notes: parsed.data.notes ?? null,
-        dueDate,
-        repeatEvery: repeat?.every ?? null,
-        repeatUnit: repeat?.unit ?? null,
-        repeatAnchor: repeat ? dueDate : null,
-      })
-      .returning(taskColumns);
+    let task: TaskRow;
+    try {
+      [task] = await db
+        .insert(tasks)
+        .values({
+          userId: sessionUserId(c),
+          title: parsed.data.title,
+          listId: parsed.data.listId ?? null,
+          notes: parsed.data.notes ?? null,
+          dueDate,
+          repeatEvery: repeat?.every ?? null,
+          repeatUnit: repeat?.unit ?? null,
+          repeatAnchor: repeat ? dueDate : null,
+        })
+        .returning(taskColumns);
+    } catch (error) {
+      // An unknown, deleted or foreign list: the same answer for all three.
+      if (isListReferenceError(error)) return c.json(invalidList, 400);
+      throw error;
+    }
     return c.json({ task: toTask(task) }, 201);
   });
 
@@ -274,20 +338,21 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string, now: () => 
     if (id === null) return c.json(invalidTaskId, 400);
     const body = await readJson(c);
     if (body === malformedJson) {
-      return c.json({ error: 'invalid_json', message: 'The request body must be valid JSON.' }, 400);
+      return c.json(invalidJson, 400);
     }
     const parsed = updateTaskBody.safeParse(body);
     if (!parsed.success) {
       const [issue] = parsed.error.issues;
       return c.json({ error: fieldError(issue.path[0], 'invalid_update'), message: issue.message }, 400);
     }
-    const { title, notes, completed, dueDate, repeat } = parsed.data;
+    const { title, notes, completed, dueDate, repeat, listId } = parsed.data;
     if (
       title === undefined &&
       notes === undefined &&
       completed === undefined &&
       dueDate === undefined &&
-      repeat === undefined
+      repeat === undefined &&
+      listId === undefined
     ) {
       return c.json({ error: 'invalid_update', message: UPDATE_FIELDS_MESSAGE }, 400);
     }
@@ -300,7 +365,7 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string, now: () => 
     // One transaction: the update, and the next occurrence created or removed
     // with it. The row is locked first, so concurrent changes to one task run
     // one after another and see each other's result.
-    const result = await db.transaction(async (tx) => {
+    const transaction = () => db.transaction(async (tx) => {
       const [current] = await tx
         .select({
           completed: tasks.completed,
@@ -349,6 +414,7 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string, now: () => 
         .set({
           ...(title === undefined ? {} : { title }),
           ...(notes === undefined ? {} : { notes }),
+          ...(listId === undefined ? {} : { listId }),
           ...(completed === undefined ? {} : { completed }),
           ...(dueDate === undefined ? {} : { dueDate }),
           ...(repeat === undefined ? {} : { repeatEvery: repeat?.every ?? null, repeatUnit: repeat?.unit ?? null }),
@@ -380,8 +446,10 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string, now: () => 
             .insert(tasks)
             .values({
               userId,
-              // The next occurrence carries the title and notes as this update stored them.
+              // The next occurrence carries the title, notes and list as this
+              // update stored them.
               title: task.title,
+              listId: task.listId,
               notes: task.notes,
               dueDate: next,
               repeatEvery: newRepeat.every,
@@ -408,6 +476,15 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string, now: () => 
         body: { task: toTask(task), nextTask: nextTask && toTask(nextTask), removedTaskId },
       };
     });
+    let result: Awaited<ReturnType<typeof transaction>>;
+    try {
+      result = await retryOnDeadlock(transaction);
+    } catch (error) {
+      // The list was unknown, deleted (perhaps at this moment) or another
+      // user's. The whole transaction was rolled back, so nothing changed.
+      if (isListReferenceError(error)) return c.json(invalidList, 400);
+      throw error;
+    }
     return c.json(result.body, result.status);
   });
 

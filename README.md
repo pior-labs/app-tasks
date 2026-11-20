@@ -2,10 +2,11 @@
 
 Pior Labs Tasks. A signed-in user can create tasks, see their saved tasks,
 mark a task complete or clear it again, rename a task, give a task an optional
-due date and optional plain-text notes, make a task with a due date repeat, and
-delete a task. Open tasks are grouped by when they are due.
-Deletion is permanent: there is no archive or undo. Projects and priorities are
-not implemented.
+due date and optional plain-text notes, make a task with a due date repeat,
+sort tasks into lists they name (with a built-in Inbox), and delete a task.
+Open tasks are grouped by when they are due.
+Deletion is permanent: there is no archive or undo. Priorities are not
+implemented.
 
 React/Vite, Hono, PostgreSQL/Drizzle, pnpm, published
 `@pior-labs/design-system`, and Better Auth application sessions. Versions are
@@ -103,7 +104,9 @@ returned. Migration `0004` adds `notes`, a nullable `text` column with the check
 constraint `tasks_notes_length_check` (null, or 1 to 5000 characters as counted
 by `char_length`, which counts code points); it only adds the column, so
 existing rows have no notes and an image built before it keeps working against
-the migrated table. The owner is always
+the migrated table. Migration `0005` adds lists (see [Lists](#lists)): the
+`lists` table and the nullable `tasks.list_id`; existing rows get `NULL`, which
+means Inbox. The owner is always
 taken from the server session, never from the request, and `user_id` is not
 returned. All task routes sit behind the session boundary and return 401
 without a valid session.
@@ -111,17 +114,18 @@ without a valid session.
 | Route | Request | Success |
 | --- | --- | --- |
 | `GET /api/tasks` | none | 200 `{ "tasks": [...] }`, the session user's tasks only, newest first |
-| `POST /api/tasks` | `{ "title": string, "notes"?: string or null, "dueDate"?: string or null, "repeat"?: object or null }` | 201 `{ "task": {...} }`; the title is trimmed, 1 to 200 characters |
-| `PATCH /api/tasks/:id` | any of `{ "title": string }`, `{ "notes": string or null }`, `{ "completed": boolean }`, `{ "dueDate": string or null }`, `{ "repeat": object or null }`, together or alone, plus an optional `"today"` when completing | 200 `{ "task": {...}, "nextTask": {...} or null, "removedTaskId": number or null }` |
+| `POST /api/tasks` | `{ "title": string, "notes"?: string or null, "dueDate"?: string or null, "repeat"?: object or null, "listId"?: number or null }` | 201 `{ "task": {...} }`; the title is trimmed, 1 to 200 characters |
+| `PATCH /api/tasks/:id` | any of `{ "title": string }`, `{ "notes": string or null }`, `{ "completed": boolean }`, `{ "dueDate": string or null }`, `{ "repeat": object or null }`, `{ "listId": number or null }`, together or alone, plus an optional `"today"` when completing | 200 `{ "task": {...}, "nextTask": {...} or null, "removedTaskId": number or null }` |
 | `DELETE /api/tasks/:id` | none | 204 with no body; the task is removed permanently |
 
-A task is `{ id, title, notes, completed, dueDate, repeat, createdAt, updatedAt }`,
-where `notes` is a string or `null`, `dueDate` is a `"YYYY-MM-DD"` string or
+A task is `{ id, title, listId, notes, completed, dueDate, repeat, createdAt, updatedAt }`,
+where `listId` is the id of one of the user's lists or `null` for Inbox,
+`notes` is a string or `null`, `dueDate` is a `"YYYY-MM-DD"` string or
 `null` and `repeat` is
 `{ "every": n, "unit": "day" | "week" | "month" | "year" }` or `null`. Errors are
 `{ "error": code, "message": text }` with stable codes: 400 `invalid_json`,
 `invalid_title`, `invalid_notes`, `invalid_completed`, `invalid_due_date`,
-`invalid_repeat`, `invalid_today`, `invalid_update` or `invalid_task_id`; 403
+`invalid_repeat`, `invalid_list`, `invalid_today`, `invalid_update` or `invalid_task_id`; 403
 `forbidden_origin` when a `POST`/`PATCH`/`DELETE` does not carry the application
 origin (`BETTER_AUTH_URL`) in `Origin`; 404 `task_not_found` for an id that does
 not exist, was already deleted or belongs to another user (the cases are
@@ -129,12 +133,12 @@ indistinguishable).
 
 `PATCH` changes only the fields that are sent. A title follows the same rules
 as on create, from one shared definition in `packages/api/src/tasks.ts`. A body
-with none of `title`, `notes`, `completed`, `dueDate` and `repeat` (an empty
-object, a body with only `today`, or anything that is not an object) is 400
-`invalid_update`, and its message names all five; before renaming existed such
-a body was answered with `invalid_completed`. If any field is invalid nothing
-is changed, and the first invalid field (in the order title, notes, completed,
-due date, repeat) decides the code. Other fields, such as `userId` or `id`, are
+with none of `title`, `notes`, `completed`, `dueDate`, `repeat` and `listId`
+(an empty object, a body with only `today`, or anything that is not an object)
+is 400 `invalid_update`, and its message names all six; before renaming
+existed such a body was answered with `invalid_completed`. If any field is
+invalid nothing is changed, and the first invalid field (in the order title,
+notes, completed, due date, repeat, list) decides the code. Other fields, such as `userId` or `id`, are
 ignored. Every successful update sets `updatedAt`; `createdAt`, and so the list
 order, never changes. All writes filter on the session user in the statements
 that change rows. A `PATCH` locks the task's row and runs in one transaction
@@ -186,8 +190,8 @@ and to occurrences created from it later.
 
 Completing a repeating task (a `PATCH` that changes `completed` from false to
 true, after applying the other fields in the same body) creates the next
-occurrence for the same user: the same title, notes and repeat (as stored by
-that same `PATCH`), open, and the due date
+occurrence for the same user: the same title, notes, list and repeat (as
+stored by that same `PATCH`), open, and the due date
 of the earliest occurrence that is after the current due date and not before
 "today". Done early, that is the occurrence after the due date; done late,
 missed occurrences are skipped, so overdue repeats do not pile up. It is
@@ -206,6 +210,122 @@ kept, and completing the task again then creates no second copy. Every other
 `PATCH` returns `nextTask` and `removedTaskId` as `null`. Deleting a task
 deletes only that row; its next occurrence stays, with `repeated_from_id`
 cleared. Date arithmetic is plain code in `packages/api/src/repeat.ts`.
+
+### Lists
+
+Each task is in Inbox or in one list the user named, such as "Home" or
+"Errands". Inbox is not stored: `tasks.list_id` `NULL` means Inbox, so every
+user has one, existing tasks are in it, and it cannot be renamed or deleted.
+Each row in `lists` belongs to one app-local user (`user_id`, cascade delete,
+so deleting a user deletes their lists) and has a `name` and timestamps.
+Migration `0005` adds the table, the nullable `tasks.list_id` (indexed) and a
+composite foreign key `tasks_list_fk` from `(list_id, user_id)` to
+`lists (id, user_id)`, so the database itself refuses a task in another user's
+list, and refuses to delete a list that tasks still point at. It is additive,
+so an image built before it keeps working against the migrated tables (its new
+tasks land in Inbox). `lists_name_length_check` limits names to 1 to 50
+characters (`char_length`, code points) and the unique index
+`lists_user_id_name_idx` on `(user_id, lower(name))` makes names unique per user
+ignoring letter case.
+
+| Route | Request | Success |
+| --- | --- | --- |
+| `GET /api/lists` | none | 200 `{ "lists": [...] }`, the session user's lists only, oldest first (ties by id) |
+| `POST /api/lists` | `{ "name": string }` | 201 `{ "list": {...} }` |
+| `PATCH /api/lists/:id` | `{ "name": string }` | 200 `{ "list": {...} }` |
+| `DELETE /api/lists/:id` | none | 200 `{ "movedTaskIds": [...] }`, the ids of the list's tasks, which are now in Inbox |
+
+A list is `{ id, name, createdAt, updatedAt }`. The routes sit behind the same
+session boundary and origin check as the task routes. Errors: 400
+`invalid_json`, `invalid_list_name` or `invalid_list_id`; 403
+`forbidden_origin`; 404 `list_not_found` for an id that does not exist, was
+deleted or belongs to another user (indistinguishable); 409
+`duplicate_list_name` or `list_limit_reached`.
+
+Name rules, from one shared definition used by `POST` and `PATCH`, are those of
+titles with a limit of 50: trimmed, at least one visible character, no null
+character, at most 50 Unicode code points. "Inbox" and "All tasks" are
+reserved, so a list can never look like a built-in view: the check ignores
+letter case, invisible characters (such as a zero width space, joiners,
+direction marks or a soft hyphen) and which white space separates the words
+(a no-break space or repeated spaces count as one space). Names that only
+contain the words, such as "Inbox zero", are allowed.
+Anything else is 400 `invalid_list_name` and nothing changes. A name that
+matches another of the user's lists ignoring letter case is 409
+`duplicate_list_name`; renaming a list to its own name in another case is
+allowed, and two users may have lists with the same name. Names are stored as
+typed. A user can have at most 50 lists, so the tab row stays usable; one more
+is 409 `list_limit_reached` (creates for one user run one after another, so
+parallel requests cannot pass it).
+
+Deleting a list never deletes a task. In one transaction it moves every task
+in the list, open and completed, to Inbox (refreshing their `updatedAt`) and
+deletes the list. It locks the list's tasks and then the list, so a task being
+added to it or moved into it at the same moment either finishes first and is
+moved to Inbox, or fails afterwards.
+
+A task's `listId` follows one shared definition used by `POST` and `PATCH`: a
+positive integer or `null`. Missing or `null` on create means Inbox; on `PATCH`
+it moves the task, and a missing `listId` leaves it where it is. Anything that
+is not a positive integer or `null`, and the id of an unknown, deleted or
+another user's list, is 400 `invalid_list` (the same answer for all of these)
+and nothing changes; the check is the foreign key itself, so a list deleted at
+the same moment cannot slip through and never causes a 500. A transaction that
+PostgreSQL ends as a deadlock victim (a list delete racing a task update) is
+retried, up to three attempts. Lists are not filtered on the server:
+`GET /api/tasks` returns every task with its `listId` and the browser filters.
+
+The signed-in page shows a tab row above the add form: "All tasks", "Inbox"
+and the user's lists in creation order, then a "New list" button and, when
+there are lists, a "Manage lists" button. The tab row is a tablist named
+"Lists" with automatic activation: arrow keys (wrapping at the ends), Home and
+End move to a tab and select it, and only the selected tab is in the Tab
+order. The add form and the task list are the selected tab's tabpanel. The
+selected view is kept in the URL as `?list=all`, `?list=inbox` or
+`?list=<id>`, so a reload keeps it; with no parameter, or an id that is not one
+of the user's lists, the view is "All tasks", which keeps every task in view by
+default. On a narrow screen the tabs get a row of their own that scrolls
+sideways inside itself, without scrolling the page.
+
+"Inbox" shows the tasks with no list, a list's tab shows its tasks, and "All
+tasks" shows every task. Each view keeps the grouping, the Completed section
+and the ordering described below, and has its own empty state ("No tasks in
+Errands yet."; "All tasks" keeps "No tasks yet. Add your first one above.").
+In "All tasks", a row in a named list shows the list's name as a muted label
+under the due date line (read as "List: Errands"); Inbox rows show none, and
+the label is not part of the checkbox's description. A task added while a
+named list is selected is created in it (`listId` is sent); in "All tasks"
+and Inbox the add request sends no `listId`. The title field's placeholder
+names the destination ("Add to Errands", "Add to Inbox").
+
+"New list" reveals a "List name" field with "Create list" and Cancel. Enter
+creates the list, adds its tab, selects it and focuses it; Escape or Cancel
+closes the field without a request and returns focus to "New list". The field
+checks the server's rules first (length, visible characters, reserved names
+and a case-insensitive duplicate of a loaded list) and shows those errors, and
+`invalid_list_name`, `duplicate_list_name` and `list_limit_reached` from the
+server, on the field with `aria-invalid` and `aria-describedby`. "Manage lists"
+shows each list with Rename and Delete. Rename works like a task rename: Enter
+saves, Escape cancels, errors show on the field, and the tab and the labels
+change once the server stored the name. Delete asks in the row, naming the
+list and how many loaded tasks will move ("Delete Errands? Its 3 tasks will
+move to Inbox."); after the server deleted it the tab goes, its tasks show in
+Inbox, and if it was selected the view and the URL switch to Inbox. Focus moves
+to the next list's Rename, else the previous one's, else "New list".
+
+The edit row has a "List" select (named `List for "<title>"`, with Inbox and
+every list) after the date and repeat controls and before the notes, so title
+to date is still one Tab. It is sent only when it changed. A task moved out of
+the selected list or Inbox leaves the view: a status message says where it
+went (`Moved "Milk" to Errands.`) and focus moves as after a delete. If the
+server answers `invalid_list` (the list was deleted meanwhile), the error shows
+on the select and the lists are loaded again, so the select no longer offers
+the missing list. If a list was deleted in another tab, an add to it, or a
+rename or delete of it, shows a notice, drops its tab (its tasks show in Inbox)
+and switches to Inbox if it was selected; an add keeps the typed task. Lists
+that fail to load show an error with a "Load lists again" button while the
+tasks still work in "All tasks". A 401 from any list request returns the page
+to the signed-out view.
 
 The signed-in page shows an add-task form (a title, an optional "Due date"
 field, a "Repeats" control and an "Add notes" toggle) and the task list, with distinct
@@ -282,8 +402,8 @@ after the task (for example `Edit "Buy oat milk"`).
 
 - Edit turns the title into a text field, with a date field prefilled with
   the due date, a "Remove due date" control when a date is set (native date
-  fields do not offer a clear button in every browser), Save and Cancel, one
-  row at a time. Enter saves, and Escape anywhere in the form cancels.
+  fields do not offer a clear button in every browser), the List select (see
+  [Lists](#lists)), Save and Cancel, one row at a time. Enter saves, and Escape anywhere in the form cancels.
   A full-width "Notes" text area, named `Notes for "<title>"` and prefilled
   with the notes, comes after the date and repeat controls and before Save; in
   it Enter starts a new line and Ctrl+Enter (Cmd+Enter) saves, and it is
@@ -385,8 +505,17 @@ several, daily, weekly, every 2 weeks, monthly and yearly, month ends across
 February, April and a leap year, a yearly February 29, a moved due date, the
 2100-12-31 limit, the `today` window edges and its absence (the server's UTC
 date), undo, a kept completed successor, parallel completions creating exactly
-one successor, delete with a successor, and isolation between users. They do
-not prove hosted SSO.
+one successor, delete with a successor, and isolation between users. List
+tests (`packages/api/test/lists.test.ts`) cover name rules on both routes
+(trimming, invisible names, the 50 code point limit, null characters, reserved
+names in any case and their lookalikes, non-text bodies), case-insensitive duplicates per user, the
+list order and shapes, the 50-list limit including parallel creates, malformed
+JSON and ids, deleting a list with open and completed tasks, ownership and the
+origin check, `listId` on every task response, moves, invalid, unknown,
+deleted and foreign list ids, the composite foreign key, deletes racing adds,
+moves and completions without a 500, the next occurrence keeping its list, and
+migration `0005` applied to a database with existing rows plus the database
+constraints and the user cascade. They do not prove hosted SSO.
 
 Web component tests (`packages/web/src/*.test.tsx`) use Vitest, jsdom and
 Testing Library with `fetch` stubbed. They cover the signed-out view, the task
@@ -401,7 +530,11 @@ their status messages and focus, the `today` sent with a fixed clock, notes in
 the add form (the toggle, Ctrl/Cmd+Enter, bodies, limits, server errors), in
 edit mode (prefill, changed notes only, null when emptied, Escape, read-only
 while saving, errors) and in rows (plain text, muted when completed, the
-scroll region only for overflowing notes),
+scroll region only for overflowing notes), lists (the tablist roles and
+keyboard, the view in the URL and its fallback, filtering and labels per view,
+empty states, add bodies per view, creating, renaming and deleting lists with
+their errors and focus, the List select and moves out of a view, lists deleted
+elsewhere, a lists load failure and 401s),
 failures, pending states, focus targets and 401 handling. Unit
 tests (`*.test.ts`) cover the date helpers, grouping and the repeat labels and
 form values. They do not run a real browser
@@ -445,6 +578,14 @@ edit, cancel and clear notes with the keyboard only; check that a long note is
 capped in a focusable, named scroll region that the keyboard scrolls while a
 short one is not, without horizontal scrolling at 390px (with screenshots); and
 check that the next occurrence of a repeating task shows the same notes.
+Lists scenarios (`packages/e2e/tests/lists.spec.ts`) create lists and switch
+between them with the keyboard only; add tasks in a named list and in "All
+tasks" and see them in the right views after a reload, with the URL keeping the
+view; move a task between lists from the edit row; rename a list and delete one
+with tasks, checking the confirmation count and the tasks in Inbox; check that
+a second user sees none of the first user's lists; check that a repeating
+task's next occurrence stays in its list; and check at 390px that the tab row
+scrolls sideways without a page scroll (with screenshots).
 Because the API
 checks `today` against its own date, the test API server
 (`packages/api/test/e2e-server.ts`) has a test-only `PUT /e2e/clock` route, and

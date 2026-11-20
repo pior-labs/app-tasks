@@ -9,6 +9,9 @@ import {
   localDate,
   msUntilNextLocalMidnight,
 } from './dueDate';
+import { jsonHeaders, serverError } from './http';
+import { ListBar, TASKS_PANEL_ID, goneListMessage } from './ListBar';
+import { type List, type View, tabId, viewFromSearch, viewName, writeViewToUrl } from './lists';
 import { RepeatControl, RepeatHint } from './RepeatControl';
 import {
   NO_REPEAT,
@@ -22,24 +25,12 @@ import {
 } from './repeat';
 import { type RowMode, type Task, TaskRow, submitOnModEnter } from './TaskRow';
 import { groupTasks, visibleTasks } from './taskGroups';
+import { VISIBLE_CHARACTER, characterCount } from './text';
 
 export type { Task };
 
 const MAX_TITLE_LENGTH = 200;
 const MAX_NOTES_LENGTH = 5000;
-const jsonHeaders = { 'Content-Type': 'application/json' };
-
-// These rules mirror the server (packages/api/src/tasks.ts) so the form
-// and the API agree. A title made only of whitespace, control characters and
-// invisible "default ignorable" code points (such as a zero width space) is
-// treated as empty; visible titles are sent unchanged apart from trimming.
-const VISIBLE_CHARACTER = /[^\p{White_Space}\p{Cc}\p{Default_Ignorable_Code_Point}]/u;
-// Length is counted in Unicode code points, so an emoji is one character.
-function characterCount(text: string) {
-  let count = 0;
-  for (const _character of text) count++;
-  return count;
-}
 
 // The client-side title check shared by the add form and the inline edit
 // field. Returns the message to show, or an empty string for a valid title.
@@ -72,22 +63,7 @@ function goneMessage(task: Task) {
   return `"${task.title}" no longer exists, so it was removed from the list.`;
 }
 
-// Prefer the server's human-readable message for a rejected request. The code
-// tells which field the message is about.
-async function serverError(response: Response, fallback: string) {
-  try {
-    const body: unknown = await response.json();
-    if (body && typeof body === 'object' && 'message' in body && typeof body.message === 'string') {
-      const code = 'error' in body && typeof body.error === 'string' ? body.error : '';
-      return { message: body.message, code };
-    }
-  } catch {
-    // Not JSON: fall through to the generic message.
-  }
-  return { message: fallback, code: '' };
-}
-
-type Field = 'title' | 'dueDate' | 'repeat' | 'notes';
+type Field = 'title' | 'dueDate' | 'repeat' | 'notes' | 'list';
 const fieldOf = (code: string): Field =>
   code === 'invalid_due_date'
     ? 'dueDate'
@@ -95,7 +71,9 @@ const fieldOf = (code: string): Field =>
       ? 'repeat'
       : code === 'invalid_notes'
         ? 'notes'
-        : 'title';
+        : code === 'invalid_list'
+          ? 'list'
+          : 'title';
 
 // A date input that holds a partly typed date reports an empty value and
 // badInput. That is not "no due date", so it is refused instead of sent.
@@ -129,13 +107,34 @@ function removedNextMessage(task: Task) {
 }
 
 // The answer to a task update. Older stubs and servers may leave out the
-// repeat and notes fields; missing means none.
+// repeat, notes and list fields; missing means none (for the list, Inbox).
 type UpdateReply = { task: Task; nextTask?: Task | null; removedTaskId?: number | null };
-const fromServer = (task: Task): Task => ({ ...task, notes: task.notes ?? null, repeat: task.repeat ?? null });
+const fromServer = (task: Task): Task => ({
+  ...task,
+  listId: task.listId ?? null,
+  notes: task.notes ?? null,
+  repeat: task.repeat ?? null,
+});
+
+// Whether a task shows in a view: every task in "All tasks", tasks without a
+// list in Inbox, and a list's own tasks in that list.
+const inView = (task: Task, view: View) =>
+  view === 'all' || task.listId === (view === 'inbox' ? null : view);
+const LIST_GONE_MESSAGE = 'That list no longer exists. Choose another list.';
 
 export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [listState, setListState] = useState<'loading' | 'ready' | 'failed'>('loading');
+  // The user's lists (for the tab row), loaded next to the tasks. When they
+  // fail to load, the built-in views still work.
+  const [lists, setLists] = useState<List[]>([]);
+  const [listsState, setListsState] = useState<'loading' | 'ready' | 'failed'>('loading');
+  // The view asked for (by the URL or a tab). A list id that is not one of
+  // the user's lists shows "All tasks" (D-5), so no task is hidden by default.
+  const [requestedView, setRequestedView] = useState<View>(() => viewFromSearch(location.search));
+  const view: View =
+    typeof requestedView === 'number' && !lists.some((list) => list.id === requestedView) ? 'all' : requestedView;
+  const shownTasks = view === 'all' ? tasks : tasks.filter((task) => inView(task, view));
   const [title, setTitle] = useState('');
   const [dueDate, setDueDate] = useState('');
   const [repeat, setRepeat] = useState<RepeatForm>(NO_REPEAT);
@@ -157,6 +156,8 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
     dueDate: string;
     repeat: RepeatForm;
     notes: string;
+    // The List select: a list id, or null for Inbox.
+    listId: number | null;
     error: string;
     errorField: Field;
   } | null>(null);
@@ -186,7 +187,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
   // Row elements by task id, and the rows the user can see in page order, for
   // moving keyboard focus. A row moved to another group is a new element.
   const rows = useRef(new Map<number, HTMLLIElement>());
-  const groups = groupTasks(tasks, today);
+  const groups = groupTasks(shownTasks, today);
   const visibleRef = useRef<Task[]>([]);
   visibleRef.current = visibleTasks(groups, completedOpen);
   const completedOpenRef = useRef(completedOpen);
@@ -313,6 +314,65 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
     };
   }, [load]);
 
+  // Replace the lists with the server's. Tasks in a list that is gone now
+  // were moved to Inbox by the server, so they are shown there too, and an
+  // open edit row never keeps a List choice that no longer exists.
+  const applyLists = useCallback((next: List[]) => {
+    const ids = new Set(next.map((list) => list.id));
+    const stillThere = (listId: number | null) => (listId === null || ids.has(listId) ? listId : null);
+    setLists(next);
+    setTasks((current) =>
+      current.some((task) => stillThere(task.listId) !== task.listId)
+        ? current.map((task) => ({ ...task, listId: stillThere(task.listId) }))
+        : current,
+    );
+    setEditing((current) =>
+      current && stillThere(current.listId) !== current.listId ? { ...current, listId: null } : current,
+    );
+  }, []);
+  const loadLists = useCallback(
+    async (isCurrent: () => boolean = () => true) => {
+      try {
+        const response = await fetch('/api/lists');
+        if (!isCurrent()) return;
+        if (response.status === 401) return onSignedOut();
+        if (!response.ok) throw new Error();
+        const body: { lists: List[] } = await response.json();
+        if (!isCurrent()) return;
+        applyLists(body.lists);
+        setListsState('ready');
+      } catch {
+        if (isCurrent()) setListsState('failed');
+      }
+    },
+    [onSignedOut, applyLists],
+  );
+  useEffect(() => {
+    let current = true;
+    void loadLists(() => current);
+    return () => {
+      current = false;
+    };
+  }, [loadLists]);
+
+  function selectView(next: View) {
+    const changed = next !== view;
+    setRequestedView(next);
+    writeViewToUrl(next);
+    // An edit row or delete question cannot stay open on a row nobody can see.
+    if (changed && !savingRef.current) setEditing(null);
+    if (changed && !deletingRef.current) setConfirmingId(null);
+  }
+
+  // A list the server no longer has (deleted in another tab): its tab goes,
+  // its tasks show in Inbox, as the server moved them, and a view of it
+  // switches to Inbox.
+  function dropList(list: List, message: string) {
+    applyLists(lists.filter((item) => item.id !== list.id));
+    if (requestedView === list.id) selectView('inbox');
+    setNotice(message);
+  }
+
   async function create(event: FormEvent) {
     event.preventDefault();
     if (creatingRef.current) return;
@@ -329,6 +389,9 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
     const newNotes = notesSent ? storedNotes(notes) : null;
     const notesError = notesOpen ? notesProblem(notes.trim()) : '';
     if (notesError) return setCreateError({ message: notesError, field: 'notes' });
+    // A task added in a named list goes there; in "All tasks" and Inbox it
+    // goes to Inbox, which is no field at all.
+    const list = typeof view === 'number' ? lists.find((item) => item.id === view) : undefined;
     creatingRef.current = true;
     setCreating(true);
     setCreateError(null);
@@ -342,12 +405,17 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
           ...(newNotes === null ? {} : { notes: newNotes }),
           ...(dueDate === '' ? {} : { dueDate }),
           ...(repeatChoice.repeat === null ? {} : { repeat: repeatChoice.repeat }),
+          ...(list ? { listId: list.id } : {}),
         }),
       });
       if (!mounted.current) return;
       if (response.status === 401) return onSignedOut();
       if (response.status === 400) {
         const { message, code } = await serverError(response, 'That task was not accepted.');
+        // The list was deleted meanwhile. The typed task is kept for Inbox.
+        if (code === 'invalid_list' && list) {
+          return dropList(list, `${goneListMessage(list)} The task was not added.`);
+        }
         return setCreateError({ message, field: fieldOf(code) });
       }
       if (!response.ok) throw new Error();
@@ -463,6 +531,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
       dueDate: task.dueDate ?? '',
       repeat: repeatForm(task.repeat),
       notes: task.notes ?? '',
+      listId: task.listId,
       error: '',
       errorField: 'title',
     });
@@ -503,19 +572,27 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
     // Only the fields that changed are sent. Notes compare as they would be
     // stored, so changing only spacing at the ends is no change; emptied notes
     // are sent as null.
-    const changes: { title?: string; notes?: string | null; dueDate?: string | null; repeat?: Repeat | null } = {};
+    const changes: {
+      title?: string;
+      notes?: string | null;
+      dueDate?: string | null;
+      repeat?: Repeat | null;
+      listId?: number | null;
+    } = {};
     if (trimmed !== task.title) changes.title = trimmed;
     const newDueDate = editing.dueDate === '' ? null : editing.dueDate;
     if (newDueDate !== task.dueDate) changes.dueDate = newDueDate;
     if (!sameRepeat(repeatChoice.repeat, task.repeat)) changes.repeat = repeatChoice.repeat;
     const newNotes = storedNotes(editing.notes);
     if (newNotes !== task.notes) changes.notes = newNotes;
+    if (editing.listId !== task.listId) changes.listId = editing.listId;
     // Nothing to store: leave edit mode without a request.
     if (
       changes.title === undefined &&
       changes.dueDate === undefined &&
       changes.repeat === undefined &&
-      changes.notes === undefined
+      changes.notes === undefined &&
+      changes.listId === undefined
     ) {
       return leaveEdit(task);
     }
@@ -540,18 +617,36 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
       }
       if (response.status === 400) {
         const { message, code } = await serverError(response, 'That change was not accepted.');
+        // The chosen list was deleted meanwhile: say so on the List select,
+        // and reload the lists so it no longer offers the missing one.
+        if (code === 'invalid_list') {
+          fail(LIST_GONE_MESSAGE, 'list');
+          return void loadLists();
+        }
         return fail(message, fieldOf(code));
       }
       if (!response.ok) throw new Error();
       const body: UpdateReply = await response.json();
       const updated = fromServer(body.task);
+      // A task moved out of the selected list (or Inbox) leaves the view: like
+      // after a delete, focus moves to the next row, else the previous one,
+      // else the new-task field, and a notice says where the task went.
+      const leavesView = !inView(updated, view);
+      const neighbour = leavesView ? visibleNeighbour(task.id) : undefined;
       // The row shows the new title, date and repeat, and moves to its new
       // group, only once the server has stored them. Focus follows it to Edit.
       setTasks((current) => current.map((item) => (item.id === updated.id ? updated : item)));
       leaveEdit(task);
+      if (leavesView) {
+        if (hasFocus(task.id)) {
+          focusAfterRender.current = () => (neighbour ? firstControl(neighbour.id) : titleInput.current);
+        }
+        setConfirmingId((current) => (current === task.id ? null : current));
+        setNotice(`Moved "${updated.title}" to ${viewName(updated.listId ?? 'inbox', lists)}.`);
+      }
     } catch {
       // Edit mode and the typed values are kept so the user can retry.
-      const changed = (['title', 'dueDate', 'repeat', 'notes'] as const).filter(
+      const changed = (['title', 'dueDate', 'repeat', 'notes', 'listId'] as const).filter(
         (field) => changes[field] !== undefined,
       );
       const what =
@@ -562,8 +657,9 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
               dueDate: 'The new due date',
               repeat: 'The new repeat',
               notes: 'The new notes',
+              listId: 'The new list',
             }[changed[0]];
-      fail(`${what} could not be saved. Please try again.`, changed[0]);
+      fail(`${what} could not be saved. Please try again.`, changed[0] === 'listId' ? 'list' : changed[0]);
     } finally {
       savingRef.current = false;
       setSaving(false);
@@ -618,6 +714,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
         dueDate: editing.dueDate,
         repeat: editing.repeat,
         notes: editing.notes,
+        listId: editing.listId,
         error: editing.error,
         errorField: editing.errorField,
         saving,
@@ -627,7 +724,10 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
     return { kind: 'view' };
   }
 
-  if (listState === 'loading') return <p role="status">Loading your tasks...</p>;
+  // The tasks and the lists load together; lists that fail do not hold up the tasks.
+  if (listState === 'loading' || (listState === 'ready' && listsState === 'loading')) {
+    return <p role="status">Loading your tasks...</p>;
+  }
   if (listState === 'failed') {
     return (
       <div className="space-y-3 rounded-lg border border-border p-5">
@@ -648,6 +748,10 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
       task={task}
       mode={rowMode(task)}
       today={today}
+      lists={lists}
+      // Only "All tasks" mixes lists, so only there a row names its list (D-6).
+      // A list that is not loaded (the lists failed to load) has no label.
+      listName={view === 'all' ? (lists.find((list) => list.id === task.listId)?.name ?? null) : null}
       updating={updatingIds.includes(task.id)}
       // Controls whose action is ignored right now are marked as locked.
       editLocked={saving || updatingIds.includes(task.id)}
@@ -707,6 +811,11 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
           current?.id === task.id && !savingRef.current ? { ...current, notes: value, error: '' } : current,
         )
       }
+      onEditList={(listId) =>
+        setEditing((current) =>
+          current?.id === task.id && !savingRef.current ? { ...current, listId, error: '' } : current,
+        )
+      }
       onSave={() => void saveEdit(task)}
       onCancelEdit={() => cancelEdit(task)}
       onStartDelete={() => startDelete(task)}
@@ -716,182 +825,210 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
   );
   const listClass = 'divide-y divide-border rounded-lg border border-border';
   const headingClass = 'text-sm font-semibold uppercase tracking-wide';
+  // Where an added task goes: the selected list, else Inbox.
+  const destination = typeof view === 'number' ? viewName(view, lists) : 'Inbox';
+  const emptyMessage =
+    view === 'all' ? 'No tasks yet. Add your first one above.' : `No tasks in ${viewName(view, lists)} yet.`;
   return (
     <div className="space-y-4">
-      <form onSubmit={(event) => void create(event)} noValidate className="space-y-2">
-        <div className="flex flex-wrap items-end gap-3">
-          <div className="flex min-w-48 flex-1 flex-col gap-2">
-            <label htmlFor="new-task-title" className="block text-sm font-medium">
-              New task
-            </label>
-            <input
-              id="new-task-title"
-              ref={titleInput}
-              value={title}
-              onChange={(event) => {
-                setTitle(event.target.value);
+      <ListBar
+        lists={lists}
+        failed={listsState === 'failed'}
+        view={view}
+        onSelect={selectView}
+        onRetry={() => void loadLists()}
+        onCreated={(list) => {
+          setLists((current) => [...current, list]);
+          selectView(list.id);
+        }}
+        onRenamed={(list) => setLists((current) => current.map((item) => (item.id === list.id ? list : item)))}
+        onDeleted={(id, movedTaskIds) => {
+          const moved = new Set(movedTaskIds);
+          setTasks((current) =>
+            current.map((task) => (moved.has(task.id) || task.listId === id ? { ...task, listId: null } : task)),
+          );
+          setLists((current) => current.filter((list) => list.id !== id));
+          setEditing((current) => (current?.listId === id ? { ...current, listId: null } : current));
+          if (requestedView === id) selectView('inbox');
+        }}
+        onGone={dropList}
+        onSignedOut={onSignedOut}
+        taskCount={(id) => tasks.filter((task) => task.listId === id).length}
+      />
+      <div role="tabpanel" id={TASKS_PANEL_ID} aria-labelledby={tabId(view)} className="space-y-4">
+        <form onSubmit={(event) => void create(event)} noValidate className="space-y-2">
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="flex min-w-48 flex-1 flex-col gap-2">
+              <label htmlFor="new-task-title" className="block text-sm font-medium">
+                New task
+              </label>
+              <input
+                id="new-task-title"
+                ref={titleInput}
+                value={title}
+                onChange={(event) => {
+                  setTitle(event.target.value);
+                  setCreateError(null);
+                }}
+                readOnly={creating}
+                placeholder={`Add to ${destination}`}
+                autoComplete="off"
+                aria-invalid={createError?.field === 'title' || undefined}
+                aria-describedby={createError?.field === 'title' ? 'new-task-error' : undefined}
+                className="min-w-0 rounded-md border border-border bg-card px-4 py-3 text-card-foreground read-only:opacity-60"
+              />
+            </div>
+            <div className="flex flex-col gap-2">
+              <label htmlFor="new-task-due-date" className="block text-sm font-medium">
+                Due date
+              </label>
+              <input
+                id="new-task-due-date"
+                ref={dueDateInput}
+                type="date"
+                value={dueDate}
+                min={MIN_DUE_DATE}
+                max={MAX_DUE_DATE}
+                onChange={(event) => {
+                  setDueDate(event.target.value);
+                  // Removing the date resets the repeat; a partly typed date does not.
+                  if (holdsNoDate(event.target)) setRepeat(NO_REPEAT);
+                  setCreateError(null);
+                }}
+                // Emptying the last part of a date fires no change event, so the
+                // key that did it, or leaving the field, resets the repeat.
+                onKeyUp={(event) => {
+                  if (holdsNoDate(event.currentTarget)) setRepeat(withoutRepeat);
+                }}
+                onBlur={(event) => {
+                  if (holdsNoDate(event.currentTarget)) setRepeat(withoutRepeat);
+                }}
+                readOnly={creating}
+                aria-invalid={createError?.field === 'dueDate' || undefined}
+                aria-describedby={createError?.field === 'dueDate' ? 'new-task-error' : undefined}
+                className="rounded-md border border-border bg-card px-4 py-3 text-card-foreground read-only:opacity-60"
+              />
+            </div>
+            <RepeatControl
+              idBase="new-task"
+              visibleLabels
+              names={{ choice: 'Repeats', every: 'Every', unit: 'Repeat unit' }}
+              form={repeat}
+              seed={null}
+              available={dueDate !== ''}
+              locked={creating}
+              invalid={createError?.field === 'repeat'}
+              errorId="new-task-error"
+              className="rounded-md border border-border bg-card px-4 py-3 text-card-foreground"
+              onChange={(value) => {
+                setRepeat(value);
                 setCreateError(null);
               }}
+            />
+            <button
+              type="submit"
+              aria-disabled={creating || undefined}
+              className="rounded-md bg-primary px-5 py-3 font-medium text-primary-foreground aria-disabled:opacity-50"
+            >
+              {creating ? 'Adding...' : 'Add task'}
+            </button>
+          </div>
+          {dueDate === '' && <RepeatHint idBase="new-task" />}
+          {/* After Add task in Tab order, so title, date, repeat, Add task stay as they were. */}
+          <button
+            type="button"
+            aria-expanded={notesOpen}
+            aria-controls="new-task-notes-area"
+            onClick={() => {
+              setNotesOpen((open) => !open);
+              setCreateError((current) => (current?.field === 'notes' ? null : current));
+            }}
+            className="flex items-center gap-2 rounded-md py-1 text-sm font-medium"
+          >
+            <span aria-hidden="true" className={`inline-block transition-transform ${notesOpen ? 'rotate-90' : ''}`}>
+              &#9656;
+            </span>
+            Add notes
+          </button>
+          <div id="new-task-notes-area" hidden={!notesOpen} className="flex flex-col gap-2">
+            <label htmlFor="new-task-notes" className="block text-sm font-medium">
+              Notes
+            </label>
+            {/* Enter is a new line here; Ctrl+Enter or Cmd+Enter adds the task. */}
+            <textarea
+              id="new-task-notes"
+              value={notes}
+              onChange={(event) => {
+                setNotes(event.target.value);
+                setCreateError(null);
+              }}
+              onKeyDown={submitOnModEnter}
               readOnly={creating}
-              placeholder="What needs doing?"
-              autoComplete="off"
-              aria-invalid={createError?.field === 'title' || undefined}
-              aria-describedby={createError?.field === 'title' ? 'new-task-error' : undefined}
+              rows={3}
+              aria-invalid={createError?.field === 'notes' || undefined}
+              aria-describedby={createError?.field === 'notes' ? 'new-task-error' : undefined}
               className="min-w-0 rounded-md border border-border bg-card px-4 py-3 text-card-foreground read-only:opacity-60"
             />
           </div>
-          <div className="flex flex-col gap-2">
-            <label htmlFor="new-task-due-date" className="block text-sm font-medium">
-              Due date
-            </label>
-            <input
-              id="new-task-due-date"
-              ref={dueDateInput}
-              type="date"
-              value={dueDate}
-              min={MIN_DUE_DATE}
-              max={MAX_DUE_DATE}
-              onChange={(event) => {
-                setDueDate(event.target.value);
-                // Removing the date resets the repeat; a partly typed date does not.
-                if (holdsNoDate(event.target)) setRepeat(NO_REPEAT);
-                setCreateError(null);
-              }}
-              // Emptying the last part of a date fires no change event, so the
-              // key that did it, or leaving the field, resets the repeat.
-              onKeyUp={(event) => {
-                if (holdsNoDate(event.currentTarget)) setRepeat(withoutRepeat);
-              }}
-              onBlur={(event) => {
-                if (holdsNoDate(event.currentTarget)) setRepeat(withoutRepeat);
-              }}
-              readOnly={creating}
-              aria-invalid={createError?.field === 'dueDate' || undefined}
-              aria-describedby={createError?.field === 'dueDate' ? 'new-task-error' : undefined}
-              className="rounded-md border border-border bg-card px-4 py-3 text-card-foreground read-only:opacity-60"
-            />
-          </div>
-          <RepeatControl
-            idBase="new-task"
-            visibleLabels
-            names={{ choice: 'Repeats', every: 'Every', unit: 'Repeat unit' }}
-            form={repeat}
-            seed={null}
-            available={dueDate !== ''}
-            locked={creating}
-            invalid={createError?.field === 'repeat'}
-            errorId="new-task-error"
-            className="rounded-md border border-border bg-card px-4 py-3 text-card-foreground"
-            onChange={(value) => {
-              setRepeat(value);
-              setCreateError(null);
-            }}
-          />
-          <button
-            type="submit"
-            aria-disabled={creating || undefined}
-            className="rounded-md bg-primary px-5 py-3 font-medium text-primary-foreground aria-disabled:opacity-50"
-          >
-            {creating ? 'Adding...' : 'Add task'}
-          </button>
-        </div>
-        {dueDate === '' && <RepeatHint idBase="new-task" />}
-        {/* After Add task in Tab order, so title, date, repeat, Add task stay as they were. */}
-        <button
-          type="button"
-          aria-expanded={notesOpen}
-          aria-controls="new-task-notes-area"
-          onClick={() => {
-            setNotesOpen((open) => !open);
-            setCreateError((current) => (current?.field === 'notes' ? null : current));
-          }}
-          className="flex items-center gap-2 rounded-md py-1 text-sm font-medium"
-        >
-          <span aria-hidden="true" className={`inline-block transition-transform ${notesOpen ? 'rotate-90' : ''}`}>
-            &#9656;
-          </span>
-          Add notes
-        </button>
-        <div id="new-task-notes-area" hidden={!notesOpen} className="flex flex-col gap-2">
-          <label htmlFor="new-task-notes" className="block text-sm font-medium">
-            Notes
-          </label>
-          {/* Enter is a new line here; Ctrl+Enter or Cmd+Enter adds the task. */}
-          <textarea
-            id="new-task-notes"
-            value={notes}
-            onChange={(event) => {
-              setNotes(event.target.value);
-              setCreateError(null);
-            }}
-            onKeyDown={submitOnModEnter}
-            readOnly={creating}
-            rows={3}
-            aria-invalid={createError?.field === 'notes' || undefined}
-            aria-describedby={createError?.field === 'notes' ? 'new-task-error' : undefined}
-            className="min-w-0 rounded-md border border-border bg-card px-4 py-3 text-card-foreground read-only:opacity-60"
-          />
-        </div>
-        {createError && (
-          <p id="new-task-error" role="alert" className="text-sm text-destructive">
-            {createError.message}
+          {createError && (
+            <p id="new-task-error" role="alert" className="text-sm text-destructive">
+              {createError.message}
+            </p>
+          )}
+        </form>
+        {updateError && (
+          <p role="alert" className="text-sm text-destructive">
+            {updateError}
           </p>
         )}
-      </form>
-      {updateError && (
-        <p role="alert" className="text-sm text-destructive">
-          {updateError}
-        </p>
-      )}
-      {notice && (
-        <p role="status" className="text-sm text-muted-foreground">
-          {notice}
-        </p>
-      )}
-      {tasks.length === 0 ? (
-        <p className="rounded-lg border border-dashed border-border p-5 text-muted-foreground">
-          No tasks yet. Add your first one above.
-        </p>
-      ) : (
-        <div className="space-y-6">
-          {/* Each group is a list named by its heading: "Overdue, list, 2 items". */}
-          {groups.open.map((group) => (
-            <section key={group.key} aria-labelledby={`group-${group.key}`} className="space-y-2">
-              <h2
-                id={`group-${group.key}`}
-                className={`${headingClass} ${group.key === 'overdue' ? 'text-destructive' : 'text-muted-foreground'}`}
-              >
-                {group.heading}
-              </h2>
-              <ul aria-labelledby={`group-${group.key}`} className={listClass}>
-                {group.tasks.map(renderRow)}
-              </ul>
-            </section>
-          ))}
-          {groups.completed.length > 0 && (
-            <section aria-labelledby="group-completed" className="space-y-2">
-              <h2 id="group-completed" className={`${headingClass} text-muted-foreground`}>
-                <button
-                  type="button"
-                  ref={completedToggle}
-                  aria-expanded={completedOpen}
-                  aria-controls="completed-tasks"
-                  onClick={() => setCompletedOpen((open) => !open)}
-                  className="flex items-center gap-2 rounded-md py-1 uppercase tracking-wide"
+        {notice && (
+          <p role="status" className="text-sm text-muted-foreground">
+            {notice}
+          </p>
+        )}
+        {shownTasks.length === 0 ? (
+          <p className="rounded-lg border border-dashed border-border p-5 text-muted-foreground">{emptyMessage}</p>
+        ) : (
+          <div className="space-y-6">
+            {/* Each group is a list named by its heading: "Overdue, list, 2 items". */}
+            {groups.open.map((group) => (
+              <section key={group.key} aria-labelledby={`group-${group.key}`} className="space-y-2">
+                <h2
+                  id={`group-${group.key}`}
+                  className={`${headingClass} ${group.key === 'overdue' ? 'text-destructive' : 'text-muted-foreground'}`}
                 >
-                  <span aria-hidden="true" className={`inline-block transition-transform ${completedOpen ? 'rotate-90' : ''}`}>
-                    &#9656;
-                  </span>
-                  Completed ({groups.completed.length})
-                </button>
-              </h2>
-              <ul id="completed-tasks" aria-labelledby="group-completed" hidden={!completedOpen} className={listClass}>
-                {groups.completed.map(renderRow)}
-              </ul>
-            </section>
-          )}
-        </div>
-      )}
+                  {group.heading}
+                </h2>
+                <ul aria-labelledby={`group-${group.key}`} className={listClass}>
+                  {group.tasks.map(renderRow)}
+                </ul>
+              </section>
+            ))}
+            {groups.completed.length > 0 && (
+              <section aria-labelledby="group-completed" className="space-y-2">
+                <h2 id="group-completed" className={`${headingClass} text-muted-foreground`}>
+                  <button
+                    type="button"
+                    ref={completedToggle}
+                    aria-expanded={completedOpen}
+                    aria-controls="completed-tasks"
+                    onClick={() => setCompletedOpen((open) => !open)}
+                    className="flex items-center gap-2 rounded-md py-1 uppercase tracking-wide"
+                  >
+                    <span aria-hidden="true" className={`inline-block transition-transform ${completedOpen ? 'rotate-90' : ''}`}>
+                      &#9656;
+                    </span>
+                    Completed ({groups.completed.length})
+                  </button>
+                </h2>
+                <ul id="completed-tasks" aria-labelledby="group-completed" hidden={!completedOpen} className={listClass}>
+                  {groups.completed.map(renderRow)}
+                </ul>
+              </section>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

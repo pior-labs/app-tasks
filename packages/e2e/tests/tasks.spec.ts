@@ -982,7 +982,7 @@ test.describe('repeating tasks west of UTC', () => {
     await expect(openCheckbox(page, 'Upcoming', 'Keys: clean the gutters')).toBeFocused();
 
     // Stop repeating it: Edit, Tab to Repeats, type "Does" for Does not repeat,
-    // Tab past the notes field to Save.
+    // Tab past the List select and the notes field to Save.
     await page.keyboard.press('Tab');
     await expect(editButton(page, 'Keys: clean the gutters')).toBeFocused();
     await page.keyboard.press('Enter');
@@ -992,6 +992,8 @@ test.describe('repeating tasks west of UTC', () => {
     await page.keyboard.type('Does');
     await expect(repeats).toHaveValue('none');
     await expect(page.getByRole('spinbutton', { name: 'Repeat interval for "Keys: clean the gutters"' })).toHaveCount(0);
+    await page.keyboard.press('Tab');
+    await expect(page.getByRole('combobox', { name: 'List for "Keys: clean the gutters"', exact: true })).toBeFocused();
     await page.keyboard.press('Tab');
     await expect(page.getByRole('textbox', { name: 'Notes for "Keys: clean the gutters"', exact: true })).toBeFocused();
     await page.keyboard.press('Tab');
