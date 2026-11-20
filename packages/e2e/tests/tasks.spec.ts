@@ -1339,6 +1339,22 @@ test.describe('notes', () => {
     expect(await rowNotes(page, 'Notes: call the plumber').innerText()).toBe('Kitchen tap drips\n  and the shower head');
   });
 
+  test('notes typed and then hidden are not sent with an add, and are shown again on reopening', async ({ page }) => {
+    await signIn(page, 'Household One');
+    const bodies = recordBodies(page);
+    await notesToggle(page).click();
+    await addNotes(page).fill('Kept for later');
+    await notesToggle(page).click();
+    await expect(addNotes(page)).toHaveCount(0);
+
+    await addTask(page, 'Notes: hidden text kept');
+    expect(bodies).toEqual([{ method: 'POST', body: { title: 'Notes: hidden text kept' } }]);
+    await expect(rowNotes(page, 'Notes: hidden text kept')).toHaveCount(0);
+    await expect(notesToggle(page)).toHaveAttribute('aria-expanded', 'false');
+    await notesToggle(page).click();
+    await expect(addNotes(page)).toHaveValue('Kept for later');
+  });
+
   test('edits, cancels and clears notes with the keyboard only', async ({ page }, testInfo) => {
     await signIn(page, 'Household One');
     const title = 'Notes: keyboard edit';

@@ -140,7 +140,8 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
   const [dueDate, setDueDate] = useState('');
   const [repeat, setRepeat] = useState<RepeatForm>(NO_REPEAT);
   // The add form's notes field shows behind the "Add notes" toggle. Hiding it
-  // keeps the text for when it is shown again, but hidden notes are not sent.
+  // keeps the text for when it is shown again, also across an add, but hidden
+  // notes are not sent.
   const [notesOpen, setNotesOpen] = useState(false);
   const [notes, setNotes] = useState('');
   const [creating, setCreating] = useState(false);
@@ -323,7 +324,9 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
     // A repeat needs a due date; without one the control is unavailable.
     const repeatChoice = dueDate === '' ? { repeat: null } : repeatFromForm(repeat);
     if ('problem' in repeatChoice) return setCreateError({ message: repeatChoice.problem, field: 'repeat' });
-    const newNotes = notesOpen ? storedNotes(notes) : null;
+    // Notes are sent, and cleared after the add, only when the area is shown.
+    const notesSent = notesOpen;
+    const newNotes = notesSent ? storedNotes(notes) : null;
     const notesError = notesOpen ? notesProblem(notes.trim()) : '';
     if (notesError) return setCreateError({ message: notesError, field: 'notes' });
     creatingRef.current = true;
@@ -354,8 +357,11 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
       setTitle('');
       setDueDate('');
       setRepeat(NO_REPEAT);
-      setNotes('');
-      setNotesOpen(false);
+      // Hidden notes were not sent, so their text stays for when the area is shown.
+      if (notesSent) {
+        setNotes('');
+        setNotesOpen(false);
+      }
       // Ready for the next task, also when the add button was clicked.
       titleInput.current?.focus();
     } catch {

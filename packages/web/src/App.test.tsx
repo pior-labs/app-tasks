@@ -2298,10 +2298,32 @@ describe('notes', () => {
     await waitFor(() => expect(taskTitles()).toEqual(['Second', 'First']));
 
     await userEvent.click(notesToggle());
+    // The hidden text was kept through the add; replace it.
+    expect(addNotesField().value).toBe('Hidden');
+    await userEvent.clear(addNotesField());
     await userEvent.type(addNotesField(), 'Shown');
     await userEvent.type(title, 'Third{Enter}');
     await waitFor(() => expect(callsTo('POST /api/tasks')).toHaveLength(3));
     expect(callsTo('POST /api/tasks')[2].body).toEqual({ title: 'Third', notes: 'Shown' });
+  });
+
+  test('R1-F1: notes typed and then hidden survive a successful add, and are shown again on reopening', async () => {
+    signedIn([]);
+    reply(
+      'POST /api/tasks',
+      json({ task: { id: 7, title: 'Plain', notes: null, completed: false, dueDate: null, repeat: null } }, 201),
+    );
+    render(<App />);
+    const title = (await screen.findByLabelText('New task')) as HTMLInputElement;
+    await userEvent.click(notesToggle());
+    await userEvent.type(addNotesField(), 'Keep me');
+    await userEvent.click(notesToggle());
+    await userEvent.type(title, 'Plain{Enter}');
+    await waitFor(() => expect(taskTitles()).toEqual(['Plain']));
+    expect(callsTo('POST /api/tasks')[0].body).toEqual({ title: 'Plain' });
+    expect(notesToggle().getAttribute('aria-expanded')).toBe('false');
+    await userEvent.click(notesToggle());
+    expect(addNotesField().value).toBe('Keep me');
   });
 
   test('over-limit notes in the add form show an error on the field and send nothing', async () => {

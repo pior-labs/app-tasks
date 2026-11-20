@@ -234,8 +234,8 @@ the order of the other fields is unchanged. It shows a "Notes" text area below
 it. In the text area Enter starts a new line and Ctrl+Enter (Cmd+Enter on a
 Mac) adds the task. Notes are sent only when the area is shown and they have
 something visible after trimming, so a task without notes is still sent as
-`{ "title": ... }`; hiding the area again keeps the typed text for later but
-does not send it. Notes over 5000 characters or with a null character are
+`{ "title": ... }`; hiding the area again keeps the typed text for later (also
+across an add) but does not send it. Notes over 5000 characters or with a null character are
 refused next to the field without a request (`aria-invalid` and
 `aria-describedby` point at the message), and an `invalid_notes` from the
 server is shown the same way. After a task is added the notes are cleared and
