@@ -9,8 +9,8 @@ type Reply = Response | Promise<Response> | (() => Response | Promise<Response>)
 type Call = { method: string; path: string; body: unknown };
 
 const signedInUser = { id: '1', name: 'Household One', email: 'one@example.test' };
-const milk = { id: 1, title: 'Buy oat milk', notes: null, completed: false, dueDate: null, repeat: null };
-const plants = { id: 2, title: 'Water the plants', notes: null, completed: true, dueDate: null, repeat: null };
+const milk = { id: 1, title: 'Buy oat milk', listId: null, notes: null, completed: false, dueDate: null, repeat: null };
+const plants = { id: 2, title: 'Water the plants', listId: null, notes: null, completed: true, dueDate: null, repeat: null };
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -19,7 +19,8 @@ function json(body: unknown, status = 200) {
   });
 }
 
-// Stub fetch with queued replies per "METHOD path"; an unexpected request fails the test.
+// Stub fetch with queued replies per "METHOD path"; an unexpected request fails
+// the test. GET /api/lists answers no lists unless a test queued a reply.
 let replies: Map<string, Reply[]>;
 let calls: Call[];
 function reply(route: string, ...queued: Reply[]) {
@@ -74,6 +75,7 @@ beforeEach(() => {
       };
       calls.push(call);
       const next = replies.get(`${call.method} ${call.path}`)?.shift();
+      if (!next && `${call.method} ${call.path}` === 'GET /api/lists') return json({ lists: [] });
       if (!next) throw new Error(`Unexpected request: ${call.method} ${call.path}`);
       return typeof next === 'function' ? next() : next;
     }),
@@ -417,7 +419,7 @@ async function startEditing(title: string) {
   await userEvent.click(await screen.findByRole('button', { name: `Edit "${title}"` }));
   return editField(title);
 }
-const tea = { id: 3, title: 'Order tea', notes: null, completed: false, dueDate: null, repeat: null };
+const tea = { id: 3, title: 'Order tea', listId: null, notes: null, completed: false, dueDate: null, repeat: null };
 
 describe('renaming a task', () => {
   test('saves with the Save control and shows the new title only after the server stored it', async () => {
@@ -1116,6 +1118,7 @@ describe('due dates', () => {
   const due = (id: number, title: string, dueDate: string | null, completed = false) => ({
     id,
     title,
+    listId: null,
     notes: null,
     completed,
     dueDate,
@@ -1678,6 +1681,7 @@ describe('repeating tasks', () => {
   const task = (id: number, title: string, dueDate: string | null, repeat: Repeat = null, completed = false) => ({
     id,
     title,
+    listId: null,
     notes: null,
     completed,
     dueDate,
@@ -2552,5 +2556,660 @@ describe('notes', () => {
     region.scrollTop = 0;
     fireEvent.scroll(region);
     expect(region.hasAttribute('data-notes-more')).toBe(true);
+  });
+});
+
+// Task lists. The criteria named below are those of the lists task.
+describe('lists', () => {
+  const list = (id: number, name: string) => ({
+    id,
+    name,
+    createdAt: '2026-11-20T12:00:00.000Z',
+    updatedAt: '2026-11-20T12:00:00.000Z',
+  });
+  const errands = list(10, 'Errands');
+  const home = list(11, 'Home');
+  const inList = (id: number, title: string, listId: number | null, completed = false) => ({
+    ...milk,
+    id,
+    title,
+    listId,
+    completed,
+  });
+  const stamps = inList(4, 'Buy stamps', 10);
+  const post = inList(5, 'Post the letter', 10, true);
+  const withLists = (...lists: unknown[]) => reply('GET /api/lists', json({ lists }));
+  const tablist = () => screen.getByRole('tablist', { name: 'Lists' });
+  const tab = (name: string) => within(tablist()).getByRole('tab', { name });
+  const tabNames = () => within(tablist()).getAllByRole('tab').map((item) => item.textContent);
+  const selectedTab = () =>
+    within(tablist())
+      .getAllByRole('tab')
+      .filter((item) => item.getAttribute('aria-selected') === 'true')
+      .map((item) => item.textContent);
+  const status = () => screen.getByRole('status').textContent;
+  const listField = (title: string) => screen.getByRole('combobox', { name: `List for "${title}"` }) as HTMLSelectElement;
+  const newTask = () => screen.getByLabelText('New task') as HTMLInputElement;
+  // The muted list label of a row, if it has one.
+  const rowLabel = (title: string) =>
+    screen.getByRole('checkbox', { name: title }).closest('li')!.querySelector('[data-list-label]')?.textContent ?? null;
+  async function ready() {
+    await screen.findByRole('tablist', { name: 'Lists' });
+    await screen.findByLabelText('New task');
+  }
+  async function openManage() {
+    await userEvent.click(button('Manage lists'));
+    expect(button('Manage lists').getAttribute('aria-expanded')).toBe('true');
+  }
+
+  test('the tab row shows All tasks, Inbox and the lists in creation order; arrows, Home and End select (AC-8)', async () => {
+    signedIn([milk, stamps]);
+    withLists(errands, home);
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Errands', 'Home']));
+    expect(selectedTab()).toEqual(['All tasks']);
+    // Only the selected tab is in the Tab order.
+    expect(within(tablist()).getAllByRole('tab').map((item) => item.tabIndex)).toEqual([0, -1, -1, -1]);
+    // The task area, add form included, is the selected tab's panel.
+    const panel = screen.getByRole('tabpanel');
+    expect(panel.getAttribute('aria-labelledby')).toBe(tab('All tasks').id);
+    expect(tab('All tasks').getAttribute('aria-controls')).toBe(panel.id);
+    expect(panel.contains(newTask())).toBe(true);
+    // New list and Manage lists are ordinary buttons after the tablist.
+    expect(tablist().compareDocumentPosition(button('New list')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(tablist()).queryByRole('button')).toBeNull();
+
+    act(() => tab('All tasks').focus());
+    await userEvent.keyboard('{ArrowRight}');
+    expect(selectedTab()).toEqual(['Inbox']);
+    expect(document.activeElement).toBe(tab('Inbox'));
+    expect(location.search).toBe('?list=inbox');
+    expect(taskTitles()).toEqual(['Buy oat milk']);
+    expect(screen.getByRole('tabpanel').getAttribute('aria-labelledby')).toBe(tab('Inbox').id);
+    expect(within(tablist()).getAllByRole('tab').map((item) => item.tabIndex)).toEqual([-1, 0, -1, -1]);
+
+    await userEvent.keyboard('{ArrowRight}');
+    expect(selectedTab()).toEqual(['Errands']);
+    expect(location.search).toBe('?list=10');
+    expect(taskTitles()).toEqual(['Buy stamps']);
+    await userEvent.keyboard('{ArrowRight}{ArrowRight}');
+    // Past the last tab: back to the first.
+    expect(selectedTab()).toEqual(['All tasks']);
+    expect(document.activeElement).toBe(tab('All tasks'));
+    expect(location.search).toBe('?list=all');
+    await userEvent.keyboard('{ArrowLeft}');
+    expect(selectedTab()).toEqual(['Home']);
+    await userEvent.keyboard('{Home}');
+    expect(selectedTab()).toEqual(['All tasks']);
+    await userEvent.keyboard('{End}');
+    expect(selectedTab()).toEqual(['Home']);
+    expect(document.activeElement).toBe(tab('Home'));
+    // Tab leaves the tablist for the buttons after it.
+    await userEvent.tab();
+    expect(document.activeElement).toBe(button('New list'));
+
+    await userEvent.click(tab('Errands'));
+    expect(selectedTab()).toEqual(['Errands']);
+    expect(location.search).toBe('?list=10');
+    expect(calls.filter((call) => call.method !== 'GET')).toEqual([]);
+  });
+
+  test('the view comes from the URL; none, unknown or deleted lists show All tasks (AC-8, D-5)', async () => {
+    for (const [search, expected] of [
+      ['?list=10', 'Errands'],
+      ['?list=inbox', 'Inbox'],
+      ['?list=all', 'All tasks'],
+      ['', 'All tasks'],
+      ['?list=99', 'All tasks'],
+      ['?list=0', 'All tasks'],
+      ['?list=Errands', 'All tasks'],
+      ['?error=sign-in&list=11', 'Home'],
+    ]) {
+      history.replaceState(null, '', `/${search}`);
+      signedIn([milk, stamps]);
+      withLists(errands, home);
+      render(<App />);
+      await ready();
+      await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Errands', 'Home']));
+      expect(selectedTab(), search).toEqual([expected]);
+      cleanup();
+    }
+  });
+
+  test('each view shows its tasks with the usual groups; All tasks labels named lists (AC-9, D-6)', async () => {
+    const dueStamps = { ...stamps, dueDate: '2026-11-19' };
+    signedIn([milk, dueStamps, post, inList(6, 'Fix the shelf', 11), plants]);
+    withLists(errands, home, list(12, 'Work'));
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(tabNames()).toContain('Work'));
+
+    // All tasks: every task, in the usual groups; rows in a named list show it.
+    expect(taskTitles()).toEqual(['Buy stamps', 'Buy oat milk', 'Fix the shelf']);
+    expect(screen.getAllByRole('heading', { level: 2 }).map((item) => item.textContent!.replace('▸', ''))).toEqual([
+      'Overdue',
+      'No date',
+      'Completed (2)',
+    ]);
+    expect(rowLabel('Buy stamps')).toBe('List: Errands');
+    expect(rowLabel('Fix the shelf')).toBe('List: Home');
+    expect(rowLabel('Buy oat milk')).toBeNull();
+    const label = screen.getByRole('checkbox', { name: 'Buy stamps' }).closest('li')!.querySelector('[data-list-label]')!;
+    expect(label.className).toContain('text-muted-foreground');
+    // After the due date line, and not part of the checkbox description.
+    const dueLine = document.getElementById(screen.getByRole('checkbox', { name: 'Buy stamps' }).getAttribute('aria-describedby')!)!;
+    expect(dueLine.compareDocumentPosition(label) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(dueLine.contains(label)).toBe(false);
+    await expandCompleted();
+    expect(taskTitles()).toEqual(['Buy stamps', 'Buy oat milk', 'Fix the shelf', 'Post the letter', 'Water the plants']);
+    expect(rowLabel('Post the letter')).toBe('List: Errands');
+
+    // A named list: only its tasks, open and completed, without labels. The
+    // Completed section stays expanded across views.
+    await userEvent.click(tab('Errands'));
+    expect(button('Completed (1)').getAttribute('aria-expanded')).toBe('true');
+    expect(taskTitles()).toEqual(['Buy stamps', 'Post the letter']);
+    expect(rowLabel('Buy stamps')).toBeNull();
+    expect(screen.getAllByRole('heading', { level: 2 }).map((item) => item.textContent!.replace('▸', ''))).toEqual([
+      'Overdue',
+      'Completed (1)',
+    ]);
+
+    // Inbox: only tasks without a list.
+    await userEvent.click(tab('Inbox'));
+    expect(taskTitles()).toEqual(['Buy oat milk', 'Water the plants']);
+    expect(rowLabel('Buy oat milk')).toBeNull();
+
+    // Each view has its own empty state.
+    await userEvent.click(tab('Work'));
+    expect(screen.getByText('No tasks in Work yet.')).toBeTruthy();
+    expect(screen.queryByRole('list')).toBeNull();
+  });
+
+  test('empty states name the view; with no tasks at all All tasks keeps its message (AC-9)', async () => {
+    signedIn([stamps]);
+    withLists(errands);
+    render(<App />);
+    await ready();
+    await userEvent.click(await screen.findByRole('tab', { name: 'Inbox' }));
+    expect(screen.getByText('No tasks in Inbox yet.')).toBeTruthy();
+    cleanup();
+
+    history.replaceState(null, '', '/');
+    signedIn([]);
+    render(<App />);
+    expect(await screen.findByText('No tasks yet. Add your first one above.')).toBeTruthy();
+  });
+
+  test('a task added in a named list is created there; All tasks and Inbox send no listId (AC-10)', async () => {
+    signedIn([milk]);
+    withLists(errands);
+    reply('POST /api/tasks', json({ task: inList(7, 'Buy envelopes', 10) }, 201));
+    reply('POST /api/tasks', json({ task: inList(8, 'Call the plumber', null) }, 201));
+    reply('POST /api/tasks', json({ task: inList(9, 'Order tea', null) }, 201));
+    render(<App />);
+    await ready();
+
+    // All tasks: the add goes to Inbox and says so.
+    expect(newTask().placeholder).toBe('Add to Inbox');
+    await userEvent.click(await screen.findByRole('tab', { name: 'Errands' }));
+    expect(newTask().placeholder).toBe('Add to Errands');
+    expect(screen.getByLabelText('New task')).toBe(newTask());
+    await userEvent.type(newTask(), 'Buy envelopes{Enter}');
+    await waitFor(() => expect(taskTitles()).toEqual(['Buy envelopes']));
+    expect(callsTo('POST /api/tasks')[0].body).toEqual({ title: 'Buy envelopes', listId: 10 });
+    expect(document.activeElement).toBe(newTask());
+
+    await userEvent.click(tab('All tasks'));
+    await userEvent.type(newTask(), 'Call the plumber{Enter}');
+    await waitFor(() => expect(taskTitles()).toEqual(['Call the plumber', 'Buy envelopes', 'Buy oat milk']));
+    expect(callsTo('POST /api/tasks')[1].body).toEqual({ title: 'Call the plumber' });
+
+    await userEvent.click(tab('Inbox'));
+    expect(newTask().placeholder).toBe('Add to Inbox');
+    await userEvent.type(newTask(), 'Order tea{Enter}');
+    await waitFor(() => expect(taskTitles()).toEqual(['Order tea', 'Call the plumber', 'Buy oat milk']));
+    expect(callsTo('POST /api/tasks')[2].body).toEqual({ title: 'Order tea' });
+  });
+
+  test('"New list" creates a list with Enter, adds its tab and selects it; Escape and Cancel send nothing (AC-11)', async () => {
+    signedIn([milk]);
+    reply('POST /api/lists', json({ list: errands }, 201));
+    render(<App />);
+    await ready();
+    // Without lists there is nothing to manage.
+    expect(screen.queryByRole('button', { name: 'Manage lists' })).toBeNull();
+    expect(tabNames()).toEqual(['All tasks', 'Inbox']);
+
+    // Escape closes the field without a request, and focus returns to New list.
+    await userEvent.click(button('New list'));
+    const field = screen.getByRole('textbox', { name: 'List name' }) as HTMLInputElement;
+    expect(document.activeElement).toBe(field);
+    await userEvent.type(field, 'Thrown away{Escape}');
+    expect(screen.queryByRole('textbox', { name: 'List name' })).toBeNull();
+    expect(document.activeElement).toBe(button('New list'));
+    // So does Cancel; the field starts empty again.
+    await userEvent.click(button('New list'));
+    expect((screen.getByRole('textbox', { name: 'List name' }) as HTMLInputElement).value).toBe('');
+    await userEvent.click(button('Cancel new list'));
+    expect(screen.queryByRole('textbox', { name: 'List name' })).toBeNull();
+    expect(callsTo('POST /api/lists')).toHaveLength(0);
+
+    await userEvent.click(button('New list'));
+    await userEvent.type(screen.getByRole('textbox', { name: 'List name' }), '  Errands {Enter}');
+    await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Errands']));
+    expect(callsTo('POST /api/lists')[0].body).toEqual({ name: 'Errands' });
+    expect(selectedTab()).toEqual(['Errands']);
+    expect(document.activeElement).toBe(tab('Errands'));
+    expect(location.search).toBe('?list=10');
+    expect(screen.queryByRole('textbox', { name: 'List name' })).toBeNull();
+    expect(screen.getByText('No tasks in Errands yet.')).toBeTruthy();
+    expect(button('Manage lists')).toBeTruthy();
+  });
+
+  test('the new list field checks names like the server and shows server errors on the field (AC-11)', async () => {
+    signedIn([milk]);
+    withLists(errands);
+    reply('POST /api/lists', json({ error: 'duplicate_list_name', message: 'You already have a list with that name.' }, 409));
+    reply('POST /api/lists', json({ error: 'list_limit_reached', message: 'You can have at most 50 lists. Delete one to make room.' }, 409));
+    reply('POST /api/lists', json({ error: 'invalid_list_name', message: 'List names cannot contain a null character.' }, 400));
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(tabNames()).toContain('Errands'));
+    await userEvent.click(button('New list'));
+    const field = screen.getByRole('textbox', { name: 'List name' }) as HTMLInputElement;
+    const emoji = '\u{1F600}';
+    const expectError = (message: string) => {
+      expect(screen.getByRole('alert').textContent).toBe(message);
+      expect(field.getAttribute('aria-invalid')).toBe('true');
+      expect(field.getAttribute('aria-describedby')).toBe(screen.getByRole('alert').id);
+    };
+    for (const [typed, message] of [
+      ['', 'Enter a list name.'],
+      ['   ', 'Enter a list name.'],
+      ['​', 'Enter a list name.'],
+      ['x'.repeat(51), 'List names can be at most 50 characters.'],
+      [emoji.repeat(51), 'List names can be at most 50 characters.'],
+      ['inbox', '"Inbox" and "All tasks" are built in. Choose another name.'],
+      [' ALL TASKS ', '"Inbox" and "All tasks" are built in. Choose another name.'],
+      ['eRRANDS', 'You already have a list with that name.'],
+    ]) {
+      fireEvent.change(field, { target: { value: typed } });
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(field.hasAttribute('aria-invalid')).toBe(false);
+      await userEvent.click(button('Create list'));
+      expectError(message);
+    }
+    expect(callsTo('POST /api/lists')).toHaveLength(0);
+    // 50 emoji are 50 characters, so the server decides; here, it refuses.
+    fireEvent.change(field, { target: { value: emoji.repeat(50) } });
+    await userEvent.click(button('Create list'));
+    await waitFor(() => expectError('You already have a list with that name.'));
+    fireEvent.change(field, { target: { value: 'Shopping' } });
+    await userEvent.type(field, '{Enter}');
+    await waitFor(() => expectError('You can have at most 50 lists. Delete one to make room.'));
+    fireEvent.change(field, { target: { value: 'Groceries' } });
+    await userEvent.type(field, '{Enter}');
+    await waitFor(() => expectError('List names cannot contain a null character.'));
+    expect(callsTo('POST /api/lists').map((call) => call.body)).toEqual([
+      { name: emoji.repeat(50) },
+      { name: 'Shopping' },
+      { name: 'Groceries' },
+    ]);
+    // Nothing was added, and the field keeps the typed name.
+    expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Errands']);
+    expect(field.value).toBe('Groceries');
+  });
+
+  test('the new list field is read-only while it is saved and ignores repeat submits (AC-11)', async () => {
+    signedIn([milk]);
+    const created = pending();
+    reply('POST /api/lists', created.response);
+    render(<App />);
+    await ready();
+    await userEvent.click(button('New list'));
+    const field = screen.getByRole('textbox', { name: 'List name' }) as HTMLInputElement;
+    await userEvent.type(field, 'Errands{Enter}');
+    expect(field.readOnly).toBe(true);
+    expect(button('Creating...').getAttribute('aria-disabled')).toBe('true');
+    await userEvent.keyboard('{Enter}{Escape}');
+    expect(callsTo('POST /api/lists')).toHaveLength(1);
+    created.finish(json({ list: errands }, 201));
+    await waitFor(() => expect(selectedTab()).toEqual(['Errands']));
+  });
+
+  test('Manage lists renames a list; the tab and the labels change at once (AC-12)', async () => {
+    signedIn([milk, stamps]);
+    withLists(errands, home);
+    const renamed = pending();
+    reply('PATCH /api/lists/10', json({ error: 'duplicate_list_name', message: 'You already have a list with that name.' }, 409));
+    reply('PATCH /api/lists/10', renamed.response);
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(tabNames()).toContain('Errands'));
+    await openManage();
+    const manage = screen.getByRole('list', { name: 'Your lists' });
+    expect(within(manage).getAllByRole('listitem').map((item) => item.querySelector('[data-list-name]')?.textContent)).toEqual([
+      'Errands',
+      'Home',
+    ]);
+
+    // Escape cancels without a request and returns focus to Rename.
+    await userEvent.click(button('Rename "Errands"'));
+    const field = screen.getByRole('textbox', { name: 'New name for "Errands"' }) as HTMLInputElement;
+    expect(document.activeElement).toBe(field);
+    expect(field.value).toBe('Errands');
+    await userEvent.type(field, ' and more{Escape}');
+    expect(screen.queryByRole('textbox', { name: 'New name for "Errands"' })).toBeNull();
+    expect(document.activeElement).toBe(button('Rename "Errands"'));
+    expect(calls.filter((call) => call.method !== 'GET')).toEqual([]);
+
+    // Client checks, as for a new list; the list's own name in other case is fine.
+    await userEvent.click(button('Rename "Errands"'));
+    const again = screen.getByRole('textbox', { name: 'New name for "Errands"' }) as HTMLInputElement;
+    await userEvent.clear(again);
+    await userEvent.type(again, 'home{Enter}');
+    expect(screen.getByRole('alert').textContent).toBe('You already have a list with that name.');
+    expect(again.getAttribute('aria-invalid')).toBe('true');
+    expect(again.getAttribute('aria-describedby')).toBe(screen.getByRole('alert').id);
+    expect(callsTo('PATCH /api/lists/10')).toHaveLength(0);
+
+    // A server error shows on the field.
+    await userEvent.clear(again);
+    await userEvent.type(again, 'Shopping{Enter}');
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toBe('You already have a list with that name.'));
+    expect(again.value).toBe('Shopping');
+
+    // Saved: read-only while pending, then the tab and the labels follow.
+    await userEvent.type(again, '{Enter}');
+    expect(again.readOnly).toBe(true);
+    expect(callsTo('PATCH /api/lists/10')[1].body).toEqual({ name: 'Shopping' });
+    renamed.finish(json({ list: { ...errands, name: 'Shopping' } }));
+    await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Shopping', 'Home']));
+    expect(rowLabel('Buy stamps')).toBe('List: Shopping');
+    expect(document.activeElement).toBe(button('Rename "Shopping"'));
+  });
+
+  test('deleting a list asks with the task count, then its tasks show in Inbox (AC-12)', async () => {
+    history.replaceState(null, '', '/?list=10');
+    signedIn([milk, stamps, post, inList(6, 'Fix the shelf', 11)]);
+    withLists(errands, home, list(12, 'Work'));
+    reply('DELETE /api/lists/10', json({ movedTaskIds: [4, 5] }));
+    reply('DELETE /api/lists/12', json({ movedTaskIds: [] }));
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(selectedTab()).toEqual(['Errands']));
+    await openManage();
+
+    // The question names the list and counts its tasks, open and completed.
+    await userEvent.click(button('Delete list "Errands"'));
+    expect(screen.getByRole('group', { name: 'Delete list "Errands"?' }).textContent).toContain(
+      'Delete Errands? Its 2 tasks will move to Inbox.',
+    );
+    expect(document.activeElement).toBe(button('Cancel deleting list "Errands"'));
+    await userEvent.keyboard('{Escape}');
+    expect(document.activeElement).toBe(button('Delete list "Errands"'));
+    await userEvent.click(button('Delete list "Home"'));
+    expect(screen.getByRole('group', { name: 'Delete list "Home"?' }).textContent).toContain(
+      'Delete Home? Its 1 task will move to Inbox.',
+    );
+    await userEvent.click(button('Cancel deleting list "Home"'));
+    await userEvent.click(button('Delete list "Work"'));
+    expect(screen.getByRole('group', { name: 'Delete list "Work"?' }).textContent).toContain('Delete Work? It has no tasks.');
+    await userEvent.click(button('Confirm deleting list "Work"'));
+    await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Errands', 'Home']));
+    // Focus goes to the list before it when it was the last one.
+    expect(document.activeElement).toBe(button('Rename "Home"'));
+    expect(selectedTab()).toEqual(['Errands']);
+    expect(calls.filter((call) => call.method !== 'GET')).toEqual([
+      { method: 'DELETE', path: '/api/lists/12', body: undefined },
+    ]);
+
+    // Deleting the selected list moves the view to Inbox, with its tasks.
+    await userEvent.click(button('Delete list "Errands"'));
+    await userEvent.click(button('Confirm deleting list "Errands"'));
+    await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Home']));
+    expect(selectedTab()).toEqual(['Inbox']);
+    expect(location.search).toBe('?list=inbox');
+    expect(document.activeElement).toBe(button('Rename "Home"'));
+    await userEvent.click(button('Manage lists'));
+    await expandCompleted();
+    expect(taskTitles()).toEqual(['Buy oat milk', 'Buy stamps', 'Post the letter']);
+    await userEvent.click(tab('All tasks'));
+    expect(rowLabel('Buy stamps')).toBeNull();
+    expect(rowLabel('Fix the shelf')).toBe('List: Home');
+  });
+
+  test('after the last list is deleted, Manage lists goes away and focus moves to New list (AC-12)', async () => {
+    signedIn([milk]);
+    withLists(errands);
+    reply('DELETE /api/lists/10', json({ movedTaskIds: [] }));
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(tabNames()).toContain('Errands'));
+    await openManage();
+    await userEvent.click(button('Delete list "Errands"'));
+    await userEvent.click(button('Confirm deleting list "Errands"'));
+    await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox']));
+    expect(screen.queryByRole('button', { name: 'Manage lists' })).toBeNull();
+    expect(document.activeElement).toBe(button('New list'));
+  });
+
+  test('the edit row has a List select after the date and repeat; only a changed list is sent (AC-13, D-7)', async () => {
+    signedIn([milk, stamps]);
+    withLists(errands, home);
+    reply('PATCH /api/tasks/1', json({ task: { ...milk, title: 'Buy soy milk' } }));
+    reply('PATCH /api/tasks/1', json({ task: { ...milk, title: 'Buy soy milk', listId: 11 } }));
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(tabNames()).toContain('Home'));
+    const title = await startEditing('Buy oat milk');
+    const select = listField('Buy oat milk');
+    expect([...select.options].map((option) => option.textContent)).toEqual(['Inbox', 'Errands', 'Home']);
+    expect(select.value).toBe('');
+    expect(select.selectedOptions[0].textContent).toBe('Inbox');
+    // Title to date is still one Tab; the select comes after the repeat
+    // controls and before the notes.
+    expect(document.activeElement).toBe(title);
+    await userEvent.tab();
+    expect(document.activeElement).toBe(screen.getByLabelText('Due date for "Buy oat milk"'));
+    const repeat = screen.getByRole('combobox', { name: 'Repeats for "Buy oat milk"' });
+    expect(repeat.compareDocumentPosition(select) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const notes = screen.getByRole('textbox', { name: 'Notes for "Buy oat milk"' });
+    expect(select.compareDocumentPosition(notes) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    // A title change alone sends only the title.
+    await userEvent.clear(title);
+    await userEvent.type(title, 'Buy soy milk{Enter}');
+    await waitFor(() => expect(callsTo('PATCH /api/tasks/1')).toHaveLength(1));
+    expect(callsTo('PATCH /api/tasks/1')[0].body).toEqual({ title: 'Buy soy milk' });
+
+    // All tasks keeps a moved task in view, with its new label.
+    await startEditing('Buy soy milk');
+    await userEvent.selectOptions(listField('Buy soy milk'), 'Home');
+    await userEvent.click(button('Save'));
+    await waitFor(() => expect(callsTo('PATCH /api/tasks/1')).toHaveLength(2));
+    expect(callsTo('PATCH /api/tasks/1')[1].body).toEqual({ listId: 11 });
+    await waitFor(() => expect(rowLabel('Buy soy milk')).toBe('List: Home'));
+    expect(document.activeElement).toBe(button('Edit "Buy soy milk"'));
+
+    // An unchanged list (picked away and back) is no change at all.
+    await startEditing('Buy stamps');
+    expect(listField('Buy stamps').value).toBe('10');
+    await userEvent.selectOptions(listField('Buy stamps'), 'Inbox');
+    await userEvent.selectOptions(listField('Buy stamps'), 'Errands');
+    await userEvent.click(button('Save'));
+    expect(callsTo('PATCH /api/tasks/4')).toHaveLength(0);
+  });
+
+  test('a task moved out of the selected view leaves it with a notice; focus moves on (AC-13)', async () => {
+    history.replaceState(null, '', '/?list=inbox');
+    signedIn([tea, milk, stamps]);
+    withLists(errands);
+    reply('PATCH /api/tasks/3', json({ task: { ...tea, listId: 10 } }));
+    reply('PATCH /api/tasks/1', json({ task: { ...milk, listId: 10 } }));
+    reply('PATCH /api/tasks/4', json({ task: { ...stamps, listId: null } }));
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(selectedTab()).toEqual(['Inbox']));
+    expect(taskTitles()).toEqual(['Order tea', 'Buy oat milk']);
+
+    await startEditing('Order tea');
+    await userEvent.selectOptions(listField('Order tea'), 'Errands');
+    await userEvent.click(button('Save'));
+    await waitFor(() => expect(taskTitles()).toEqual(['Buy oat milk']));
+    expect(callsTo('PATCH /api/tasks/3')[0].body).toEqual({ listId: 10 });
+    expect(status()).toBe('Moved "Order tea" to Errands.');
+    // As after a delete: the next row, else the previous, else the new-task field.
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('checkbox', { name: 'Buy oat milk' })));
+
+    await startEditing('Buy oat milk');
+    await userEvent.selectOptions(listField('Buy oat milk'), 'Errands');
+    await userEvent.click(button('Save'));
+    await waitFor(() => expect(screen.getByText('No tasks in Inbox yet.')).toBeTruthy());
+    await waitFor(() => expect(document.activeElement).toBe(newTask()));
+
+    // Out of a named list, into Inbox.
+    await userEvent.click(tab('Errands'));
+    expect(taskTitles()).toEqual(['Order tea', 'Buy oat milk', 'Buy stamps']);
+    await startEditing('Buy stamps');
+    await userEvent.selectOptions(listField('Buy stamps'), 'Inbox');
+    await userEvent.click(button('Save'));
+    await waitFor(() => expect(taskTitles()).toEqual(['Order tea', 'Buy oat milk']));
+    expect(status()).toBe('Moved "Buy stamps" to Inbox.');
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('checkbox', { name: 'Buy oat milk' })));
+  });
+
+  test('a move into a list deleted meanwhile shows an error and reloads the lists (AC-13, AC-14)', async () => {
+    signedIn([milk, stamps]);
+    withLists(errands, home);
+    reply('PATCH /api/tasks/1', json({ error: 'invalid_list', message: 'listId must be the id of one of your lists, or null for Inbox.' }, 400));
+    // Errands was deleted in another tab: its tasks are in Inbox now.
+    withLists(home);
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(tabNames()).toContain('Errands'));
+    await startEditing('Buy oat milk');
+    await userEvent.selectOptions(listField('Buy oat milk'), 'Errands');
+    await userEvent.click(button('Save'));
+    await waitFor(() => expect(callsTo('GET /api/lists')).toHaveLength(2));
+    await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Home']));
+    // Still editing, with the error on the select, which no longer offers the gone list.
+    const select = listField('Buy oat milk');
+    expect(screen.getByRole('alert').textContent).toBe('That list no longer exists. Choose another list.');
+    expect(select.getAttribute('aria-invalid')).toBe('true');
+    expect(select.getAttribute('aria-describedby')).toBe(screen.getByRole('alert').id);
+    expect([...select.options].map((option) => option.textContent)).toEqual(['Inbox', 'Home']);
+    expect(select.value).toBe('');
+    await userEvent.click(button('Cancel'));
+    // The task that was in the gone list is shown in Inbox, as the server keeps it.
+    expect(rowLabel('Buy stamps')).toBeNull();
+    await userEvent.click(tab('Inbox'));
+    expect(taskTitles()).toEqual(['Buy oat milk', 'Buy stamps']);
+  });
+
+  test('an add, rename or delete that finds its list gone drops the tab with a notice (AC-14)', async () => {
+    history.replaceState(null, '', '/?list=10');
+    signedIn([milk, stamps]);
+    withLists(errands, home, list(12, 'Work'));
+    reply('POST /api/tasks', json({ error: 'invalid_list', message: 'listId must be the id of one of your lists, or null for Inbox.' }, 400));
+    reply('PATCH /api/lists/11', json({ error: 'list_not_found', message: 'That list could not be found.' }, 404));
+    reply('DELETE /api/lists/12', json({ error: 'list_not_found', message: 'That list could not be found.' }, 404));
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(selectedTab()).toEqual(['Errands']));
+
+    await userEvent.type(newTask(), 'Buy envelopes{Enter}');
+    await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Home', 'Work']));
+    expect(status()).toBe('"Errands" no longer exists, so it was removed. The task was not added.');
+    expect(selectedTab()).toEqual(['Inbox']);
+    expect(location.search).toBe('?list=inbox');
+    // The typed task is kept, ready to add to Inbox now.
+    expect(newTask().value).toBe('Buy envelopes');
+    expect(newTask().placeholder).toBe('Add to Inbox');
+    expect(taskTitles()).toEqual(['Buy oat milk', 'Buy stamps']);
+
+    await openManage();
+    await userEvent.click(button('Rename "Home"'));
+    await userEvent.type(screen.getByRole('textbox', { name: 'New name for "Home"' }), ' office{Enter}');
+    await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Work']));
+    expect(status()).toBe('"Home" no longer exists, so it was removed.');
+    expect(document.activeElement).toBe(button('Rename "Work"'));
+
+    await userEvent.click(button('Delete list "Work"'));
+    await userEvent.click(button('Confirm deleting list "Work"'));
+    await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox']));
+    expect(status()).toBe('"Work" no longer exists, so it was removed.');
+    expect(document.activeElement).toBe(button('New list'));
+  });
+
+  test('lists that fail to load show an error with a retry; tasks still work in All tasks (AC-14)', async () => {
+    history.replaceState(null, '', '/?list=10');
+    signedIn([milk, stamps]);
+    reply('GET /api/lists', json({ error: 'internal_error' }, 500));
+    reply('GET /api/lists', () => Promise.reject(new TypeError('network down')));
+    withLists(errands);
+    reply('POST /api/tasks', json({ task: inList(7, 'Call the plumber', null) }, 201));
+    render(<App />);
+    expect((await screen.findByRole('alert')).textContent).toBe('Your lists could not be loaded.');
+    expect(selectedTab()).toEqual(['All tasks']);
+    expect(taskTitles()).toEqual(['Buy oat milk', 'Buy stamps']);
+    await userEvent.type(newTask(), 'Call the plumber{Enter}');
+    await waitFor(() => expect(taskTitles()).toEqual(['Call the plumber', 'Buy oat milk', 'Buy stamps']));
+    expect(callsTo('POST /api/tasks')[0].body).toEqual({ title: 'Call the plumber' });
+
+    await userEvent.click(button('Load lists again'));
+    await waitFor(() => expect(callsTo('GET /api/lists')).toHaveLength(2));
+    expect((await screen.findByRole('alert')).textContent).toBe('Your lists could not be loaded.');
+    await userEvent.click(button('Load lists again'));
+    await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Errands']));
+    expect(screen.queryByRole('alert')).toBeNull();
+    // The list the URL names exists now, so it is shown.
+    expect(selectedTab()).toEqual(['Errands']);
+    expect(taskTitles()).toEqual(['Buy stamps']);
+    await userEvent.click(tab('All tasks'));
+    expect(rowLabel('Buy stamps')).toBe('List: Errands');
+  });
+
+  test('a 401 from any list request returns to the signed-out view (AC-14)', async () => {
+    const expectSignedOut = async () => {
+      expect(await screen.findByRole('button', { name: 'Sign in with Pior Labs' })).toBeTruthy();
+      expect(screen.getByRole('alert').textContent).toBe('Your session has ended. Please sign in again.');
+      expect(screen.queryByRole('tablist')).toBeNull();
+      cleanup();
+    };
+    const unauthorized = () => json({ error: 'unauthorized' }, 401);
+
+    signedIn([milk]);
+    reply('GET /api/lists', unauthorized());
+    render(<App />);
+    await expectSignedOut();
+
+    signedIn([milk]);
+    reply('POST /api/lists', unauthorized());
+    render(<App />);
+    await ready();
+    await userEvent.click(button('New list'));
+    await userEvent.type(screen.getByRole('textbox', { name: 'List name' }), 'Errands{Enter}');
+    await expectSignedOut();
+
+    for (const [method, action] of [['PATCH', 'rename'], ['DELETE', 'delete']] as const) {
+      signedIn([milk]);
+      withLists(errands);
+      reply(`${method} /api/lists/10`, unauthorized());
+      render(<App />);
+      await ready();
+      await waitFor(() => expect(tabNames()).toContain('Errands'));
+      await openManage();
+      if (action === 'rename') {
+        await userEvent.click(button('Rename "Errands"'));
+        await userEvent.type(screen.getByRole('textbox', { name: 'New name for "Errands"' }), 's{Enter}');
+      } else {
+        await userEvent.click(button('Delete list "Errands"'));
+        await userEvent.click(button('Confirm deleting list "Errands"'));
+      }
+      await expectSignedOut();
+    }
   });
 });

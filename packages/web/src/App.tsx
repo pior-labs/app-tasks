@@ -38,7 +38,7 @@ export function App() {
     finally { setBusy(false); }
   }
   return <main className="mx-auto flex min-h-screen max-w-3xl items-center px-6 py-16">
-    <section className="w-full space-y-6">
+    <section className="w-full min-w-0 space-y-6">
       <p className="text-sm font-medium uppercase tracking-[0.2em] opacity-60">Pior Labs</p>
       <h1 className="text-5xl font-semibold tracking-tight">Tasks</h1>
       {loading ? <p role="status">Loading your session...</p> : <>

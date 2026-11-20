@@ -83,6 +83,7 @@ describe('grouping', () => {
   const task = (id: number, dueDate: string | null, completed = false): Task => ({
     id,
     title: `Task ${id}`,
+    listId: null,
     notes: null,
     completed,
     dueDate,
