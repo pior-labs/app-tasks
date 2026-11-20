@@ -4,12 +4,14 @@ import {
   boolean,
   check,
   date,
+  foreignKey,
   index,
   integer,
   pgTable,
   serial,
   text,
   timestamp,
+  unique,
   uniqueIndex,
 } from 'drizzle-orm/pg-core';
 
@@ -79,6 +81,31 @@ export const verifications = pgTable(
   (table) => [index('verifications_identifier_idx').on(table.identifier)],
 );
 
+// Lists the user names, such as "Home" or "Errands". Inbox is not a row: a
+// task with no list (list_id null) is in Inbox. Every query filters on user_id.
+export const lists = pgTable(
+  'lists',
+  {
+    id: serial('id').primaryKey(),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    // One user cannot have two lists whose names differ only in letter case.
+    // It also serves lookups by user_id, its first column.
+    uniqueIndex('lists_user_id_name_idx').on(table.userId, sql`lower(${table.name})`),
+    // The target of the tasks foreign key below, which pairs a list with its owner.
+    unique('lists_id_user_id_unique').on(table.id, table.userId),
+    // char_length counts code points, like the API and the web form, so an
+    // emoji is one of the 50 characters.
+    check('lists_name_length_check', sql`char_length(${table.name}) between 1 and 50`),
+  ],
+);
+
 // Task rows belong to exactly one app-local user; every query filters on user_id.
 export const tasks = pgTable(
   'tasks',
@@ -88,6 +115,8 @@ export const tasks = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
     title: text('title').notNull(),
+    // The list the task is in, or null for Inbox. See tasks_list_fk below.
+    listId: integer('list_id'),
     // Optional plain-text notes, null when there are none. Never an empty
     // string: the API stores notes with nothing visible as null.
     notes: text('notes'),
@@ -114,6 +143,15 @@ export const tasks = pgTable(
   },
   (table) => [
     index('tasks_user_id_idx').on(table.userId),
+    index('tasks_list_id_idx').on(table.listId),
+    // The list and the task have the same owner, so the database itself refuses
+    // a task in another user's list. A list that tasks still point at cannot be
+    // deleted (no action): the API moves its tasks to Inbox first.
+    foreignKey({
+      name: 'tasks_list_fk',
+      columns: [table.listId, table.userId],
+      foreignColumns: [lists.id, lists.userId],
+    }),
     // char_length counts code points, like the API and the web form, so an
     // emoji is one of the 5000 characters.
     check('tasks_notes_length_check', sql`${table.notes} is null or char_length(${table.notes}) between 1 and 5000`),
