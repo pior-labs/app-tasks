@@ -96,7 +96,7 @@ test('a repeat is created, changed and stopped, and the anchor follows the due d
   const session = await signIn(fixture, 0);
   const created = await create(session, { title: 'Repeat: bins', dueDate: '2026-11-24', repeat: weekly });
   assert.deepEqual(created.repeat, weekly);
-  assert.deepEqual(Object.keys(created).sort(), ['completed', 'createdAt', 'dueDate', 'id', 'repeat', 'title', 'updatedAt']);
+  assert.deepEqual(Object.keys(created).sort(), ['completed', 'createdAt', 'dueDate', 'id', 'notes', 'repeat', 'title', 'updatedAt']);
   let row = await stored(created.id);
   assert.deepEqual(
     { unit: row!.repeat_unit, every: row!.repeat_every, anchor: row!.repeat_anchor, from: row!.repeated_from_id },

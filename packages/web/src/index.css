@@ -11,3 +11,9 @@ body {
   min-width: 320px;
   min-height: 100vh;
 }
+
+/* A task's notes box that has more text below: fade the last 2rem. */
+[data-notes-more] {
+  -webkit-mask-image: linear-gradient(to bottom, black calc(100% - 2rem), transparent);
+  mask-image: linear-gradient(to bottom, black calc(100% - 2rem), transparent);
+}

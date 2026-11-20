@@ -88,6 +88,9 @@ export const tasks = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
     title: text('title').notNull(),
+    // Optional plain-text notes, null when there are none. Never an empty
+    // string: the API stores notes with nothing visible as null.
+    notes: text('notes'),
     completed: boolean('completed').default(false).notNull(),
     // A calendar date without a time or timezone. String mode keeps it as
     // "YYYY-MM-DD" end to end, so no timezone conversion can shift the day.
@@ -111,6 +114,9 @@ export const tasks = pgTable(
   },
   (table) => [
     index('tasks_user_id_idx').on(table.userId),
+    // char_length counts code points, like the API and the web form, so an
+    // emoji is one of the 5000 characters.
+    check('tasks_notes_length_check', sql`${table.notes} is null or char_length(${table.notes}) between 1 and 5000`),
     check('tasks_repeat_unit_check', sql`${table.repeatUnit} in ('day', 'week', 'month', 'year')`),
     check('tasks_repeat_every_check', sql`${table.repeatEvery} between 1 and 99`),
     // A repeat is all or nothing: unit, interval and anchor together.

@@ -1,0 +1,2 @@
+ALTER TABLE "tasks" ADD COLUMN "notes" text;--> statement-breakpoint
+ALTER TABLE "tasks" ADD CONSTRAINT "tasks_notes_length_check" CHECK ("tasks"."notes" is null or char_length("tasks"."notes") between 1 and 5000);

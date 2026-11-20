@@ -1,4 +1,4 @@
-import { type APIRequestContext, expect, type Page, type Request, test } from '@playwright/test';
+import { type APIRequestContext, expect, type Page, type Request, test, type TestInfo } from '@playwright/test';
 
 // End-to-end checks in a real browser against the Vite dev server and the real
 // API on a disposable database. Sign-in goes through the fixture SSO provider
@@ -981,7 +981,8 @@ test.describe('repeating tasks west of UTC', () => {
     await expect(statusMessage(page)).toHaveText('"Keys: clean the gutters" is next due Mon, Dec 7.');
     await expect(openCheckbox(page, 'Upcoming', 'Keys: clean the gutters')).toBeFocused();
 
-    // Stop repeating it: Edit, Tab to Repeats, type "Does" for Does not repeat, Tab to Save.
+    // Stop repeating it: Edit, Tab to Repeats, type "Does" for Does not repeat,
+    // Tab past the notes field to Save.
     await page.keyboard.press('Tab');
     await expect(editButton(page, 'Keys: clean the gutters')).toBeFocused();
     await page.keyboard.press('Enter');
@@ -991,6 +992,8 @@ test.describe('repeating tasks west of UTC', () => {
     await page.keyboard.type('Does');
     await expect(repeats).toHaveValue('none');
     await expect(page.getByRole('spinbutton', { name: 'Repeat interval for "Keys: clean the gutters"' })).toHaveCount(0);
+    await page.keyboard.press('Tab');
+    await expect(page.getByRole('textbox', { name: 'Notes for "Keys: clean the gutters"', exact: true })).toBeFocused();
     await page.keyboard.press('Tab');
     await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeFocused();
     await page.keyboard.press('Enter');
@@ -1261,3 +1264,257 @@ for (const { zone, label, time, today, next } of [
     });
   });
 }
+
+test.describe('notes', () => {
+  test.use({ timezoneId: 'America/Toronto', locale: 'en-US' });
+
+  test.beforeEach(async ({ page, request }) => {
+    // Friday 2026-11-20, noon in Toronto (17:00 UTC).
+    await fixClock(page, request, new Date('2026-11-20T12:00:00-05:00'));
+  });
+
+  const notesToggle = (page: Page) => page.getByRole('button', { name: 'Add notes', exact: true });
+  const addNotes = (page: Page) => page.getByRole('textbox', { name: 'Notes', exact: true });
+  const editNotes = (page: Page, title: string) =>
+    page.getByRole('textbox', { name: `Notes for "${title}"`, exact: true });
+  const rowNotes = (page: Page, title: string) => rowOf(page, title).locator('[data-notes]');
+  async function addTaskWithNotes(page: Page, title: string, notes: string) {
+    await page.getByLabel('New task').fill(title);
+    if ((await notesToggle(page).getAttribute('aria-expanded')) === 'false') await notesToggle(page).click();
+    await addNotes(page).fill(notes);
+    await addNotes(page).press('Control+Enter');
+    await expect(checkbox(page, title)).toBeVisible();
+  }
+  async function screenshot(page: Page, testInfo: TestInfo, name: string) {
+    const path = testInfo.outputPath(`${name}.png`);
+    await page.screenshot({ path, fullPage: true });
+    await testInfo.attach(name, { path, contentType: 'image/png' });
+  }
+
+  test('adds a task with multi-line notes through the toggle; they survive a reload', async ({ page }, testInfo) => {
+    await signIn(page, 'Household One');
+    const bodies = recordBodies(page);
+    await expect(notesToggle(page)).toHaveAttribute('aria-expanded', 'false');
+    await expect(addNotes(page)).toHaveCount(0);
+
+    await page.getByLabel('New task').fill('Notes: call the plumber');
+    // Tab from Add task reaches the toggle; Enter opens the field and Tab reaches it.
+    await page.getByRole('button', { name: 'Add task' }).focus();
+    await page.keyboard.press('Tab');
+    await expect(notesToggle(page)).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(notesToggle(page)).toHaveAttribute('aria-expanded', 'true');
+    await page.keyboard.press('Tab');
+    await expect(addNotes(page)).toBeFocused();
+    // Enter is a new line; Ctrl+Enter adds the task.
+    await page.keyboard.type('Kitchen tap drips');
+    await page.keyboard.press('Enter');
+    await page.keyboard.type('  and the shower head');
+    await expect(addNotes(page)).toHaveValue('Kitchen tap drips\n  and the shower head');
+    expect(bodies).toEqual([]);
+    await screenshot(page, testInfo, 'notes-add-form');
+    await page.keyboard.press('Control+Enter');
+
+    await expect(checkbox(page, 'Notes: call the plumber')).toBeVisible();
+    expect(bodies).toEqual([
+      { method: 'POST', body: { title: 'Notes: call the plumber', notes: 'Kitchen tap drips\n  and the shower head' } },
+    ]);
+    // The field is cleared and collapsed; focus is back in New task.
+    await expect(notesToggle(page)).toHaveAttribute('aria-expanded', 'false');
+    await expect(addNotes(page)).toHaveCount(0);
+    await expect(page.getByLabel('New task')).toBeFocused();
+    const notes = rowNotes(page, 'Notes: call the plumber');
+    await expect(notes).toBeVisible();
+    // Line breaks and the inner spacing are shown as typed.
+    expect(await notes.innerText()).toBe('Kitchen tap drips\n  and the shower head');
+    await screenshot(page, testInfo, 'notes-row');
+
+    // A plain add still sends only the title.
+    await addTask(page, 'Notes: no notes here');
+    expect(bodies[1]).toEqual({ method: 'POST', body: { title: 'Notes: no notes here' } });
+    await expect(rowNotes(page, 'Notes: no notes here')).toHaveCount(0);
+
+    await page.reload();
+    await expect(rowNotes(page, 'Notes: call the plumber')).toBeVisible();
+    expect(await rowNotes(page, 'Notes: call the plumber').innerText()).toBe('Kitchen tap drips\n  and the shower head');
+  });
+
+  test('notes typed and then hidden are not sent with an add, and are shown again on reopening', async ({ page }) => {
+    await signIn(page, 'Household One');
+    const bodies = recordBodies(page);
+    await notesToggle(page).click();
+    await addNotes(page).fill('Kept for later');
+    await notesToggle(page).click();
+    await expect(addNotes(page)).toHaveCount(0);
+
+    await addTask(page, 'Notes: hidden text kept');
+    expect(bodies).toEqual([{ method: 'POST', body: { title: 'Notes: hidden text kept' } }]);
+    await expect(rowNotes(page, 'Notes: hidden text kept')).toHaveCount(0);
+    await expect(notesToggle(page)).toHaveAttribute('aria-expanded', 'false');
+    await notesToggle(page).click();
+    await expect(addNotes(page)).toHaveValue('Kept for later');
+  });
+
+  test('edits, cancels and clears notes with the keyboard only', async ({ page }, testInfo) => {
+    await signIn(page, 'Household One');
+    const title = 'Notes: keyboard edit';
+    await addTaskWithNotes(page, title, 'First line');
+    const bodies = recordBodies(page);
+
+    // Checkbox, Tab to Edit, Enter: the title field has focus; Tab reaches the notes.
+    await checkbox(page, title).focus();
+    await page.keyboard.press('Tab');
+    await expect(editButton(page, title)).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(editField(page, title)).toBeFocused();
+    await tabTo(page, editNotes(page, title));
+    await expect(editNotes(page, title)).toHaveValue('First line');
+    await page.keyboard.press('Control+End');
+    await page.keyboard.press('Enter');
+    await page.keyboard.type('Second line');
+    await expect(editNotes(page, title)).toHaveValue('First line\nSecond line');
+    // Shift+Tab goes back through the date to the title; Tab again comes back to the notes.
+    await page.keyboard.press('Tab');
+    await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeFocused();
+    await page.keyboard.press('Shift+Tab');
+    await expect(editNotes(page, title)).toBeFocused();
+    await screenshot(page, testInfo, 'notes-edit-row');
+
+    // Escape cancels without a request; the stored notes stay.
+    await page.keyboard.press('Escape');
+    await expect(editButton(page, title)).toBeFocused();
+    expect(bodies).toEqual([]);
+    expect(await rowNotes(page, title).innerText()).toBe('First line');
+
+    // Ctrl+Enter saves only the notes.
+    await page.keyboard.press('Enter');
+    await tabTo(page, editNotes(page, title));
+    await page.keyboard.press('Control+End');
+    await page.keyboard.press('Enter');
+    await page.keyboard.type('Second line');
+    await page.keyboard.press('Control+Enter');
+    await expect(editButton(page, title)).toBeFocused();
+    expect(bodies).toEqual([{ method: 'PATCH', body: { notes: 'First line\nSecond line' } }]);
+    expect(await rowNotes(page, title).innerText()).toBe('First line\nSecond line');
+
+    // Emptying the field clears the notes.
+    await page.keyboard.press('Enter');
+    await tabTo(page, editNotes(page, title));
+    await page.keyboard.press('Control+A');
+    await page.keyboard.press('Delete');
+    await page.keyboard.press('Control+Enter');
+    await expect(editButton(page, title)).toBeFocused();
+    expect(bodies[1]).toEqual({ method: 'PATCH', body: { notes: null } });
+    await expect(rowNotes(page, title)).toHaveCount(0);
+    await page.reload();
+    await expect(checkbox(page, title)).toBeVisible();
+    await expect(rowNotes(page, title)).toHaveCount(0);
+  });
+
+  test('long notes are capped in a focusable scroll region; short notes are not', async ({ page }, testInfo) => {
+    await signIn(page, 'Household One');
+    const long = 'Notes: long packing list';
+    const short = 'Notes: short reminder';
+    const lines = Array.from({ length: 40 }, (_, i) => `Item ${i + 1}: something to pack`);
+    await addTaskWithNotes(page, long, lines.join('\n'));
+    await addTaskWithNotes(page, short, 'Bring the blue bag');
+
+    // Short: fully visible, no scroll bar, no Tab stop, no region.
+    const shortNotes = rowNotes(page, short);
+    await expect(shortNotes).toHaveText('Bring the blue bag');
+    expect(await shortNotes.evaluate((element) => element.scrollHeight <= element.clientHeight)).toBe(true);
+    await expect(shortNotes).not.toHaveAttribute('tabindex');
+    await expect(shortNotes).not.toHaveAttribute('role');
+    await expect(shortNotes).not.toHaveAttribute('data-notes-more');
+    await checkbox(page, short).focus();
+    await page.keyboard.press('Tab');
+    await expect(editButton(page, short)).toBeFocused();
+
+    // Long: capped at 10rem (160px) with a vertical scroll bar, and a named,
+    // focusable region right after the checkbox in Tab order.
+    const region = page.getByRole('region', { name: `Notes for "${long}"`, exact: true });
+    await expect(region).toBeVisible();
+    await expect(region).toHaveAttribute('tabindex', '0');
+    const size = await region.evaluate((element) => ({
+      client: element.clientHeight,
+      scroll: element.scrollHeight,
+      overflowY: getComputedStyle(element).overflowY,
+      maxHeight: getComputedStyle(element).maxHeight,
+    }));
+    expect(size.client).toBeLessThan(size.scroll);
+    expect(size.client).toBeLessThanOrEqual(160);
+    expect(size).toMatchObject({ overflowY: 'auto', maxHeight: '160px' });
+    await checkbox(page, long).focus();
+    await page.keyboard.press('Tab');
+    await expect(region).toBeFocused();
+    // A bottom fade cues that more text is below, even with overlay scroll bars.
+    await expect(region).toHaveAttribute('data-notes-more');
+    expect(await region.evaluate((element) => getComputedStyle(element).maskImage)).toContain('linear-gradient');
+    // The keyboard scrolls it; at the end the fade is gone.
+    await page.keyboard.press('End');
+    await expect.poll(() => region.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+    await expect(region).not.toHaveAttribute('data-notes-more');
+    expect(await region.evaluate((element) => getComputedStyle(element).maskImage)).toBe('none');
+    await page.keyboard.press('Tab');
+    await expect(editButton(page, long)).toBeFocused();
+    await page.evaluate(() => window.scrollTo(0, 0));
+
+    // At phone width nothing scrolls sideways, and a short note that wraps
+    // stays uncapped.
+    for (const [name, width] of [
+      ['notes-narrow', 390],
+      ['notes-wide', 1280],
+    ] as const) {
+      await page.setViewportSize({ width, height: 1000 });
+      const noHorizontalScroll = await page.evaluate(
+        () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+      );
+      expect(noHorizontalScroll).toBe(true);
+      await expect(region).toHaveAttribute('tabindex', '0');
+      await expect(shortNotes).not.toHaveAttribute('tabindex');
+      await region.scrollIntoViewIfNeeded();
+      await screenshot(page, testInfo, name);
+    }
+
+    // The fade at the top and at the end of the long note, at both widths.
+    for (const [name, width] of [
+      ['notes-fade-narrow', 390],
+      ['notes-fade-wide', 1280],
+    ] as const) {
+      await page.setViewportSize({ width, height: 1000 });
+      await region.evaluate((element) => element.scrollTo(0, 0));
+      await expect(region).toHaveAttribute('data-notes-more');
+      await region.scrollIntoViewIfNeeded();
+      await screenshot(page, testInfo, `${name}-top`);
+      await region.evaluate((element) => element.scrollTo(0, element.scrollHeight));
+      await expect(region).not.toHaveAttribute('data-notes-more');
+      await screenshot(page, testInfo, `${name}-end`);
+    }
+  });
+
+  test('the next occurrence of a repeating task shows the same notes', async ({ page }, testInfo) => {
+    await signIn(page, 'Household One');
+    const title = 'Notes: weekly bins';
+    await page.getByLabel('New task').fill(title);
+    await page.getByLabel('Due date', { exact: true }).fill('2026-11-20');
+    await addRepeats(page).selectOption({ label: 'Weekly' });
+    await notesToggle(page).click();
+    await addNotes(page).fill('Green bin\nand the recycling');
+    await page.getByRole('button', { name: 'Add task' }).click();
+    await expect(openCheckbox(page, 'Today', title)).toBeVisible();
+
+    await openCheckbox(page, 'Today', title).click();
+    await expect(statusMessage(page)).toHaveText(`"${title}" is next due Fri, Nov 27.`);
+    const next = groupList(page, 'Upcoming').getByRole('listitem').filter({ has: checkbox(page, title) });
+    await expect(next.locator('[data-notes]')).toBeVisible();
+    expect(await next.locator('[data-notes]').innerText()).toBe('Green bin\nand the recycling');
+    await screenshot(page, testInfo, 'notes-next-occurrence');
+
+    await page.reload();
+    const reloaded = groupList(page, 'Upcoming').getByRole('listitem').filter({ has: checkbox(page, title) });
+    expect(await reloaded.locator('[data-notes]').innerText()).toBe('Green bin\nand the recycling');
+    await expandCompleted(page);
+    const done = completedList(page).getByRole('listitem').filter({ has: checkbox(page, title) });
+    expect(await done.locator('[data-notes]').innerText()).toBe('Green bin\nand the recycling');
+  });
+});

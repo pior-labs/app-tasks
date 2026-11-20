@@ -2,10 +2,10 @@
 
 Pior Labs Tasks. A signed-in user can create tasks, see their saved tasks,
 mark a task complete or clear it again, rename a task, give a task an optional
-due date, make a task with a due date repeat, and delete a task. Open tasks are
-grouped by when they are due.
-Deletion is permanent: there is no archive or undo. Notes, projects and
-priorities are not implemented.
+due date and optional plain-text notes, make a task with a due date repeat, and
+delete a task. Open tasks are grouped by when they are due.
+Deletion is permanent: there is no archive or undo. Projects and priorities are
+not implemented.
 
 React/Vite, Hono, PostgreSQL/Drizzle, pnpm, published
 `@pior-labs/design-system`, and Better Auth application sessions. Versions are
@@ -99,7 +99,11 @@ repeats; and `repeated_from_id`, the occurrence whose completion created the
 row (a unique foreign key to `tasks.id`, `ON DELETE SET NULL`). Check
 constraints enforce the units, the range and that the three repeat columns are
 set together. `repeat_anchor` and `repeated_from_id` are internal and not
-returned. The owner is always
+returned. Migration `0004` adds `notes`, a nullable `text` column with the check
+constraint `tasks_notes_length_check` (null, or 1 to 5000 characters as counted
+by `char_length`, which counts code points); it only adds the column, so
+existing rows have no notes and an image built before it keeps working against
+the migrated table. The owner is always
 taken from the server session, never from the request, and `user_id` is not
 returned. All task routes sit behind the session boundary and return 401
 without a valid session.
@@ -107,16 +111,17 @@ without a valid session.
 | Route | Request | Success |
 | --- | --- | --- |
 | `GET /api/tasks` | none | 200 `{ "tasks": [...] }`, the session user's tasks only, newest first |
-| `POST /api/tasks` | `{ "title": string, "dueDate"?: string or null, "repeat"?: object or null }` | 201 `{ "task": {...} }`; the title is trimmed, 1 to 200 characters |
-| `PATCH /api/tasks/:id` | any of `{ "title": string }`, `{ "completed": boolean }`, `{ "dueDate": string or null }`, `{ "repeat": object or null }`, together or alone, plus an optional `"today"` when completing | 200 `{ "task": {...}, "nextTask": {...} or null, "removedTaskId": number or null }` |
+| `POST /api/tasks` | `{ "title": string, "notes"?: string or null, "dueDate"?: string or null, "repeat"?: object or null }` | 201 `{ "task": {...} }`; the title is trimmed, 1 to 200 characters |
+| `PATCH /api/tasks/:id` | any of `{ "title": string }`, `{ "notes": string or null }`, `{ "completed": boolean }`, `{ "dueDate": string or null }`, `{ "repeat": object or null }`, together or alone, plus an optional `"today"` when completing | 200 `{ "task": {...}, "nextTask": {...} or null, "removedTaskId": number or null }` |
 | `DELETE /api/tasks/:id` | none | 204 with no body; the task is removed permanently |
 
-A task is `{ id, title, completed, dueDate, repeat, createdAt, updatedAt }`,
-where `dueDate` is a `"YYYY-MM-DD"` string or `null` and `repeat` is
+A task is `{ id, title, notes, completed, dueDate, repeat, createdAt, updatedAt }`,
+where `notes` is a string or `null`, `dueDate` is a `"YYYY-MM-DD"` string or
+`null` and `repeat` is
 `{ "every": n, "unit": "day" | "week" | "month" | "year" }` or `null`. Errors are
 `{ "error": code, "message": text }` with stable codes: 400 `invalid_json`,
-`invalid_title`, `invalid_completed`, `invalid_due_date`, `invalid_repeat`,
-`invalid_today`, `invalid_update` or `invalid_task_id`; 403
+`invalid_title`, `invalid_notes`, `invalid_completed`, `invalid_due_date`,
+`invalid_repeat`, `invalid_today`, `invalid_update` or `invalid_task_id`; 403
 `forbidden_origin` when a `POST`/`PATCH`/`DELETE` does not carry the application
 origin (`BETTER_AUTH_URL`) in `Origin`; 404 `task_not_found` for an id that does
 not exist, was already deleted or belongs to another user (the cases are
@@ -124,12 +129,12 @@ indistinguishable).
 
 `PATCH` changes only the fields that are sent. A title follows the same rules
 as on create, from one shared definition in `packages/api/src/tasks.ts`. A body
-with none of `title`, `completed`, `dueDate` and `repeat` (an empty object, a
-body with only `today`, or anything that is not an object) is 400
-`invalid_update`, and its message names all four; before renaming existed such
+with none of `title`, `notes`, `completed`, `dueDate` and `repeat` (an empty
+object, a body with only `today`, or anything that is not an object) is 400
+`invalid_update`, and its message names all five; before renaming existed such
 a body was answered with `invalid_completed`. If any field is invalid nothing
-is changed, and the first invalid field (in the order title, completed, due
-date, repeat) decides the code. Other fields, such as `userId` or `id`, are
+is changed, and the first invalid field (in the order title, notes, completed,
+due date, repeat) decides the code. Other fields, such as `userId` or `id`, are
 ignored. Every successful update sets `updatedAt`; `createdAt`, and so the list
 order, never changes. All writes filter on the session user in the statements
 that change rows. A `PATCH` locks the task's row and runs in one transaction
@@ -142,6 +147,16 @@ characters such as a zero width space) is rejected like an empty one; a title
 containing a null character is rejected because PostgreSQL cannot store it; the
 200 limit counts Unicode code points, so an emoji is one character. Visible
 titles are stored unchanged apart from trimming.
+
+Notes rules, from one shared definition used by `POST` and `PATCH`: notes are
+optional plain text, never interpreted as Markdown or HTML. They are trimmed at
+the ends only; line breaks and spacing inside are stored exactly as sent.
+Notes with nothing visible after trimming (the title rule), `""` and `null` are
+all stored as `null`, which on `PATCH` clears them; a missing `notes` on create
+means none and on `PATCH` leaves them unchanged. More than 5000 characters
+(Unicode code points, so an emoji is one), a null character or anything that is
+not a string or `null` is 400 `invalid_notes` and nothing changes. The forms
+apply the same rules.
 
 Due date rules, from one shared definition used by `POST` and `PATCH`: a due
 date is a string in the exact form `YYYY-MM-DD` that is a real calendar date
@@ -171,7 +186,8 @@ and to occurrences created from it later.
 
 Completing a repeating task (a `PATCH` that changes `completed` from false to
 true, after applying the other fields in the same body) creates the next
-occurrence for the same user: the same title and repeat, open, and the due date
+occurrence for the same user: the same title, notes and repeat (as stored by
+that same `PATCH`), open, and the due date
 of the earliest occurrence that is after the current due date and not before
 "today". Done early, that is the occurrence after the due date; done late,
 missed occurrences are skipped, so overdue repeats do not pile up. It is
@@ -192,7 +208,7 @@ deletes only that row; its next occurrence stays, with `repeated_from_id`
 cleared. Date arithmetic is plain code in `packages/api/src/repeat.ts`.
 
 The signed-in page shows an add-task form (a title, an optional "Due date"
-field and a "Repeats" control) and the task list, with distinct
+field, a "Repeats" control and an "Add notes" toggle) and the task list, with distinct
 loading, empty, load-failure (with retry), create-failure and update-failure
 states. A checkbox changes only after the server stores the new state. While a
 request is pending its control ignores repeat input but keeps keyboard focus,
@@ -212,6 +228,18 @@ a request is pending it is locked with `aria-disabled` like the other pending
 controls, so it keeps keyboard focus. The edit row has the same control, named after the task. A Custom
 interval outside 1 to 99 is refused next to the control without a request, and
 an `invalid_repeat` from the server is shown the same way.
+
+"Add notes" is a button with `aria-expanded`, after "Add task" in Tab order, so
+the order of the other fields is unchanged. It shows a "Notes" text area below
+it. In the text area Enter starts a new line and Ctrl+Enter (Cmd+Enter on a
+Mac) adds the task. Notes are sent only when the area is shown and they have
+something visible after trimming, so a task without notes is still sent as
+`{ "title": ... }`; hiding the area again keeps the typed text for later (also
+across an add) but does not send it. Notes over 5000 characters or with a null character are
+refused next to the field without a request (`aria-invalid` and
+`aria-describedby` point at the message), and an `invalid_notes` from the
+server is shown the same way. After a task is added the notes are cleared and
+the area is hidden again.
 
 The list is grouped. "Today" is the browser's local date. Open tasks are shown
 under Overdue (due before today), Today, Upcoming (due after today) and No
@@ -237,7 +265,15 @@ overdue is not conveyed by colour alone, and the checkbox is described by that
 text. A repeating row, open or completed, also shows its repeat after a dot:
 "Repeats daily", "Repeats weekly", "Repeats monthly", "Repeats yearly" or, for
 example, "Repeats every 3 days". A completed task shows its date without
-overdue marking. A 401 from a task
+overdue marking. Notes are shown under the title and date as plain text with
+their line breaks, lined up with the title, and in muted text on a completed
+task; they are not part of the checkbox's description. Short notes are shown in
+full. Notes taller than 10rem (about six lines) are capped at that height with
+a vertical scroll bar, and only then the notes box is a region named
+`Notes for "<title>"` that Tab stops on, so keyboard users can scroll it. While more text is below, the bottom 2rem of the
+box fades out (a `data-notes-more` attribute), which cues the overflow where scroll bars
+are hidden until used; the fade goes when the box is scrolled to the end and is never shown for
+notes that fit. A 401 from a task
 request returns the page to the signed-out view, except after an explicit
 sign-out.
 
@@ -248,11 +284,16 @@ after the task (for example `Edit "Buy oat milk"`).
   the due date, a "Remove due date" control when a date is set (native date
   fields do not offer a clear button in every browser), Save and Cancel, one
   row at a time. Enter saves, and Escape anywhere in the form cancels.
-  The fields apply the same title and due date rules as the add form and show
-  the message under the row. Only the fields that changed are sent; if none of
-  the trimmed title, the date and the repeat changed, edit mode closes without
-  a request. Removing the date of a repeating task sends `"repeat": null` with
-  it. The row shows the new title, date and repeat, and moves to its new group,
+  A full-width "Notes" text area, named `Notes for "<title>"` and prefilled
+  with the notes, comes after the date and repeat controls and before Save; in
+  it Enter starts a new line and Ctrl+Enter (Cmd+Enter) saves, and it is
+  read-only while saving.
+  The fields apply the same title, due date and notes rules as the add form and
+  show the message under the row. Only the fields that changed are sent (notes
+  are compared as they would be stored, and emptied notes are sent as `null`);
+  if none of the trimmed title, the notes, the date and the repeat changed, edit
+  mode closes without a request. Removing the date of a repeating task sends `"repeat": null` with
+  it. The row shows the new title, notes, date and repeat, and moves to its new group,
   only after
   the server stored them; if saving fails the row stays in edit mode with the
   typed values and an error. While a row is edited its checkbox is hidden.
@@ -329,7 +370,12 @@ session persistence/renewal/expiry, cookie isolation, CSRF and sign-out using a
 fixture provider. Task tests cover create/list, title validation, completing and
 clearing, renaming (with the create title cases reused against `PATCH`), due
 dates (create, set, change and remove alone or with other fields, the invalid
-cases on both routes, the range boundaries and isolation), deleting, persistence across sign-out, a new session and a second app instance
+cases on both routes, the range boundaries and isolation), notes
+(`packages/api/test/notes.test.ts`: trimming, kept line breaks, empty and
+invisible notes stored as null, the 5000 code point limit, invalid values on
+both routes, the response shape, isolation between users, the copy to the next
+occurrence, and migration `0004` applied to a database with existing rows plus
+the database check constraint), deleting, persistence across sign-out, a new session and a second app instance
 on the same database, per-user isolation, session enforcement and the origin
 check. Repeat tests (`packages/api/test/repeat.test.ts`) pin the server clock
 through the fixture and cover setting, changing and stopping a repeat with the
@@ -351,7 +397,11 @@ fixed clock), repeats in the add form and in edit mode (presets, Custom,
 disabled without a date and enabled with one, the `aria-disabled` lock while
 pending, reset when the date is removed, changed fields
 only, inline errors, row labels), ticking and un-ticking repeating tasks with
-their status messages and focus, and the `today` sent with a fixed clock,
+their status messages and focus, the `today` sent with a fixed clock, notes in
+the add form (the toggle, Ctrl/Cmd+Enter, bodies, limits, server errors), in
+edit mode (prefill, changed notes only, null when emptied, Escape, read-only
+while saving, errors) and in rows (plain text, muted when completed, the
+scroll region only for overflowing notes),
 failures, pending states, focus targets and 401 handling. Unit
 tests (`*.test.ts`) cover the date helpers, grouping and the repeat labels and
 form values. They do not run a real browser
@@ -389,7 +439,13 @@ and skipped by Tab and becomes enabled once a date is set (with screenshots at
 a narrow and a wide viewport), that arrowing from Weekly to Custom starts at every 1 week,
 that rapid repeated ticks complete once and create one next occurrence, that a
 page left open across local midnight sends the new date, and that the local
-date is accepted at UTC+14 and UTC-12. Because the API
+date is accepted at UTC+14 and UTC-12. Notes scenarios add a task with
+multi-line notes through the "Add notes" toggle and see them after a reload;
+edit, cancel and clear notes with the keyboard only; check that a long note is
+capped in a focusable, named scroll region that the keyboard scrolls while a
+short one is not, without horizontal scrolling at 390px (with screenshots); and
+check that the next occurrence of a repeating task shows the same notes.
+Because the API
 checks `today` against its own date, the test API server
 (`packages/api/test/e2e-server.ts`) has a test-only `PUT /e2e/clock` route, and
 each scenario that fixes the browser clock sets the API clock to the same

@@ -48,6 +48,27 @@ const taskTitle = z
     error: `Task titles can be at most ${MAX_TITLE_LENGTH} characters.`,
   });
 
+// The one definition of valid notes, used by both create and update. Notes are
+// optional plain text. Only the ends are trimmed; line breaks and spacing
+// inside are stored exactly as sent. Notes with nothing visible after trimming
+// (the title rule above) are stored as null, and so are null and "". The
+// database checks the same limit (tasks_notes_length_check). The web forms
+// apply the same rules in packages/web/src/Tasks.tsx.
+export const MAX_NOTES_LENGTH = 5000;
+const NOTES_MESSAGE = `Notes must be text of at most ${MAX_NOTES_LENGTH} characters, or null.`;
+const taskNotes = z
+  .string({ error: NOTES_MESSAGE })
+  .trim()
+  // PostgreSQL text cannot store U+0000, so reject it here instead of failing the write.
+  .refine((notes) => !notes.includes('\u0000'), {
+    error: 'Notes cannot contain a null character.',
+    abort: true,
+  })
+  // Code points, as for titles: an emoji is one character.
+  .max(MAX_NOTES_LENGTH, { error: NOTES_MESSAGE })
+  .transform((notes) => (VISIBLE_CHARACTER.test(notes) ? notes : null))
+  .nullable();
+
 // The one definition of a valid due date, used by both create and update. A
 // due date is a calendar day with no time or timezone, exchanged as the exact
 // text "YYYY-MM-DD" and stored in a PostgreSQL date column, so the server never
@@ -100,24 +121,31 @@ function acceptedToday(value: unknown, serverToday: string): string | null {
 // fields answers for the first one (in the order of the schema's keys).
 function fieldError(field: PropertyKey | undefined, fallback: string) {
   if (field === 'title') return 'invalid_title';
+  if (field === 'notes') return 'invalid_notes';
   if (field === 'completed') return 'invalid_completed';
   if (field === 'dueDate') return 'invalid_due_date';
   if (field === 'repeat') return 'invalid_repeat';
   return fallback;
 }
 
-// A missing or null dueDate both mean "no due date"; the same for repeat.
+// A missing or null dueDate both mean "no due date"; the same for notes and repeat.
 const createTaskBody = z.object(
-  { title: taskTitle, dueDate: taskDueDate.optional(), repeat: taskRepeat.optional() },
+  {
+    title: taskTitle,
+    notes: taskNotes.optional(),
+    dueDate: taskDueDate.optional(),
+    repeat: taskRepeat.optional(),
+  },
   { error: 'Send a JSON object with a title.' },
 );
 // Any of the fields may be sent alone. Unknown keys (such as an owner or an id)
 // are dropped. `today` is read separately: it only matters when completing.
 const UPDATE_FIELDS_MESSAGE =
-  'Send a JSON object with a title, a completed value, a due date (dueDate), a repeat, or any of them together.';
+  'Send a JSON object with a title, notes, a completed value, a due date (dueDate), a repeat, or any of them together.';
 const updateTaskBody = z.object(
   {
     title: taskTitle.optional(),
+    notes: taskNotes.optional(),
     completed: z.boolean({ error: 'Completed must be true or false.' }).optional(),
     dueDate: taskDueDate.optional(),
     repeat: taskRepeat.optional(),
@@ -131,6 +159,7 @@ const updateTaskBody = z.object(
 const taskColumns = {
   id: tasks.id,
   title: tasks.title,
+  notes: tasks.notes,
   completed: tasks.completed,
   dueDate: tasks.dueDate,
   repeatEvery: tasks.repeatEvery,
@@ -141,6 +170,7 @@ const taskColumns = {
 type TaskRow = {
   id: number;
   title: string;
+  notes: string | null;
   completed: boolean;
   dueDate: string | null;
   repeatEvery: number | null;
@@ -229,6 +259,7 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string, now: () => 
       .values({
         userId: sessionUserId(c),
         title: parsed.data.title,
+        notes: parsed.data.notes ?? null,
         dueDate,
         repeatEvery: repeat?.every ?? null,
         repeatUnit: repeat?.unit ?? null,
@@ -250,8 +281,14 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string, now: () => 
       const [issue] = parsed.error.issues;
       return c.json({ error: fieldError(issue.path[0], 'invalid_update'), message: issue.message }, 400);
     }
-    const { title, completed, dueDate, repeat } = parsed.data;
-    if (title === undefined && completed === undefined && dueDate === undefined && repeat === undefined) {
+    const { title, notes, completed, dueDate, repeat } = parsed.data;
+    if (
+      title === undefined &&
+      notes === undefined &&
+      completed === undefined &&
+      dueDate === undefined &&
+      repeat === undefined
+    ) {
       return c.json({ error: 'invalid_update', message: UPDATE_FIELDS_MESSAGE }, 400);
     }
     // Unknown ids and other users' tasks are indistinguishable to the caller.
@@ -311,6 +348,7 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string, now: () => 
         .update(tasks)
         .set({
           ...(title === undefined ? {} : { title }),
+          ...(notes === undefined ? {} : { notes }),
           ...(completed === undefined ? {} : { completed }),
           ...(dueDate === undefined ? {} : { dueDate }),
           ...(repeat === undefined ? {} : { repeatEvery: repeat?.every ?? null, repeatUnit: repeat?.unit ?? null }),
@@ -342,7 +380,9 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string, now: () => 
             .insert(tasks)
             .values({
               userId,
+              // The next occurrence carries the title and notes as this update stored them.
               title: task.title,
+              notes: task.notes,
               dueDate: next,
               repeatEvery: newRepeat.every,
               repeatUnit: newRepeat.unit,

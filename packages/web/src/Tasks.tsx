@@ -20,15 +20,16 @@ import {
   sameRepeat,
   withoutRepeat,
 } from './repeat';
-import { type RowMode, type Task, TaskRow } from './TaskRow';
+import { type RowMode, type Task, TaskRow, submitOnModEnter } from './TaskRow';
 import { groupTasks, visibleTasks } from './taskGroups';
 
 export type { Task };
 
 const MAX_TITLE_LENGTH = 200;
+const MAX_NOTES_LENGTH = 5000;
 const jsonHeaders = { 'Content-Type': 'application/json' };
 
-// These two rules mirror the server (packages/api/src/tasks.ts) so the form
+// These rules mirror the server (packages/api/src/tasks.ts) so the form
 // and the API agree. A title made only of whitespace, control characters and
 // invisible "default ignorable" code points (such as a zero width space) is
 // treated as empty; visible titles are sent unchanged apart from trimming.
@@ -50,6 +51,23 @@ function titleProblem(trimmed: string) {
   return '';
 }
 
+// The client-side notes check shared by the add form and the edit row, on
+// trimmed notes, like the server's. Returns the message to show, or an empty
+// string for valid notes (including none).
+function notesProblem(trimmed: string) {
+  if (trimmed.includes('\u0000')) return 'Notes cannot contain a null character.';
+  if (characterCount(trimmed) > MAX_NOTES_LENGTH) {
+    return `Notes can be at most ${MAX_NOTES_LENGTH} characters.`;
+  }
+  return '';
+}
+// The notes to store: trimmed at the ends only, or null when nothing visible is
+// left, which is what the server would store for them.
+function storedNotes(text: string) {
+  const trimmed = text.trim();
+  return VISIBLE_CHARACTER.test(trimmed) ? trimmed : null;
+}
+
 function goneMessage(task: Task) {
   return `"${task.title}" no longer exists, so it was removed from the list.`;
 }
@@ -69,9 +87,15 @@ async function serverError(response: Response, fallback: string) {
   return { message: fallback, code: '' };
 }
 
-type Field = 'title' | 'dueDate' | 'repeat';
+type Field = 'title' | 'dueDate' | 'repeat' | 'notes';
 const fieldOf = (code: string): Field =>
-  code === 'invalid_due_date' ? 'dueDate' : code === 'invalid_repeat' ? 'repeat' : 'title';
+  code === 'invalid_due_date'
+    ? 'dueDate'
+    : code === 'invalid_repeat'
+      ? 'repeat'
+      : code === 'invalid_notes'
+        ? 'notes'
+        : 'title';
 
 // A date input that holds a partly typed date reports an empty value and
 // badInput. That is not "no due date", so it is refused instead of sent.
@@ -105,9 +129,9 @@ function removedNextMessage(task: Task) {
 }
 
 // The answer to a task update. Older stubs and servers may leave out the
-// repeat fields; missing means none.
+// repeat and notes fields; missing means none.
 type UpdateReply = { task: Task; nextTask?: Task | null; removedTaskId?: number | null };
-const withRepeat = (task: Task): Task => ({ ...task, repeat: task.repeat ?? null });
+const fromServer = (task: Task): Task => ({ ...task, notes: task.notes ?? null, repeat: task.repeat ?? null });
 
 export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -115,6 +139,11 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
   const [title, setTitle] = useState('');
   const [dueDate, setDueDate] = useState('');
   const [repeat, setRepeat] = useState<RepeatForm>(NO_REPEAT);
+  // The add form's notes field shows behind the "Add notes" toggle. Hiding it
+  // keeps the text for when it is shown again, also across an add, but hidden
+  // notes are not sent.
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [notes, setNotes] = useState('');
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<{ message: string; field: Field } | null>(null);
   const [updatingIds, setUpdatingIds] = useState<number[]>([]);
@@ -127,6 +156,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
     text: string;
     dueDate: string;
     repeat: RepeatForm;
+    notes: string;
     error: string;
     errorField: Field;
   } | null>(null);
@@ -215,7 +245,8 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
       const owner = action ? [...rows.current].find(([, row]) => row.contains(active)) : undefined;
       if (owner && action) {
         const [id] = owner;
-        const field = active instanceof HTMLInputElement ? active : null;
+        const field =
+          active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement ? active : null;
         // Only text fields have a caret; a date or checkbox input reports null.
         const caret =
           field && field.selectionStart !== null
@@ -225,7 +256,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
           day: next,
           target: () => {
             const target = control(id, action);
-            if (target && caret && target instanceof HTMLInputElement) {
+            if (target && caret && (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) {
               target.setSelectionRange(caret.start, caret.end);
             }
             return target;
@@ -266,7 +297,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
         if (!response.ok) throw new Error();
         const body: { tasks: Task[] } = await response.json();
         if (!isCurrent()) return;
-        setTasks(body.tasks.map(withRepeat));
+        setTasks(body.tasks.map(fromServer));
         setListState('ready');
       } catch {
         if (isCurrent()) setListState('failed');
@@ -293,6 +324,11 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
     // A repeat needs a due date; without one the control is unavailable.
     const repeatChoice = dueDate === '' ? { repeat: null } : repeatFromForm(repeat);
     if ('problem' in repeatChoice) return setCreateError({ message: repeatChoice.problem, field: 'repeat' });
+    // Notes are sent, and cleared after the add, only when the area is shown.
+    const notesSent = notesOpen;
+    const newNotes = notesSent ? storedNotes(notes) : null;
+    const notesError = notesOpen ? notesProblem(notes.trim()) : '';
+    if (notesError) return setCreateError({ message: notesError, field: 'notes' });
     creatingRef.current = true;
     setCreating(true);
     setCreateError(null);
@@ -300,9 +336,10 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
       const response = await fetch('/api/tasks', {
         method: 'POST',
         headers: jsonHeaders,
-        // No due date, or no repeat, is sent as no field at all.
+        // No due date, no repeat, or no notes, is sent as no field at all.
         body: JSON.stringify({
           title: trimmed,
+          ...(newNotes === null ? {} : { notes: newNotes }),
           ...(dueDate === '' ? {} : { dueDate }),
           ...(repeatChoice.repeat === null ? {} : { repeat: repeatChoice.repeat }),
         }),
@@ -316,10 +353,15 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
       if (!response.ok) throw new Error();
       const body: { task: Task } = await response.json();
       // Only a task the server confirmed is added to the list.
-      setTasks((current) => [withRepeat(body.task), ...current]);
+      setTasks((current) => [fromServer(body.task), ...current]);
       setTitle('');
       setDueDate('');
       setRepeat(NO_REPEAT);
+      // Hidden notes were not sent, so their text stays for when the area is shown.
+      if (notesSent) {
+        setNotes('');
+        setNotesOpen(false);
+      }
       // Ready for the next task, also when the add button was clicked.
       titleInput.current?.focus();
     } catch {
@@ -353,8 +395,8 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
       if (response.status === 404 && removedRef.current.has(task.id)) return;
       if (!response.ok) throw new Error();
       const body: UpdateReply = await response.json();
-      const updated = withRepeat(body.task);
-      const nextTask = body.nextTask ? withRepeat(body.nextTask) : null;
+      const updated = fromServer(body.task);
+      const nextTask = body.nextTask ? fromServer(body.nextTask) : null;
       const removedTaskId = body.removedTaskId ?? null;
       // A task completed while the Completed section is collapsed leaves view.
       const leavesView = updated.completed && !completedOpenRef.current;
@@ -420,6 +462,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
       text: task.title,
       dueDate: task.dueDate ?? '',
       repeat: repeatForm(task.repeat),
+      notes: task.notes ?? '',
       error: '',
       errorField: 'title',
     });
@@ -455,14 +498,25 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
     if ('problem' in repeatChoice) {
       return setEditing({ ...editing, error: repeatChoice.problem, errorField: 'repeat' });
     }
-    // Only the fields that changed are sent.
-    const changes: { title?: string; dueDate?: string | null; repeat?: Repeat | null } = {};
+    const notesError = notesProblem(editing.notes.trim());
+    if (notesError) return setEditing({ ...editing, error: notesError, errorField: 'notes' });
+    // Only the fields that changed are sent. Notes compare as they would be
+    // stored, so changing only spacing at the ends is no change; emptied notes
+    // are sent as null.
+    const changes: { title?: string; notes?: string | null; dueDate?: string | null; repeat?: Repeat | null } = {};
     if (trimmed !== task.title) changes.title = trimmed;
     const newDueDate = editing.dueDate === '' ? null : editing.dueDate;
     if (newDueDate !== task.dueDate) changes.dueDate = newDueDate;
     if (!sameRepeat(repeatChoice.repeat, task.repeat)) changes.repeat = repeatChoice.repeat;
+    const newNotes = storedNotes(editing.notes);
+    if (newNotes !== task.notes) changes.notes = newNotes;
     // Nothing to store: leave edit mode without a request.
-    if (changes.title === undefined && changes.dueDate === undefined && changes.repeat === undefined) {
+    if (
+      changes.title === undefined &&
+      changes.dueDate === undefined &&
+      changes.repeat === undefined &&
+      changes.notes === undefined
+    ) {
       return leaveEdit(task);
     }
     savingRef.current = true;
@@ -490,18 +544,25 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
       }
       if (!response.ok) throw new Error();
       const body: UpdateReply = await response.json();
-      const updated = withRepeat(body.task);
+      const updated = fromServer(body.task);
       // The row shows the new title, date and repeat, and moves to its new
       // group, only once the server has stored them. Focus follows it to Edit.
       setTasks((current) => current.map((item) => (item.id === updated.id ? updated : item)));
       leaveEdit(task);
     } catch {
       // Edit mode and the typed values are kept so the user can retry.
-      const changed = (['title', 'dueDate', 'repeat'] as const).filter((field) => changes[field] !== undefined);
+      const changed = (['title', 'dueDate', 'repeat', 'notes'] as const).filter(
+        (field) => changes[field] !== undefined,
+      );
       const what =
         changed.length > 1
           ? 'The changes'
-          : { title: 'The new title', dueDate: 'The new due date', repeat: 'The new repeat' }[changed[0]];
+          : {
+              title: 'The new title',
+              dueDate: 'The new due date',
+              repeat: 'The new repeat',
+              notes: 'The new notes',
+            }[changed[0]];
       fail(`${what} could not be saved. Please try again.`, changed[0]);
     } finally {
       savingRef.current = false;
@@ -556,6 +617,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
         text: editing.text,
         dueDate: editing.dueDate,
         repeat: editing.repeat,
+        notes: editing.notes,
         error: editing.error,
         errorField: editing.errorField,
         saving,
@@ -640,6 +702,11 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
         // The Remove control goes away with the date, so focus moves to the date field.
         focusAfterRender.current = () => control(task.id, 'edit-due-date');
       }}
+      onEditNotes={(value) =>
+        setEditing((current) =>
+          current?.id === task.id && !savingRef.current ? { ...current, notes: value, error: '' } : current,
+        )
+      }
       onSave={() => void saveEdit(task)}
       onCancelEdit={() => cancelEdit(task)}
       onStartDelete={() => startDelete(task)}
@@ -729,6 +796,42 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
           </button>
         </div>
         {dueDate === '' && <RepeatHint idBase="new-task" />}
+        {/* After Add task in Tab order, so title, date, repeat, Add task stay as they were. */}
+        <button
+          type="button"
+          aria-expanded={notesOpen}
+          aria-controls="new-task-notes-area"
+          onClick={() => {
+            setNotesOpen((open) => !open);
+            setCreateError((current) => (current?.field === 'notes' ? null : current));
+          }}
+          className="flex items-center gap-2 rounded-md py-1 text-sm font-medium"
+        >
+          <span aria-hidden="true" className={`inline-block transition-transform ${notesOpen ? 'rotate-90' : ''}`}>
+            &#9656;
+          </span>
+          Add notes
+        </button>
+        <div id="new-task-notes-area" hidden={!notesOpen} className="flex flex-col gap-2">
+          <label htmlFor="new-task-notes" className="block text-sm font-medium">
+            Notes
+          </label>
+          {/* Enter is a new line here; Ctrl+Enter or Cmd+Enter adds the task. */}
+          <textarea
+            id="new-task-notes"
+            value={notes}
+            onChange={(event) => {
+              setNotes(event.target.value);
+              setCreateError(null);
+            }}
+            onKeyDown={submitOnModEnter}
+            readOnly={creating}
+            rows={3}
+            aria-invalid={createError?.field === 'notes' || undefined}
+            aria-describedby={createError?.field === 'notes' ? 'new-task-error' : undefined}
+            className="min-w-0 rounded-md border border-border bg-card px-4 py-3 text-card-foreground read-only:opacity-60"
+          />
+        </div>
         {createError && (
           <p id="new-task-error" role="alert" className="text-sm text-destructive">
             {createError.message}
