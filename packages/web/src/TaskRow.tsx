@@ -258,7 +258,9 @@ export function TaskRow({
             onChange={onEditRepeat}
           />
           {mode.dueDate === '' && <RepeatHint idBase={`task-${task.id}`} className="basis-full text-right" />}
-          {/* After the date and repeat and before the notes, so title to date stays one Tab (D-7). */}
+          {/* After the date and repeat and before the notes, so title to date stays one Tab (D-7).
+              A select is as wide as its longest option, so it is capped at the row's width: a
+              long list name is cut short inside the control instead of pushing it off a phone screen. */}
           <select
             data-action="edit-list"
             aria-label={`List for "${task.title}"`}
@@ -271,7 +273,7 @@ export function TaskRow({
             aria-disabled={mode.saving || undefined}
             aria-invalid={listError || undefined}
             aria-describedby={listError ? errorId : undefined}
-            className={`${fieldClass} aria-disabled:opacity-60`}
+            className={`${fieldClass} min-w-0 max-w-full text-ellipsis aria-disabled:opacity-60`}
           >
             <option value="">Inbox</option>
             {lists.map((list) => (

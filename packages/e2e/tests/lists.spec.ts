@@ -353,4 +353,41 @@ test.describe('lists on a phone', () => {
     await screenshot(page, testInfo, 'lists-phone-start');
     expect(await page.evaluate(() => window.scrollX)).toBe(0);
   });
+
+  test('the edit row stays inside its row with a 50 character list name (AC-13, AC-8)', async ({ page }, testInfo) => {
+    await signIn(page, 'Household One');
+    // The longest valid name, in wide letters.
+    const name = 'Phone: Weekly paperwork and appointments WWWWWWWWW';
+    expect([...name]).toHaveLength(50);
+    await createList(page, name);
+    const title = 'Phone: file the forms';
+    await addTask(page, title);
+    await button(page, `Edit "${title}"`).click();
+    const select = page.getByRole('combobox', { name: `List for "${title}"` });
+    await expect(select).toHaveValue(/^\d+$/);
+    // Every control of the edit row, the List select included, lies within the
+    // row, and the page has no sideways scroll to hide anything behind.
+    const measured = await select.evaluate((element) => {
+      const row = element.closest('li')!;
+      const box = (target: Element) => {
+        const { left, right } = target.getBoundingClientRect();
+        return { left: Math.round(left), right: Math.round(right) };
+      };
+      return {
+        row: box(row),
+        controls: [...row.querySelectorAll('input, select, textarea, button')].map((control) => ({
+          name: control.getAttribute('aria-label') ?? control.textContent ?? '',
+          ...box(control),
+        })),
+        page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      };
+    });
+    expect(measured.controls.map((control) => control.name)).toContain(`List for "${title}"`);
+    for (const control of measured.controls) {
+      expect(control.left, `${control.name} left edge`).toBeGreaterThanOrEqual(measured.row.left);
+      expect(control.right, `${control.name} right edge`).toBeLessThanOrEqual(measured.row.right);
+    }
+    expect(measured.page).toBe(0);
+    await screenshot(page, testInfo, 'lists-phone-edit-row');
+  });
 });
