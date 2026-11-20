@@ -28,7 +28,8 @@ const MAX_TASK_ID = MAX_SERIAL_ID;
 // joiners, soft hyphen, direction marks, fillers) render as nothing, so a title
 // made only of those is treated like an empty one. This only decides whether a
 // title is empty: visible titles are stored exactly as sent (after trimming).
-// The web form applies the same rules in packages/web/src/Tasks.tsx.
+// The web forms apply the same rules (VISIBLE_CHARACTER in
+// packages/web/src/text.ts, titleProblem in packages/web/src/Tasks.tsx).
 export const VISIBLE_CHARACTER = /[^\p{White_Space}\p{Cc}\p{Default_Ignorable_Code_Point}]/u;
 
 // The one definition of a valid title, used by both create and rename.
