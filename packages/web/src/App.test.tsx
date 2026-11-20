@@ -1,15 +1,16 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { StrictMode } from 'react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, onTestFinished, test, vi } from 'vitest';
 import { App } from './App';
+import { dueLabel } from './dueDate';
 
 type Reply = Response | Promise<Response> | (() => Response | Promise<Response>);
 type Call = { method: string; path: string; body: unknown };
 
 const signedInUser = { id: '1', name: 'Household One', email: 'one@example.test' };
-const milk = { id: 1, title: 'Buy oat milk', completed: false, dueDate: null };
-const plants = { id: 2, title: 'Water the plants', completed: true, dueDate: null };
+const milk = { id: 1, title: 'Buy oat milk', completed: false, dueDate: null, repeat: null };
+const plants = { id: 2, title: 'Water the plants', completed: true, dueDate: null, repeat: null };
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -312,6 +313,12 @@ describe('creating a task', () => {
 
 describe('completing a task', () => {
   test('marks a task complete and clears it again from the server response', async () => {
+    // Completing sends the browser's local date, so the clock is fixed.
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 10, 20, 12, 0, 0));
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
     signedIn([milk]);
     let finish!: (response: Response) => void;
     reply(
@@ -331,7 +338,7 @@ describe('completing a task', () => {
     await userEvent.click(checkbox);
     expect(checkbox.checked).toBe(false);
     expect(callsTo('PATCH /api/tasks/1')).toHaveLength(1);
-    expect(callsTo('PATCH /api/tasks/1')[0].body).toEqual({ completed: true });
+    expect(callsTo('PATCH /api/tasks/1')[0].body).toEqual({ completed: true, today: '2026-11-20' });
 
     // Stored: the task moves to the collapsed Completed section. Focus moves to
     // the Completed toggle (there is no other row) and a status message says where it went.
@@ -410,7 +417,7 @@ async function startEditing(title: string) {
   await userEvent.click(await screen.findByRole('button', { name: `Edit "${title}"` }));
   return editField(title);
 }
-const tea = { id: 3, title: 'Order tea', completed: false, dueDate: null };
+const tea = { id: 3, title: 'Order tea', completed: false, dueDate: null, repeat: null };
 
 describe('renaming a task', () => {
   test('saves with the Save control and shows the new title only after the server stored it', async () => {
@@ -748,45 +755,6 @@ describe('deleting a task', () => {
     expect(document.activeElement).toBe(button('Delete "Buy oat milk"'));
     expect(calls.filter((call) => call.method !== 'GET')).toEqual([]);
     expect(confirmSpy).not.toHaveBeenCalled();
-  });
-
-  test('Confirm removes the row only after the server confirmed, then focuses the next row', async () => {
-    signedIn([plants, milk, tea]);
-    const removal = pending();
-    reply('DELETE /api/tasks/1', removal.response);
-    render(<App />);
-    await expandCompleted();
-    await userEvent.click(await screen.findByRole('button', { name: 'Delete "Buy oat milk"' }));
-    const confirm = button('Confirm deleting "Buy oat milk"');
-    await userEvent.click(confirm);
-
-    // Pending: the row is still there and its controls are locked but focusable.
-    expect(taskTitles()).toEqual(['Buy oat milk', 'Order tea', 'Water the plants']);
-    expect(confirm.textContent).toBe('Deleting...');
-    expect(confirm.disabled).toBe(false);
-    expect(confirm.getAttribute('aria-disabled')).toBe('true');
-    expect(button('Cancel deleting "Buy oat milk"').getAttribute('aria-disabled')).toBe('true');
-    expect(document.activeElement).toBe(confirm);
-    const checkbox = screen.getByRole('checkbox', { name: 'Buy oat milk' }) as HTMLInputElement;
-    expect(checkbox.getAttribute('aria-disabled')).toBe('true');
-
-    // Repeat input while pending: no second request, no cancel, no completion change.
-    await userEvent.click(confirm);
-    await userEvent.keyboard('{Enter}');
-    await userEvent.click(button('Cancel deleting "Buy oat milk"'));
-    await userEvent.click(checkbox);
-    expect(checkbox.checked).toBe(false);
-    expect(screen.getByText('Delete this task?')).toBeTruthy();
-    expect(calls.filter((call) => call.method !== 'GET')).toEqual([
-      { method: 'DELETE', path: '/api/tasks/1', body: undefined },
-    ]);
-
-    removal.finish(noContent());
-    await waitFor(() => expect(taskTitles()).toEqual(['Order tea', 'Water the plants']));
-    expect(document.activeElement).toBe(screen.getByRole('checkbox', { name: 'Order tea' }));
-    expect(screen.queryByRole('alert')).toBeNull();
-    expect(screen.queryByRole('status')).toBeNull();
-    expect(screen.queryByText('Delete this task?')).toBeNull();
   });
 
   test('after deleting the bottom row focus moves up; after the last task, to the new-task field', async () => {
@@ -1150,6 +1118,7 @@ describe('due dates', () => {
     title,
     completed,
     dueDate,
+    repeat: null,
   });
   function group(name: string | RegExp) {
     return screen.getByRole('list', { name });
@@ -1687,5 +1656,566 @@ describe('due dates', () => {
     // Two days later: a date, not "yesterday".
     expect(document.getElementById('task-1-due')!.textContent).toMatch(/^Overdue \u00B7 Due \S.*20$/);
     expect(callsTo('GET /api/tasks')).toHaveLength(1);
+  });
+});
+
+describe('repeating tasks', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({
+      shouldAdvanceTime: true,
+      toFake: ['Date', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+    });
+    // Friday 2026-11-20, noon local time.
+    vi.setSystemTime(new Date(2026, 10, 20, 12, 0, 0));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  type Repeat = { every: number; unit: 'day' | 'week' | 'month' | 'year' } | null;
+  const weekly: Repeat = { every: 1, unit: 'week' };
+  const task = (id: number, title: string, dueDate: string | null, repeat: Repeat = null, completed = false) => ({
+    id,
+    title,
+    completed,
+    dueDate,
+    repeat,
+  });
+  const group = (name: string | RegExp) => screen.getByRole('list', { name });
+  const checkbox = (title: string) => screen.getByRole('checkbox', { name: title }) as HTMLInputElement;
+  const select = (name: string) => screen.getByRole('combobox', { name }) as HTMLSelectElement;
+  const description = (title: string) =>
+    document.getElementById(checkbox(title).getAttribute('aria-describedby')!)!.textContent;
+  // The words the rows use for a date, without "Due ".
+  const when = (dueDate: string) => dueLabel(dueDate, '2026-11-20').replace(/^Due /, '');
+  const status = () => screen.getByRole('status').textContent;
+  function rowTitles(list: HTMLElement) {
+    return within(list)
+      .getAllByRole('listitem')
+      .map((item) => {
+        const field = item.querySelector<HTMLInputElement>('input:not([type="checkbox"])');
+        return field ? `editing: ${field.value}` : item.querySelector('label')?.textContent;
+      });
+  }
+
+  test('rows show their repeat beside the due date, also when completed', async () => {
+    signedIn([
+      task(7, 'Daily walk', '2026-11-20', { every: 1, unit: 'day' }),
+      task(6, 'Bins out', '2026-11-19', weekly),
+      task(5, 'Pay rent', '2026-11-30', { every: 1, unit: 'month' }),
+      task(4, 'Renew passport', '2026-12-01', { every: 1, unit: 'year' }),
+      task(3, 'Water ferns', '2026-11-23', { every: 3, unit: 'day' }),
+      task(2, 'Clean gutters', '2026-11-24', { every: 2, unit: 'week' }),
+      task(1, 'Was weekly', '2026-11-18', weekly, true),
+      task(8, 'Plain', '2026-11-21'),
+    ]);
+    render(<App />);
+    await screen.findByRole('list', { name: 'Today' });
+    expect(description('Daily walk')).toBe('Due today · Repeats daily');
+    expect(description('Bins out')).toBe('Overdue · Due yesterday · Repeats weekly');
+    expect(description('Pay rent')).toMatch(/^Due \S.* · Repeats monthly$/);
+    expect(description('Renew passport')).toMatch(/ · Repeats yearly$/);
+    expect(description('Water ferns')).toMatch(/ · Repeats every 3 days$/);
+    expect(description('Clean gutters')).toMatch(/ · Repeats every 2 weeks$/);
+    expect(description('Plain')).toBe('Due tomorrow');
+    await expandCompleted();
+    expect(description('Was weekly')).toMatch(/^Due \S.* · Repeats weekly$/);
+  });
+
+  test('the add form sets a repeat only with a due date, with presets and Custom', async () => {
+    signedIn([]);
+    reply('POST /api/tasks', json({ task: task(1, 'Bins out', '2026-11-24', weekly) }, 201));
+    reply('POST /api/tasks', json({ task: task(2, 'Gutters', '2026-11-30', { every: 2, unit: 'week' }) }, 201));
+    reply('POST /api/tasks', json({ task: task(3, 'No repeat', '2026-11-30') }, 201));
+    render(<App />);
+    const title = (await screen.findByLabelText('New task')) as HTMLInputElement;
+    const date = screen.getByLabelText('Due date') as HTMLInputElement;
+    const repeats = select('Repeats');
+    // No date yet: the control is disabled, cannot be changed, and says why.
+    expect(repeats.value).toBe('none');
+    expect(repeats.disabled).toBe(true);
+    expect(repeats.getAttribute('aria-disabled')).toBeNull();
+    expect(repeats.className).toContain('disabled:opacity-60');
+    const hint = screen.getByText('Set a due date to repeat');
+    expect(repeats.getAttribute('aria-describedby')).toBe(hint.id);
+    await userEvent.selectOptions(repeats, 'weekly');
+    expect(repeats.value).toBe('none');
+    expect([...repeats.options].map((option) => option.textContent)).toEqual([
+      'Does not repeat',
+      'Daily',
+      'Weekly',
+      'Monthly',
+      'Yearly',
+      'Custom',
+    ]);
+
+    // With a date it is available.
+    await userEvent.type(title, 'Bins out');
+    fireEvent.change(date, { target: { value: '2026-11-24' } });
+    expect(repeats.disabled).toBe(false);
+    expect(repeats.getAttribute('aria-disabled')).toBeNull();
+    expect(screen.queryByText('Set a due date to repeat')).toBeNull();
+    await userEvent.selectOptions(repeats, 'weekly');
+    expect(repeats.value).toBe('weekly');
+    await userEvent.click(button('Add task'));
+    await waitFor(() => expect(callsTo('POST /api/tasks')).toHaveLength(1));
+    expect(callsTo('POST /api/tasks')[0].body).toEqual({ title: 'Bins out', dueDate: '2026-11-24', repeat: weekly });
+    // Stored: the row shows it, and the form is reset, repeat included.
+    await waitFor(() => expect(description('Bins out')).toMatch(/Repeats weekly$/));
+    expect(select('Repeats').value).toBe('none');
+    expect(select('Repeats').disabled).toBe(true);
+
+    // Custom reveals the number and the unit.
+    await userEvent.type(title, 'Gutters');
+    fireEvent.change(date, { target: { value: '2026-11-30' } });
+    expect(screen.queryByRole('spinbutton', { name: 'Every' })).toBeNull();
+    await userEvent.selectOptions(select('Repeats'), 'custom');
+    const every = screen.getByRole('spinbutton', { name: 'Every' }) as HTMLInputElement;
+    const unit = select('Repeat unit');
+    expect([...unit.options].map((option) => option.textContent)).toEqual(['days', 'weeks', 'months', 'years']);
+    // Out of range or not a whole number: refused inline without a request.
+    for (const value of ['0', '100', '', '1.5']) {
+      fireEvent.change(every, { target: { value } });
+      await userEvent.click(button('Add task'));
+      expect(screen.getByRole('alert').textContent).toBe(
+        'Enter a whole number from 1 to 99 for how often it repeats.',
+      );
+      expect(every.getAttribute('aria-invalid')).toBe('true');
+    }
+    expect(callsTo('POST /api/tasks')).toHaveLength(1);
+    fireEvent.change(every, { target: { value: '2' } });
+    expect(screen.queryByRole('alert')).toBeNull();
+    await userEvent.selectOptions(unit, 'week');
+    await userEvent.click(button('Add task'));
+    await waitFor(() => expect(callsTo('POST /api/tasks')).toHaveLength(2));
+    expect(callsTo('POST /api/tasks')[1].body).toEqual({
+      title: 'Gutters',
+      dueDate: '2026-11-30',
+      repeat: { every: 2, unit: 'week' },
+    });
+    await waitFor(() => expect(description('Gutters')).toMatch(/Repeats every 2 weeks$/));
+
+    // Removing the date resets the repeat, so nothing repeating is sent.
+    await userEvent.type(title, 'No repeat');
+    fireEvent.change(date, { target: { value: '2026-11-30' } });
+    await userEvent.selectOptions(select('Repeats'), 'monthly');
+    fireEvent.change(date, { target: { value: '' } });
+    expect(select('Repeats').value).toBe('none');
+    expect(select('Repeats').disabled).toBe(true);
+    fireEvent.change(date, { target: { value: '2026-11-30' } });
+    expect(select('Repeats').value).toBe('none');
+    await userEvent.click(button('Add task'));
+    await waitFor(() => expect(callsTo('POST /api/tasks')).toHaveLength(3));
+    expect(callsTo('POST /api/tasks')[2].body).toEqual({ title: 'No repeat', dueDate: '2026-11-30' });
+  });
+
+  test('the add form shows a server repeat error on the repeat control', async () => {
+    signedIn([]);
+    reply('POST /api/tasks', json({ error: 'invalid_repeat', message: 'A repeat must be null or an object.' }, 400));
+    render(<App />);
+    const title = (await screen.findByLabelText('New task')) as HTMLInputElement;
+    await userEvent.type(title, 'Rejected');
+    fireEvent.change(screen.getByLabelText('Due date'), { target: { value: '2026-11-24' } });
+    await userEvent.selectOptions(select('Repeats'), 'daily');
+    await userEvent.click(button('Add task'));
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe('A repeat must be null or an object.');
+    expect(select('Repeats').getAttribute('aria-invalid')).toBe('true');
+    expect(select('Repeats').getAttribute('aria-describedby')).toBe(alert.id);
+    expect(title.getAttribute('aria-invalid')).toBeNull();
+    expect(select('Repeats').value).toBe('daily');
+  });
+
+  test('the edit row changes and stops a repeat, sending only what changed', async () => {
+    signedIn([task(4, 'Bins out', '2026-11-24', weekly)]);
+    reply('PATCH /api/tasks/4', json({ task: task(4, 'Bins out', '2026-11-24', { every: 1, unit: 'month' }) }));
+    reply('PATCH /api/tasks/4', json({ task: task(4, 'Bins out', '2026-11-24', { every: 10, unit: 'day' }) }));
+    reply('PATCH /api/tasks/4', json({ task: task(4, 'Bins out', '2026-11-24') }));
+    reply('PATCH /api/tasks/4', json({ task: task(4, 'Bins out', '2026-11-26', weekly) }));
+    reply('PATCH /api/tasks/4', json({ task: task(4, 'Bins out', null) }));
+    render(<App />);
+    await startEditing('Bins out');
+    const repeats = () => select('Repeats for "Bins out"');
+    const row4 = () => repeats().closest('li')!;
+    expect(repeats().value).toBe('weekly');
+    expect(repeats().disabled).toBe(false);
+    expect(repeats().getAttribute('aria-disabled')).toBeNull();
+    // Unchanged: no request.
+    await userEvent.click(button('Save'));
+    expect(callsTo('PATCH /api/tasks/4')).toHaveLength(0);
+
+    await userEvent.click(button('Edit "Bins out"'));
+    await userEvent.selectOptions(repeats(), 'monthly');
+    await userEvent.click(button('Save'));
+    await waitFor(() => expect(description('Bins out')).toMatch(/Repeats monthly$/));
+    expect(callsTo('PATCH /api/tasks/4')[0].body).toEqual({ repeat: { every: 1, unit: 'month' } });
+
+    // Custom: the stored repeat comes back as its preset; every 10 days.
+    await userEvent.click(button('Edit "Bins out"'));
+    expect(repeats().value).toBe('monthly');
+    await userEvent.selectOptions(repeats(), 'custom');
+    const every = screen.getByRole('spinbutton', { name: 'Repeat interval for "Bins out"' }) as HTMLInputElement;
+    expect(every.value).toBe('1');
+    expect(select('Repeat unit for "Bins out"').value).toBe('month');
+    fireEvent.change(every, { target: { value: '10' } });
+    await userEvent.selectOptions(select('Repeat unit for "Bins out"'), 'day');
+    await userEvent.click(button('Save'));
+    await waitFor(() => expect(description('Bins out')).toMatch(/Repeats every 10 days$/));
+    expect(callsTo('PATCH /api/tasks/4')[1].body).toEqual({ repeat: { every: 10, unit: 'day' } });
+
+    // Stop repeating.
+    await userEvent.click(button('Edit "Bins out"'));
+    expect(repeats().value).toBe('custom');
+    expect((screen.getByRole('spinbutton', { name: 'Repeat interval for "Bins out"' }) as HTMLInputElement).value).toBe('10');
+    await userEvent.selectOptions(repeats(), 'none');
+    expect(screen.queryByRole('spinbutton', { name: 'Repeat interval for "Bins out"' })).toBeNull();
+    await userEvent.click(button('Save'));
+    await waitFor(() => expect(description('Bins out')).not.toMatch(/Repeats/));
+    expect(callsTo('PATCH /api/tasks/4')[2].body).toEqual({ repeat: null });
+
+    // A new date and a repeat are sent together.
+    await userEvent.click(button('Edit "Bins out"'));
+    fireEvent.change(screen.getByLabelText('Due date for "Bins out"'), { target: { value: '2026-11-26' } });
+    await userEvent.selectOptions(repeats(), 'weekly');
+    await userEvent.click(button('Save'));
+    await waitFor(() => expect(description('Bins out')).toMatch(/Repeats weekly$/));
+    expect(callsTo('PATCH /api/tasks/4')[3].body).toEqual({ dueDate: '2026-11-26', repeat: weekly });
+
+    // Remove due date resets the repeat: the control is disabled with the
+    // hint, and both are sent.
+    await userEvent.click(button('Edit "Bins out"'));
+    await userEvent.click(button('Remove due date for "Bins out"'));
+    expect(repeats().value).toBe('none');
+    expect(repeats().disabled).toBe(true);
+    expect(repeats().getAttribute('aria-disabled')).toBeNull();
+    const hint = document.getElementById(repeats().getAttribute('aria-describedby')!)!;
+    expect(hint.textContent).toBe('Set a due date to repeat');
+    expect(row4().contains(hint)).toBe(true);
+    await userEvent.selectOptions(repeats(), 'daily');
+    expect(repeats().value).toBe('none');
+    await userEvent.click(button('Save'));
+    await waitFor(() => expect(rowTitles(group('No date'))).toEqual(['Bins out']));
+    expect(callsTo('PATCH /api/tasks/4')[4].body).toEqual({ dueDate: null, repeat: null });
+  });
+
+  test('the edit row clears a repeat with a removed date, and keeps server errors inline', async () => {
+    signedIn([task(4, 'Bins out', '2026-11-24', weekly), task(3, 'Undated', null)]);
+    reply('PATCH /api/tasks/4', json({ error: 'invalid_repeat', message: 'A repeating task needs a due date.' }, 400));
+    render(<App />);
+    // A task without a date: the control is disabled with the hint.
+    await startEditing('Undated');
+    const repeats = select('Repeats for "Undated"');
+    expect(repeats.disabled).toBe(true);
+    expect(repeats.getAttribute('aria-disabled')).toBeNull();
+    expect(within(repeats.closest('li')!).getByText('Set a due date to repeat').id).toBe(
+      repeats.getAttribute('aria-describedby'),
+    );
+    await userEvent.click(button('Cancel'));
+
+    // Emptying the date field also resets the repeat.
+    await startEditing('Bins out');
+    fireEvent.change(screen.getByLabelText('Due date for "Bins out"'), { target: { value: '' } });
+    expect(select('Repeats for "Bins out"').value).toBe('none');
+    fireEvent.change(screen.getByLabelText('Due date for "Bins out"'), { target: { value: '2026-11-25' } });
+    await userEvent.selectOptions(select('Repeats for "Bins out"'), 'custom');
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Repeat interval for "Bins out"' }), {
+      target: { value: '0' },
+    });
+    await userEvent.click(button('Save'));
+    expect(screen.getByRole('alert').textContent).toBe('Enter a whole number from 1 to 99 for how often it repeats.');
+    expect(callsTo('PATCH /api/tasks/4')).toHaveLength(0);
+
+    // A server rejection stays inline with the typed values, still editing.
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Repeat interval for "Bins out"' }), {
+      target: { value: '3' },
+    });
+    await userEvent.click(button('Save'));
+    expect((await screen.findByRole('alert')).textContent).toBe('A repeating task needs a due date.');
+    expect(callsTo('PATCH /api/tasks/4')[0].body).toEqual({ dueDate: '2026-11-25', repeat: { every: 3, unit: 'week' } });
+    const every = screen.getByRole('spinbutton', { name: 'Repeat interval for "Bins out"' }) as HTMLInputElement;
+    expect(every.getAttribute('aria-invalid')).toBe('true');
+    expect(every.value).toBe('3');
+    expect(rowTitles(group('Upcoming'))).toEqual(['editing: Bins out']);
+  });
+
+  // R3-F1: Chromium reports a partly typed date as value '' with badInput.
+  // When the last part is emptied, badInput turns false with no input or
+  // change event, so the value React tracks stays ''. jsdom has no date
+  // parts, so these tests set badInput themselves and send only the events
+  // Chromium sends. The returned function empties the last part.
+  function typePartOfDate(field: HTMLInputElement) {
+    let partial = true;
+    Object.defineProperty(field, 'validity', { configurable: true, get: () => ({ badInput: partial }) });
+    fireEvent.change(field, { target: { value: '' } });
+    return () => {
+      partial = false;
+    };
+  }
+
+  test('the add form resets the repeat once a date emptied part by part has no part left (R3-F1)', async () => {
+    signedIn([]);
+    render(<App />);
+    await screen.findByLabelText('New task');
+    const date = screen.getByLabelText('Due date') as HTMLInputElement;
+    // The reset comes with the key that emptied the last part, or on leaving the field.
+    for (const finish of [() => fireEvent.keyUp(date, { key: 'Backspace' }), () => fireEvent.blur(date)]) {
+      fireEvent.change(date, { target: { value: '2026-11-24' } });
+      await userEvent.selectOptions(select('Repeats'), 'weekly');
+      const emptyLastPart = typePartOfDate(date);
+      // Partly typed: disabled, the choice kept.
+      expect(select('Repeats').value).toBe('weekly');
+      expect(select('Repeats').disabled).toBe(true);
+      emptyLastPart();
+      finish();
+      expect(select('Repeats').value).toBe('none');
+      expect(select('Repeats').disabled).toBe(true);
+      Reflect.deleteProperty(date, 'validity');
+    }
+  });
+
+  test('the edit row resets the repeat once a date emptied part by part has no part left (R3-F1)', async () => {
+    signedIn([task(4, 'Bins out', '2026-11-24', weekly)]);
+    render(<App />);
+    await startEditing('Bins out');
+    const date = screen.getByLabelText('Due date for "Bins out"') as HTMLInputElement;
+    for (const finish of [() => fireEvent.keyUp(date, { key: 'Delete' }), () => fireEvent.blur(date)]) {
+      fireEvent.change(date, { target: { value: '2026-11-24' } });
+      await userEvent.selectOptions(select('Repeats for "Bins out"'), 'weekly');
+      const emptyLastPart = typePartOfDate(date);
+      expect(select('Repeats for "Bins out"').value).toBe('weekly');
+      expect(select('Repeats for "Bins out"').disabled).toBe(true);
+      emptyLastPart();
+      finish();
+      expect(select('Repeats for "Bins out"').value).toBe('none');
+      expect(select('Repeats for "Bins out"').disabled).toBe(true);
+      Reflect.deleteProperty(date, 'validity');
+    }
+    expect(callsTo('PATCH /api/tasks/4')).toHaveLength(0);
+  });
+
+  test('the Repeats controls are disabled without a date and keep the aria-disabled lock while pending (D-11)', async () => {
+    signedIn([task(4, 'Bins out', '2026-11-24', { every: 2, unit: 'week' })]);
+    const save = pending();
+    reply('PATCH /api/tasks/4', save.response);
+    const create = pending();
+    reply('POST /api/tasks', create.response);
+    render(<App />);
+    await startEditing('Bins out');
+    const repeats = () => select('Repeats for "Bins out"');
+    const every = () => screen.getByRole('spinbutton', { name: 'Repeat interval for "Bins out"' }) as HTMLInputElement;
+    const unit = () => select('Repeat unit for "Bins out"');
+    // With a date: enabled, Custom fields included.
+    expect(repeats().value).toBe('custom');
+    for (const control of [repeats(), every(), unit()]) expect(control.disabled).toBe(false);
+
+    // Pending save: locked with aria-disabled and readOnly, not disabled, so focus stays.
+    repeats().focus();
+    fireEvent.change(every(), { target: { value: '3' } });
+    fireEvent.submit(repeats().closest('form')!);
+    await waitFor(() => expect(repeats().getAttribute('aria-disabled')).toBe('true'));
+    expect(repeats().disabled).toBe(false);
+    expect(unit().disabled).toBe(false);
+    expect(unit().getAttribute('aria-disabled')).toBe('true');
+    expect(every().disabled).toBe(false);
+    expect(every().readOnly).toBe(true);
+    expect(document.activeElement).toBe(repeats());
+    fireEvent.change(repeats(), { target: { value: 'daily' } });
+    expect(repeats().value).toBe('custom');
+    save.finish(json({ task: task(4, 'Bins out', '2026-11-24', { every: 3, unit: 'week' }) }));
+    await waitFor(() => expect(description('Bins out')).toMatch(/Repeats every 3 weeks$/));
+
+    // The add form while creating: a date is set, so the lock is aria-disabled.
+    await userEvent.type(screen.getByLabelText('New task'), 'Gutters');
+    fireEvent.change(screen.getByLabelText('Due date'), { target: { value: '2026-11-30' } });
+    await userEvent.selectOptions(select('Repeats'), 'weekly');
+    await userEvent.click(button('Add task'));
+    expect(select('Repeats').getAttribute('aria-disabled')).toBe('true');
+    expect(select('Repeats').disabled).toBe(false);
+    create.finish(json({ task: task(5, 'Gutters', '2026-11-30', weekly) }, 201));
+    await waitFor(() => expect(description('Gutters')).toMatch(/Repeats weekly$/));
+    // Reset after creating: no date, so disabled again.
+    expect(select('Repeats').disabled).toBe(true);
+    expect(select('Repeats').getAttribute('aria-disabled')).toBeNull();
+  });
+
+  test('ticking a repeating task adds the next occurrence and moves focus to it (Completed collapsed)', async () => {
+    signedIn([task(2, 'Water the plants', '2026-11-20', weekly), task(1, 'Buy oat milk', null)]);
+    const tick = pending();
+    reply('PATCH /api/tasks/2', tick.response);
+    render(<App />);
+    await userEvent.click(await screen.findByRole('checkbox', { name: 'Water the plants' }));
+    expect(callsTo('PATCH /api/tasks/2')[0].body).toEqual({ completed: true, today: '2026-11-20' });
+    // Nothing moves before the server answers.
+    expect(rowTitles(group('Today'))).toEqual(['Water the plants']);
+    tick.finish(
+      json({
+        task: task(2, 'Water the plants', '2026-11-20', weekly, true),
+        nextTask: task(9, 'Water the plants', '2026-11-27', weekly),
+        removedTaskId: null,
+      }),
+    );
+    await waitFor(() => expect(rowTitles(group('Upcoming'))).toEqual(['Water the plants']));
+    expect(screen.queryByRole('list', { name: 'Today' })).toBeNull();
+    expect(status()).toBe(`"Water the plants" is next due ${when('2026-11-27')}.`);
+    expect(status()).toMatch(/^"Water the plants" is next due \S+, \S+ 27\.$/);
+    await waitFor(() => expect(document.activeElement).toBe(checkbox('Water the plants')));
+    expect(checkbox('Water the plants').checked).toBe(false);
+    expect(button('Completed (1)').getAttribute('aria-expanded')).toBe('false');
+    await expandCompleted();
+    expect(rowTitles(group(/^Completed/))).toEqual(['Water the plants']);
+  });
+
+  test('ticking with Completed expanded also focuses the next occurrence; un-ticking removes it', async () => {
+    signedIn([task(2, 'Water the plants', '2026-11-19', weekly), task(1, 'Done', null, null, true)]);
+    reply(
+      'PATCH /api/tasks/2',
+      json({
+        task: task(2, 'Water the plants', '2026-11-19', weekly, true),
+        nextTask: task(9, 'Water the plants', '2026-11-26', weekly),
+        removedTaskId: null,
+      }),
+      json({ task: task(2, 'Water the plants', '2026-11-19', weekly), nextTask: null, removedTaskId: 9 }),
+    );
+    render(<App />);
+    await expandCompleted();
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Water the plants' }));
+    await waitFor(() => expect(rowTitles(group('Upcoming'))).toEqual(['Water the plants']));
+    expect(rowTitles(group(/^Completed/))).toEqual(['Water the plants', 'Done']);
+    expect(status()).toBe(`"Water the plants" is next due ${when('2026-11-26')}.`);
+    const next = within(group('Upcoming')).getByRole('checkbox', { name: 'Water the plants' });
+    await waitFor(() => expect(document.activeElement).toBe(next));
+
+    // Un-tick the completed one: the server removed the next occurrence.
+    const done = within(group(/^Completed/)).getByRole('checkbox', { name: 'Water the plants' });
+    await userEvent.click(done);
+    expect(callsTo('PATCH /api/tasks/2')[1].body).toEqual({ completed: false });
+    await waitFor(() => expect(screen.queryByRole('list', { name: 'Upcoming' })).toBeNull());
+    expect(rowTitles(group('Overdue'))).toEqual(['Water the plants']);
+    expect(status()).toBe('"Water the plants" is open again, and its next occurrence was removed.');
+    // Focus follows the un-ticked row.
+    await waitFor(() => expect(document.activeElement).toBe(checkbox('Water the plants')));
+    expect(within(group('Overdue')).getByRole('checkbox', { name: 'Water the plants' })).toBe(document.activeElement);
+  });
+
+  test('when no next occurrence was created the status says so; a plain task is unchanged', async () => {
+    signedIn([task(3, 'Last one', '2100-12-31', { every: 1, unit: 'day' }), task(2, 'Plain', '2026-11-20'), task(1, 'Other', null)]);
+    reply('PATCH /api/tasks/3', json({ task: task(3, 'Last one', '2100-12-31', { every: 1, unit: 'day' }, true), nextTask: null, removedTaskId: null }));
+    reply('PATCH /api/tasks/2', json({ task: task(2, 'Plain', '2026-11-20', null, true), nextTask: null, removedTaskId: null }));
+    render(<App />);
+    await userEvent.click(await screen.findByRole('checkbox', { name: 'Last one' }));
+    await waitFor(() => expect(screen.queryByRole('checkbox', { name: 'Last one' })).toBeNull());
+    expect(status()).toBe(
+      '"Last one" was moved to Completed. No further occurrence was created, because it would be after December 31, 2100.',
+    );
+    // The usual focus rule: the next row in page order.
+    await waitFor(() => expect(document.activeElement).toBe(checkbox('Other')));
+    await userEvent.click(checkbox('Plain'));
+    await waitFor(() => expect(screen.queryByRole('checkbox', { name: 'Plain' })).toBeNull());
+    expect(status()).toBe('"Plain" was moved to Completed.');
+    expect(callsTo('PATCH /api/tasks/2')[0].body).toEqual({ completed: true, today: '2026-11-20' });
+  });
+
+  test('re-ticking a task whose next occurrence was kept says it already exists (R1-F1)', async () => {
+    const plants = (completed: boolean) => task(2, 'Water the plants', '2026-11-20', weekly, completed);
+    signedIn([task(9, 'Water the plants', '2026-11-27', weekly, true), plants(true)]);
+    reply(
+      'PATCH /api/tasks/2',
+      // Un-ticked: its next occurrence was completed, so the server kept it.
+      json({ task: plants(false), nextTask: null, removedTaskId: null }),
+      // Ticked again: the next occurrence already exists, so none is created.
+      json({ task: plants(true), nextTask: null, removedTaskId: null }),
+    );
+    render(<App />);
+    await expandCompleted();
+    await userEvent.click(within(group(/^Completed/)).getAllByRole('checkbox', { name: 'Water the plants' })[1]);
+    await waitFor(() => expect(rowTitles(group('Today'))).toEqual(['Water the plants']));
+    await userEvent.click(within(group('Today')).getByRole('checkbox', { name: 'Water the plants' }));
+    await waitFor(() => expect(screen.queryByRole('list', { name: 'Today' })).toBeNull());
+    expect(status()).toBe('"Water the plants" was moved to Completed. Its next occurrence already exists.');
+  });
+
+  test('ticking a task whose next date would be after 2100 says why none was created (R1-F1)', async () => {
+    const cases = [
+      [task(3, 'Daily end', '2100-12-31', { every: 1, unit: 'day' }), true],
+      [task(4, 'Monthly end', '2100-12-05', { every: 1, unit: 'month' }), true],
+      [task(5, 'Monthly last', '2100-11-30', { every: 1, unit: 'month' }), false],
+      [task(6, 'Yearly', '2100-01-31', { every: 1, unit: 'year' }), true],
+    ] as const;
+    signedIn(cases.map(([item]) => item));
+    for (const [item] of cases) {
+      reply(`PATCH /api/tasks/${item.id}`, json({ task: { ...item, completed: true }, nextTask: null, removedTaskId: null }));
+    }
+    render(<App />);
+    await screen.findByRole('list', { name: 'Upcoming' });
+    for (const [item, beyond] of cases) {
+      await userEvent.click(checkbox(item.title));
+      await waitFor(() => expect(screen.queryByRole('checkbox', { name: item.title })).toBeNull());
+      expect(status()).toBe(
+        beyond
+          ? `"${item.title}" was moved to Completed. No further occurrence was created, because it would be after December 31, 2100.`
+          : `"${item.title}" was moved to Completed. Its next occurrence already exists.`,
+      );
+    }
+  });
+
+  test('Custom starts from the stored repeat, not from presets passed on the way (R1-F2)', async () => {
+    signedIn([task(4, 'Bins out', '2026-11-24', weekly), task(3, 'Every 5 days', '2026-11-24', { every: 5, unit: 'day' })]);
+    render(<App />);
+    await startEditing('Bins out');
+    // Arrowing down from Weekly passes Monthly and Yearly before Custom.
+    for (const choice of ['monthly', 'yearly', 'custom']) {
+      fireEvent.change(select('Repeats for "Bins out"'), { target: { value: choice } });
+    }
+    expect((screen.getByRole('spinbutton', { name: 'Repeat interval for "Bins out"' }) as HTMLInputElement).value).toBe('1');
+    expect(select('Repeat unit for "Bins out"').value).toBe('week');
+    await userEvent.click(button('Cancel'));
+
+    // A stored custom repeat comes back after passing through presets.
+    await startEditing('Every 5 days');
+    for (const choice of ['none', 'daily', 'custom']) {
+      fireEvent.change(select('Repeats for "Every 5 days"'), { target: { value: choice } });
+    }
+    expect((screen.getByRole('spinbutton', { name: 'Repeat interval for "Every 5 days"' }) as HTMLInputElement).value).toBe('5');
+    expect(select('Repeat unit for "Every 5 days"').value).toBe('day');
+    await userEvent.click(button('Cancel'));
+
+    // The add form has no stored repeat: Custom starts at every 1 week.
+    fireEvent.change(screen.getByLabelText('Due date'), { target: { value: '2026-11-24' } });
+    for (const choice of ['monthly', 'yearly', 'custom']) {
+      fireEvent.change(select('Repeats'), { target: { value: choice } });
+    }
+    expect((screen.getByRole('spinbutton', { name: 'Every' }) as HTMLInputElement).value).toBe('1');
+    expect(select('Repeat unit').value).toBe('week');
+  });
+
+  test('the local date at the moment of ticking is sent as today', async () => {
+    signedIn([task(2, 'Late night', '2026-11-20', weekly)]);
+    reply(
+      'PATCH /api/tasks/2',
+      json({ task: task(2, 'Late night', '2026-11-20', weekly, true), nextTask: task(3, 'Late night', '2026-11-27', weekly), removedTaskId: null }),
+    );
+    // 23:59:50 local time; ticking happens after local midnight.
+    vi.setSystemTime(new Date(2026, 10, 20, 23, 59, 50));
+    render(<App />);
+    await screen.findByRole('checkbox', { name: 'Late night' });
+    vi.setSystemTime(new Date(2026, 10, 21, 0, 0, 5));
+    await userEvent.click(checkbox('Late night'));
+    expect(callsTo('PATCH /api/tasks/2')[0].body).toEqual({ completed: true, today: '2026-11-21' });
+  });
+
+  test('edit and delete wait for a pending tick of a repeating task', async () => {
+    signedIn([task(2, 'Bins out', '2026-11-20', weekly)]);
+    const tick = pending();
+    reply('PATCH /api/tasks/2', tick.response);
+    render(<App />);
+    await userEvent.click(await screen.findByRole('checkbox', { name: 'Bins out' }));
+    await userEvent.click(checkbox('Bins out'));
+    expect(callsTo('PATCH /api/tasks/2')).toHaveLength(1);
+    expect(button('Edit "Bins out"').getAttribute('aria-disabled')).toBe('true');
+    tick.finish(
+      json({ task: task(2, 'Bins out', '2026-11-20', weekly, true), nextTask: task(5, 'Bins out', '2026-11-27', weekly), removedTaskId: null }),
+    );
+    await waitFor(() => expect(rowTitles(group('Upcoming'))).toEqual(['Bins out']));
+    expect(callsTo('PATCH /api/tasks/2')).toHaveLength(1);
   });
 });

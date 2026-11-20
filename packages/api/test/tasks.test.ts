@@ -99,6 +99,7 @@ test('a signed-in user creates tasks and lists them newest first (AC-1)', async 
     'createdAt',
     'dueDate',
     'id',
+    'repeat',
     'title',
     'updatedAt',
   ]);
@@ -465,6 +466,7 @@ test('a task can be renamed; the title is trimmed and nothing else changes (edit
     'createdAt',
     'dueDate',
     'id',
+    'repeat',
     'title',
     'updatedAt',
   ]);
@@ -600,9 +602,9 @@ test('rename applies the create title rules and rejects an empty update (edit AC
     assert.equal(await rejected({ title }), (await created.json()).message);
   }
 
-  // None of the fields: a distinct, stable code, and the message names all three.
+  // None of the fields: a distinct, stable code, and the message names all of them.
   for (const body of [{}, { name: 'wrong key' }, { userId: 1, id: 2 }, [], null, '"text"', '42']) {
-    assert.match(await rejected(body, 'invalid_update'), /title.*completed.*due date/);
+    assert.match(await rejected(body, 'invalid_update'), /title.*completed.*due date.*repeat/);
   }
   await rejected('{"title": "unterminated', 'invalid_json');
   for (const id of ['abc', '0', '-1', '1.5', '1e3', `${task.id}abc`]) {

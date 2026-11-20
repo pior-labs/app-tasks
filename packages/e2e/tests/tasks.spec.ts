@@ -1,4 +1,4 @@
-import { expect, type Page, type Request, test } from '@playwright/test';
+import { type APIRequestContext, expect, type Page, type Request, test } from '@playwright/test';
 
 // End-to-end checks in a real browser against the Vite dev server and the real
 // API on a disposable database. Sign-in goes through the fixture SSO provider
@@ -9,6 +9,23 @@ import { expect, type Page, type Request, test } from '@playwright/test';
 // only looks at those rows.
 
 type FixtureUser = 'Household One' | 'Household Two';
+
+// The API checks the "today" a completing browser sends against its own date,
+// so a test that fixes the browser clock sets the API clock to the same moment
+// (packages/api/test/e2e-server.ts). Both keep running from there. Every test
+// starts with the real clock on both sides.
+const apiOrigin = `http://localhost:${process.env.E2E_API_PORT ?? 3173}`;
+async function setServerClock(request: APIRequestContext, time: Date | null) {
+  const response = await request.put(`${apiOrigin}/e2e/clock`, { data: { time: time?.toISOString() ?? null } });
+  expect(response.ok()).toBe(true);
+}
+async function fixClock(page: Page, request: APIRequestContext, time: Date) {
+  await page.clock.install({ time });
+  await setServerClock(request, time);
+}
+test.beforeEach(async ({ request }) => {
+  await setServerClock(request, null);
+});
 
 async function signIn(page: Page, user: FixtureUser) {
   await page.goto('/');
@@ -424,9 +441,9 @@ function recordPatchBodies(page: Page) {
 test.describe('due dates west of UTC', () => {
   test.use({ timezoneId: 'America/Toronto', locale: 'en-US' });
 
-  test.beforeEach(async ({ page }) => {
+  test.beforeEach(async ({ page, request }) => {
     // Friday 2026-11-20, noon in Toronto (17:00 UTC).
-    await page.clock.install({ time: new Date('2026-11-20T12:00:00-05:00') });
+    await fixClock(page, request, new Date('2026-11-20T12:00:00-05:00'));
   });
 
   test('creates tasks with and without due dates into their groups, with overdue said in words', async ({
@@ -644,9 +661,9 @@ test.describe('due dates west of UTC', () => {
     await expect(groupList(page, 'Overdue').getByText('Focus: second')).toBeVisible();
   });
 
-  test('at local midnight a task due today moves to Overdue without a reload', async ({ page }) => {
+  test('at local midnight a task due today moves to Overdue without a reload', async ({ page, request }) => {
     // 23:59:30 on Friday in Toronto.
-    await page.clock.install({ time: new Date('2026-11-20T23:59:30-05:00') });
+    await fixClock(page, request, new Date('2026-11-20T23:59:30-05:00'));
     await signIn(page, 'Household One');
     await addTaskDue(page, 'Midnight: take out the recycling', '2026-11-20');
     await addTaskDue(page, 'Midnight: call grandma', '2026-11-21');
@@ -687,9 +704,9 @@ test.describe('due dates west of UTC', () => {
 test.describe('due dates east of UTC', () => {
   test.use({ timezoneId: 'Pacific/Auckland', locale: 'en-US' });
 
-  test('shows the stored date without shifting it', async ({ page }) => {
+  test('shows the stored date without shifting it', async ({ page, request }) => {
     // Noon on Friday 2026-11-20 in Auckland is still Thursday in UTC.
-    await page.clock.install({ time: new Date('2026-11-20T12:00:00+13:00') });
+    await fixClock(page, request, new Date('2026-11-20T12:00:00+13:00'));
     await signIn(page, 'Household One');
     await addTaskDue(page, 'Auckland: farmers market', '2026-11-20');
     await addTaskDue(page, 'Auckland: ferry to Waiheke', '2026-11-21');
@@ -713,3 +730,534 @@ test.describe('due dates east of UTC', () => {
     await expect(rowOf(page, 'Auckland: farmers market').getByText('Due today')).toBeVisible();
   });
 });
+
+// Repeating tasks. As for due dates, each scenario fixes the browser clock and
+// timezone, and the API clock to the same moment.
+
+const addRepeats = (page: Page) => page.getByRole('combobox', { name: 'Repeats', exact: true });
+const rowRepeats = (page: Page, title: string) =>
+  page.getByRole('combobox', { name: `Repeats for "${title}"`, exact: true });
+const statusMessage = (page: Page) => page.getByRole('status');
+
+// Records the bodies of task writes (POST and PATCH) in order.
+function recordBodies(page: Page) {
+  const bodies: { method: string; body: unknown }[] = [];
+  page.on('request', (request: Request) => {
+    const { pathname } = new URL(request.url());
+    if (['POST', 'PATCH'].includes(request.method()) && pathname.startsWith('/api/tasks')) {
+      bodies.push({ method: request.method(), body: request.postDataJSON() });
+    }
+  });
+  return bodies;
+}
+
+// Adds a task with a due date and a preset repeat, using the pointer.
+async function addRepeatingTask(page: Page, title: string, dueDate: string, repeat: string) {
+  await page.getByLabel('New task').fill(title);
+  await page.getByLabel('Due date', { exact: true }).fill(dueDate);
+  await addRepeats(page).selectOption({ label: repeat });
+  await page.getByRole('button', { name: 'Add task' }).click();
+  await expect(checkbox(page, title)).toBeVisible();
+}
+
+// The open occurrence of a title (its completed copies are in Completed).
+const openCheckbox = (page: Page, group: string, title: string) =>
+  groupList(page, group).getByRole('checkbox', { name: title, exact: true });
+// Earlier tests leave completed tasks behind, so the count in the name varies.
+const completedList = (page: Page) => page.getByRole('list', { name: /^Completed \(\d+\)$/ });
+
+test.describe('repeating tasks west of UTC', () => {
+  test.use({ timezoneId: 'America/Toronto', locale: 'en-US' });
+
+  test.beforeEach(async ({ page, request }) => {
+    // Friday 2026-11-20, noon in Toronto (17:00 UTC).
+    await fixClock(page, request, new Date('2026-11-20T12:00:00-05:00'));
+  });
+
+  test('a weekly task completed on time, early and late lands in the right group', async ({ page }, testInfo) => {
+    await signIn(page, 'Household One');
+    const bodies = recordBodies(page);
+
+    // Without a date the control is disabled and says why.
+    await expect(addRepeats(page)).toBeDisabled();
+    await expect(page.getByText('Set a due date to repeat')).toBeVisible();
+    await expect(addRepeats(page)).toHaveAccessibleDescription('Set a due date to repeat');
+
+    await addRepeatingTask(page, 'Weekly: put the bins out', '2026-11-20', 'Weekly');
+    await expect(addRepeats(page)).toHaveValue('none');
+    const today = rowOf(page, 'Weekly: put the bins out');
+    await expect(today.getByText('Repeats weekly')).toBeVisible();
+    await expect(checkbox(page, 'Weekly: put the bins out')).toHaveAccessibleDescription(
+      'Due today · Repeats weekly',
+    );
+    expect(bodies[0]).toEqual({
+      method: 'POST',
+      body: { title: 'Weekly: put the bins out', dueDate: '2026-11-20', repeat: { every: 1, unit: 'week' } },
+    });
+
+    // On time, with Completed collapsed: the next one is due a week later, and
+    // focus is on its checkbox.
+    await openCheckbox(page, 'Today', 'Weekly: put the bins out').click();
+    await expect(statusMessage(page)).toHaveText('"Weekly: put the bins out" is next due Fri, Nov 27.');
+    await expect(openCheckbox(page, 'Upcoming', 'Weekly: put the bins out')).toBeFocused();
+    await expect(openCheckbox(page, 'Upcoming', 'Weekly: put the bins out')).not.toBeChecked();
+    await expect(rowOf(page, 'Weekly: put the bins out').getByText('Due Fri, Nov 27')).toBeVisible();
+    await expect(completedToggle(page)).toHaveAttribute('aria-expanded', 'false');
+    expect(bodies[1]).toEqual({ method: 'PATCH', body: { completed: true, today: '2026-11-20' } });
+
+    // Early: the occurrence after the current due date, not after today.
+    await page.keyboard.press('Space');
+    await expect(statusMessage(page)).toHaveText('"Weekly: put the bins out" is next due Fri, Dec 4.');
+    await expect(openCheckbox(page, 'Upcoming', 'Weekly: put the bins out')).toBeFocused();
+    await expect(rowOf(page, 'Weekly: put the bins out').getByText('Due Fri, Dec 4')).toBeVisible();
+
+    // Late by more than one interval: due Tuesday Nov 3, done on Friday Nov 20.
+    // The next one is the coming Tuesday, not one of the missed ones.
+    await addRepeatingTask(page, 'Weekly: water the ferns', '2026-11-03', 'Weekly');
+    await expect(openCheckbox(page, 'Overdue', 'Weekly: water the ferns')).toBeVisible();
+    await openCheckbox(page, 'Overdue', 'Weekly: water the ferns').click();
+    await expect(statusMessage(page)).toHaveText('"Weekly: water the ferns" is next due Tue, Nov 24.');
+    await expect(openCheckbox(page, 'Upcoming', 'Weekly: water the ferns')).toBeFocused();
+    await expect(groupList(page, 'Overdue').getByText('Weekly: water the ferns')).toHaveCount(0);
+
+    // The completed occurrences are in Completed, still labelled.
+    await expandCompleted(page);
+    const done = completedList(page);
+    await expect(done.getByRole('checkbox', { name: 'Weekly: put the bins out' })).toHaveCount(2);
+    await expect(done.getByRole('checkbox', { name: 'Weekly: water the ferns' })).toBeChecked();
+    await expect(
+      done.getByRole('listitem').filter({ hasText: 'Weekly: water the ferns' }).getByText('Repeats weekly'),
+    ).toBeVisible();
+
+    // Screenshots of repeating rows, narrow and wide, for the run evidence.
+    await addRepeatingTask(page, 'Weekly: a long title that wraps on a narrow phone screen, repeating', '2026-11-22', 'Monthly');
+    for (const [name, width] of [
+      ['repeating-narrow', 375],
+      ['repeating-wide', 1280],
+    ] as const) {
+      await page.setViewportSize({ width, height: 1000 });
+      const noHorizontalScroll = await page.evaluate(
+        () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+      );
+      expect(noHorizontalScroll).toBe(true);
+      const path = testInfo.outputPath(`${name}.png`);
+      await page.screenshot({ path, fullPage: true });
+      await testInfo.attach(name, { path, contentType: 'image/png' });
+    }
+
+    // All of it survives a reload.
+    await page.reload();
+    await expect(openCheckbox(page, 'Upcoming', 'Weekly: put the bins out')).toBeVisible();
+    await expect(rowOf(page, 'Weekly: put the bins out').getByText('Repeats weekly')).toBeVisible();
+    await expect(rowOf(page, 'Weekly: water the ferns').getByText('Due Tue, Nov 24')).toBeVisible();
+    await expandCompleted(page);
+    await expect(completedList(page).getByRole('checkbox', { name: 'Weekly: put the bins out' })).toHaveCount(2);
+  });
+
+  test('un-ticking a completed occurrence removes the next one', async ({ page }) => {
+    await signIn(page, 'Household One');
+    await addRepeatingTask(page, 'Undo: feed the cat', '2026-11-20', 'Daily');
+    await openCheckbox(page, 'Today', 'Undo: feed the cat').click();
+    await expect(statusMessage(page)).toHaveText('"Undo: feed the cat" is next due tomorrow.');
+    await expect(openCheckbox(page, 'Upcoming', 'Undo: feed the cat')).toBeFocused();
+
+    // Expanded, un-tick the completed one: the next occurrence goes away and
+    // focus follows the un-ticked row back to Today.
+    await expandCompleted(page);
+    const done = completedList(page).getByRole('checkbox', { name: 'Undo: feed the cat' });
+    await done.click();
+    await expect(statusMessage(page)).toHaveText('"Undo: feed the cat" is open again, and its next occurrence was removed.');
+    await expect(openCheckbox(page, 'Today', 'Undo: feed the cat')).toBeFocused();
+    await expect(page.getByRole('checkbox', { name: 'Undo: feed the cat', exact: true })).toHaveCount(1);
+    await expect(groupList(page, 'Upcoming').getByText('Undo: feed the cat')).toHaveCount(0);
+
+    // Ticked again with Completed expanded: one new next occurrence, focused.
+    await page.keyboard.press('Space');
+    await expect(openCheckbox(page, 'Upcoming', 'Undo: feed the cat')).toBeFocused();
+    await expect(page.getByRole('checkbox', { name: 'Undo: feed the cat', exact: true })).toHaveCount(2);
+    await page.reload();
+    await expect(page.getByRole('checkbox', { name: 'Undo: feed the cat', exact: true })).toHaveCount(1);
+    await expect(openCheckbox(page, 'Upcoming', 'Undo: feed the cat')).toBeVisible();
+  });
+
+  test('without a due date the Repeats select is disabled and skipped by Tab, and a date enables it', async ({
+    page,
+  }, testInfo) => {
+    await signIn(page, 'Household One');
+    const writes = recordBodies(page);
+    const repeats = addRepeats(page);
+    await expect(repeats).toBeDisabled();
+    await expect(repeats).toHaveValue('none');
+    await expect(page.getByText('Set a due date to repeat')).toBeVisible();
+    // It looks disabled: dimmed and with the not-allowed cursor.
+    expect(
+      await repeats.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return { opacity: Number(style.opacity), cursor: style.cursor };
+      }),
+    ).toEqual({ opacity: 0.6, cursor: 'not-allowed' });
+    // Screenshots of the add form without a date, narrow and wide.
+    for (const [name, width] of [
+      ['repeat-no-date-narrow', 375],
+      ['repeat-no-date-wide', 1280],
+    ] as const) {
+      await page.setViewportSize({ width, height: 900 });
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth),
+      ).toBe(true);
+      const path = testInfo.outputPath(`${name}.png`);
+      await page.locator('form').filter({ has: repeats }).screenshot({ path });
+      await testInfo.attach(name, { path, contentType: 'image/png' });
+    }
+
+    // Keyboard: Tab goes from the date field to Add task, never stopping on
+    // Repeats, and Shift+Tab goes straight back to the date field.
+    await page.getByLabel('New task').fill('Disabled: wash the car');
+    const visited: string[] = [];
+    for (let presses = 0; presses < 8; presses++) {
+      await page.keyboard.press('Tab');
+      visited.push(await page.evaluate(() => document.activeElement?.id || document.activeElement?.tagName || ''));
+      if (await page.getByRole('button', { name: 'Add task' }).evaluate((element) => element === document.activeElement)) break;
+    }
+    await expect(page.getByRole('button', { name: 'Add task' })).toBeFocused();
+    expect(visited).not.toContain('new-task-repeat');
+    await page.keyboard.press('Shift+Tab');
+    await expect(page.getByLabel('Due date', { exact: true })).toBeFocused();
+    // The pointer cannot open it either: a click does not focus or change it.
+    await repeats.click({ force: true });
+    await page.keyboard.press('ArrowDown');
+    await expect(repeats).not.toBeFocused();
+    await expect(repeats).toHaveValue('none');
+
+    // A date enables it, and it now takes a choice.
+    await page.getByLabel('Due date', { exact: true }).fill('2026-11-21');
+    await expect(repeats).toBeEnabled();
+    await expect(page.getByText('Set a due date to repeat')).toHaveCount(0);
+    await repeats.selectOption({ label: 'Daily' });
+    await expect(repeats).toHaveValue('daily');
+    // Clearing the date disables it again and resets it.
+    await page.getByLabel('Due date', { exact: true }).fill('');
+    await expect(repeats).toBeDisabled();
+    await expect(repeats).toHaveValue('none');
+    await expect(page.getByText('Set a due date to repeat')).toBeVisible();
+    expect(writes).toEqual([]);
+  });
+
+  test('sets a custom "every 2 weeks" repeat with the keyboard only, then stops it', async ({ page }) => {
+    await signIn(page, 'Household One');
+    const bodies = recordBodies(page);
+    await page.getByLabel('New task').fill('Keys: clean the gutters');
+    await page.keyboard.press('Tab');
+    await expect(page.getByLabel('Due date', { exact: true })).toBeFocused();
+    await page.keyboard.type('11232026');
+    // Tab also steps through the parts of the date field.
+    await tabTo(page, addRepeats(page));
+    // Typing selects an option of a focused select: "C" for Custom.
+    await page.keyboard.type('C');
+    await expect(addRepeats(page)).toHaveValue('custom');
+    await page.keyboard.press('Tab');
+    const every = page.getByRole('spinbutton', { name: 'Every' });
+    await expect(every).toBeFocused();
+    await expect(every).toHaveValue('1');
+    await page.keyboard.press('ControlOrMeta+A');
+    await page.keyboard.type('2');
+    await page.keyboard.press('Tab');
+    await expect(page.getByRole('combobox', { name: 'Repeat unit' })).toBeFocused();
+    await page.keyboard.type('w');
+    await expect(page.getByRole('combobox', { name: 'Repeat unit' })).toHaveValue('week');
+    await page.keyboard.press('Tab');
+    await expect(page.getByRole('button', { name: 'Add task' })).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(rowOf(page, 'Keys: clean the gutters').getByText('Repeats every 2 weeks')).toBeVisible();
+    expect(bodies[0].body).toEqual({
+      title: 'Keys: clean the gutters',
+      dueDate: '2026-11-23',
+      repeat: { every: 2, unit: 'week' },
+    });
+
+    // Done early with the keyboard: two weeks after the due date.
+    await checkbox(page, 'Keys: clean the gutters').focus();
+    await page.keyboard.press('Space');
+    await expect(statusMessage(page)).toHaveText('"Keys: clean the gutters" is next due Mon, Dec 7.');
+    await expect(openCheckbox(page, 'Upcoming', 'Keys: clean the gutters')).toBeFocused();
+
+    // Stop repeating it: Edit, Tab to Repeats, type "Does" for Does not repeat, Tab to Save.
+    await page.keyboard.press('Tab');
+    await expect(editButton(page, 'Keys: clean the gutters')).toBeFocused();
+    await page.keyboard.press('Enter');
+    const repeats = rowRepeats(page, 'Keys: clean the gutters');
+    await tabTo(page, repeats);
+    await expect(repeats).toHaveValue('custom');
+    await page.keyboard.type('Does');
+    await expect(repeats).toHaveValue('none');
+    await expect(page.getByRole('spinbutton', { name: 'Repeat interval for "Keys: clean the gutters"' })).toHaveCount(0);
+    await page.keyboard.press('Tab');
+    await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(editButton(page, 'Keys: clean the gutters')).toBeFocused();
+    await expect(rowOf(page, 'Keys: clean the gutters').getByText(/Repeats/)).toHaveCount(0);
+    expect(bodies.at(-1)).toEqual({ method: 'PATCH', body: { repeat: null } });
+
+    // Completing it now creates nothing new; it survives a reload as stopped.
+    await page.reload();
+    await expect(rowOf(page, 'Keys: clean the gutters').getByText('Due Mon, Dec 7')).toBeVisible();
+    await expect(rowOf(page, 'Keys: clean the gutters').getByText(/Repeats/)).toHaveCount(0);
+    await checkbox(page, 'Keys: clean the gutters').click();
+    await expect(statusMessage(page)).toHaveText('"Keys: clean the gutters" was moved to Completed.');
+    await expect(page.getByRole('checkbox', { name: 'Keys: clean the gutters', exact: true })).toHaveCount(0);
+  });
+
+  test('the edit row sets a repeat by pointer; removing the date resets it', async ({ page }, testInfo) => {
+    await signIn(page, 'Household One');
+    await addTask(page, 'Edit: descale the kettle');
+    const bodies = recordPatchBodies(page);
+    await editButton(page, 'Edit: descale the kettle').click();
+    // No date: disabled, with the hint.
+    const repeats = rowRepeats(page, 'Edit: descale the kettle');
+    await expect(repeats).toBeDisabled();
+    await expect(repeats).toHaveAccessibleDescription('Set a due date to repeat');
+    await dueDateField(page, 'Edit: descale the kettle').fill('2026-11-25');
+    await expect(repeats).toBeEnabled();
+    await expect(repeats).not.toHaveAttribute('aria-disabled');
+    await repeats.selectOption({ label: 'Custom' });
+    await page.getByRole('spinbutton', { name: 'Repeat interval for "Edit: descale the kettle"' }).fill('3');
+    await page.getByRole('combobox', { name: 'Repeat unit for "Edit: descale the kettle"' }).selectOption({ label: 'months' });
+    // Screenshots of the edit row with Custom open, narrow and wide.
+    for (const [name, width] of [
+      ['repeat-edit-narrow', 375],
+      ['repeat-edit-wide', 1280],
+    ] as const) {
+      await page.setViewportSize({ width, height: 900 });
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth),
+      ).toBe(true);
+      const path = testInfo.outputPath(`${name}.png`);
+      await page.getByRole('listitem').filter({ has: repeats }).screenshot({ path });
+      await testInfo.attach(name, { path, contentType: 'image/png' });
+    }
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(rowOf(page, 'Edit: descale the kettle').getByText('Repeats every 3 months')).toBeVisible();
+    expect(bodies).toEqual([{ dueDate: '2026-11-25', repeat: { every: 3, unit: 'month' } }]);
+
+    // Remove due date resets the repeat, and both go in one request.
+    await editButton(page, 'Edit: descale the kettle').click();
+    await expect(repeats).toHaveValue('custom');
+    await page.getByRole('button', { name: 'Remove due date for "Edit: descale the kettle"' }).click();
+    await expect(repeats).toHaveValue('none');
+    await expect(repeats).toBeDisabled();
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(groupList(page, 'No date').getByText('Edit: descale the kettle')).toBeVisible();
+    expect(bodies).toEqual([
+      { dueDate: '2026-11-25', repeat: { every: 3, unit: 'month' } },
+      { dueDate: null, repeat: null },
+    ]);
+    await page.reload();
+    await expect(rowOf(page, 'Edit: descale the kettle').getByText(/Repeats/)).toHaveCount(0);
+  });
+});
+
+test.describe('repeating tasks across a month end', () => {
+  test.use({ timezoneId: 'America/Toronto', locale: 'en-US' });
+
+  test('a monthly task on the 31st, set by pointer, keeps the month end', async ({ page, request }) => {
+    // Tuesday 2026-12-01, noon in Toronto: the October 31 task is a month late.
+    await fixClock(page, request, new Date('2026-12-01T12:00:00-05:00'));
+    await signIn(page, 'Household One');
+    await addRepeatingTask(page, 'Month end: pay the rent', '2026-10-31', 'Monthly');
+    await expect(rowOf(page, 'Month end: pay the rent').getByText('Repeats monthly')).toBeVisible();
+    await expect(openCheckbox(page, 'Overdue', 'Month end: pay the rent')).toBeVisible();
+
+    // November 30 has passed too: the next one is December 31.
+    const steps = [
+      ['Overdue', 'Thu, Dec 31'],
+      ['Upcoming', 'Sun, Jan 31, 2027'],
+      ['Upcoming', 'Sun, Feb 28, 2027'],
+      ['Upcoming', 'Wed, Mar 31, 2027'],
+    ] as const;
+    for (const [group, next] of steps) {
+      await openCheckbox(page, group, 'Month end: pay the rent').click();
+      await expect(statusMessage(page)).toHaveText(`"Month end: pay the rent" is next due ${next}.`);
+      await expect(openCheckbox(page, 'Upcoming', 'Month end: pay the rent')).toBeFocused();
+      await expect(rowOf(page, 'Month end: pay the rent').getByText(`Due ${next}`)).toBeVisible();
+    }
+    await page.reload();
+    await expect(rowOf(page, 'Month end: pay the rent').getByText('Due Wed, Mar 31, 2027')).toBeVisible();
+  });
+});
+
+test.describe('repeating tasks east of UTC', () => {
+  test.use({ timezoneId: 'Pacific/Auckland', locale: 'en-US' });
+
+  test('just after local midnight the local date is sent and decides the next date', async ({ page, request }) => {
+    // 00:10 on Saturday 2026-11-21 in Auckland is still Friday 11:10 in UTC.
+    await fixClock(page, request, new Date('2026-11-21T00:10:00+13:00'));
+    await signIn(page, 'Household One');
+    const bodies = recordPatchBodies(page);
+    await addRepeatingTask(page, 'Auckland: walk the dog', '2026-11-14', 'Daily');
+    await openCheckbox(page, 'Overdue', 'Auckland: walk the dog').click();
+    // The local date, not the UTC one: due today, not yesterday.
+    expect(bodies).toEqual([{ completed: true, today: '2026-11-21' }]);
+    await expect(statusMessage(page)).toHaveText('"Auckland: walk the dog" is next due today.');
+    await expect(openCheckbox(page, 'Today', 'Auckland: walk the dog')).toBeFocused();
+    await expect(rowOf(page, 'Auckland: walk the dog').getByText('Due today')).toBeVisible();
+    const response = await page.request.get('/api/tasks');
+    const { tasks } = (await response.json()) as { tasks: { title: string; dueDate: string; completed: boolean }[] };
+    expect(
+      tasks.filter((task) => task.title === 'Auckland: walk the dog').map(({ dueDate, completed }) => ({ dueDate, completed })),
+    ).toEqual([
+      { dueDate: '2026-11-21', completed: false },
+      { dueDate: '2026-11-14', completed: true },
+    ]);
+  });
+});
+
+test.describe('repeating tasks, more edges west of UTC', () => {
+  test.use({ timezoneId: 'America/Toronto', locale: 'en-US' });
+
+  test.beforeEach(async ({ page, request }) => {
+    // Friday 2026-11-20, noon in Toronto (17:00 UTC).
+    await fixClock(page, request, new Date('2026-11-20T12:00:00-05:00'));
+  });
+
+  test('arrowing from Weekly down to Custom starts Custom at every 1 week', async ({ page }) => {
+    await signIn(page, 'Household One');
+    await addRepeatingTask(page, 'Arrows: sweep the porch', '2026-11-24', 'Weekly');
+    await editButton(page, 'Arrows: sweep the porch').click();
+    const repeats = rowRepeats(page, 'Arrows: sweep the porch');
+    await repeats.focus();
+    // Monthly, Yearly, then Custom: each step is a change.
+    for (let step = 0; step < 3; step++) await page.keyboard.press('ArrowDown');
+    await expect(repeats).toHaveValue('custom');
+    await expect(page.getByRole('spinbutton', { name: 'Repeat interval for "Arrows: sweep the porch"' })).toHaveValue('1');
+    await expect(page.getByRole('combobox', { name: 'Repeat unit for "Arrows: sweep the porch"' })).toHaveValue('week');
+    await page.keyboard.press('Escape');
+  });
+
+  // R3-F1: Backspace empties the focused part of a date field (month, day,
+  // year) and the arrow moves to the next part. Once the first part is empty
+  // the field holds a partly typed date; once all are, it holds no date.
+  const dateState = (field: ReturnType<Page['getByLabel']>) =>
+    field.evaluate((element) => ({
+      value: (element as HTMLInputElement).value,
+      partial: (element as HTMLInputElement).validity.badInput,
+    }));
+  async function clearDateParts(
+    page: Page,
+    field: ReturnType<Page['getByLabel']>,
+    repeats: ReturnType<Page['getByRole']>,
+  ) {
+    await field.focus();
+    await page.keyboard.press('Backspace');
+    // Partly typed: no date, so the select is disabled, but the choice is kept.
+    expect(await dateState(field)).toEqual({ value: '', partial: true });
+    await expect(repeats).toBeDisabled();
+    await expect(repeats).toHaveValue('weekly');
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('Backspace');
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('Backspace');
+    // Every part is empty. The browser fires no input or change event for
+    // this last step.
+    expect(await dateState(field)).toEqual({ value: '', partial: false });
+    await expect(repeats).toBeDisabled();
+    await expect(repeats).toHaveValue('none');
+    await expect(repeats).toHaveAccessibleDescription('Set a due date to repeat');
+  }
+
+  test('the add form resets the repeat when the date is cleared one part at a time (R3-F1)', async ({ page }) => {
+    await signIn(page, 'Household One');
+    const bodies = recordBodies(page);
+    const date = page.getByLabel('Due date', { exact: true });
+    await page.getByLabel('New task').fill('Parts: water the ferns');
+    await date.fill('2026-11-24');
+    await addRepeats(page).selectOption({ label: 'Weekly' });
+    await clearDateParts(page, date, addRepeats(page));
+    // Typing a date again starts from "Does not repeat", and so does the task.
+    await date.fill('2026-11-24');
+    await expect(addRepeats(page)).toBeEnabled();
+    await expect(addRepeats(page)).toHaveValue('none');
+    await page.getByRole('button', { name: 'Add task' }).click();
+    await expect(checkbox(page, 'Parts: water the ferns')).toBeVisible();
+    expect(bodies).toEqual([{ method: 'POST', body: { title: 'Parts: water the ferns', dueDate: '2026-11-24' } }]);
+  });
+
+  test('the edit row resets the repeat when the date is cleared one part at a time (R3-F1)', async ({ page }) => {
+    await signIn(page, 'Household One');
+    await addRepeatingTask(page, 'Parts: oil the hinges', '2026-11-24', 'Weekly');
+    const bodies = recordPatchBodies(page);
+    await editButton(page, 'Parts: oil the hinges').click();
+    const repeats = rowRepeats(page, 'Parts: oil the hinges');
+    await expect(repeats).toHaveValue('weekly');
+    await clearDateParts(page, dueDateField(page, 'Parts: oil the hinges'), repeats);
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(groupList(page, 'No date').getByText('Parts: oil the hinges')).toBeVisible();
+    expect(bodies).toEqual([{ dueDate: null, repeat: null }]);
+  });
+
+  test('rapid repeated ticks complete the task once and create one next occurrence', async ({ page }) => {
+    await signIn(page, 'Household One');
+    const bodies = recordPatchBodies(page);
+    await addRepeatingTask(page, 'Rapid: wipe the counters', '2026-11-20', 'Daily');
+    // Five clicks in the same moment, before the server answers the first,
+    // with focus on the checkbox as after a real click.
+    await openCheckbox(page, 'Today', 'Rapid: wipe the counters').evaluate((element) => {
+      (element as HTMLElement).focus();
+      for (let click = 0; click < 5; click++) (element as HTMLElement).click();
+    });
+    await expect(statusMessage(page)).toHaveText('"Rapid: wipe the counters" is next due tomorrow.');
+    await expect(openCheckbox(page, 'Upcoming', 'Rapid: wipe the counters')).toBeFocused();
+    expect(bodies).toEqual([{ completed: true, today: '2026-11-20' }]);
+    const response = await page.request.get('/api/tasks');
+    const { tasks } = (await response.json()) as { tasks: { title: string; dueDate: string; completed: boolean }[] };
+    expect(
+      tasks.filter((task) => task.title === 'Rapid: wipe the counters').map(({ dueDate, completed }) => ({ dueDate, completed })),
+    ).toEqual([
+      { dueDate: '2026-11-21', completed: false },
+      { dueDate: '2026-11-20', completed: true },
+    ]);
+  });
+
+  test('a page left open across local midnight sends the new date when completing', async ({ page, request }) => {
+    // 23:59:30 on Friday in Toronto.
+    await fixClock(page, request, new Date('2026-11-20T23:59:30-05:00'));
+    await signIn(page, 'Household One');
+    const bodies = recordPatchBodies(page);
+    await addRepeatingTask(page, 'Overnight: take the vitamins', '2026-11-20', 'Daily');
+    await expect(openCheckbox(page, 'Today', 'Overnight: take the vitamins')).toBeVisible();
+    // Local midnight passes with the page open: the task is now overdue.
+    await page.clock.runFor(60_000);
+    await expect(openCheckbox(page, 'Overdue', 'Overnight: take the vitamins')).toBeVisible();
+    await openCheckbox(page, 'Overdue', 'Overnight: take the vitamins').click();
+    expect(bodies).toEqual([{ completed: true, today: '2026-11-21' }]);
+    // The next one is due today (the new day), not yesterday.
+    await expect(statusMessage(page)).toHaveText('"Overnight: take the vitamins" is next due today.');
+    await expect(openCheckbox(page, 'Today', 'Overnight: take the vitamins')).toBeFocused();
+  });
+});
+
+// The browser's date may be one day ahead of the server's UTC date (UTC+14)
+// or one day behind it (UTC-12); both are accepted and decide the next date.
+for (const { zone, label, time, today, next } of [
+  { zone: 'Pacific/Kiritimati', label: 'UTC+14', time: '2026-11-21T00:30:00+14:00', today: '2026-11-21', next: 'Due today' },
+  { zone: 'Etc/GMT+12', label: 'UTC-12', time: '2026-11-20T23:30:00-12:00', today: '2026-11-20', next: 'Due today' },
+]) {
+  test.describe(`repeating tasks at ${label}`, () => {
+    test.use({ timezoneId: zone, locale: 'en-US' });
+
+    test(`the local date is sent and accepted at ${label}`, async ({ page, request }) => {
+      await fixClock(page, request, new Date(time));
+      await signIn(page, 'Household One');
+      const bodies = recordPatchBodies(page);
+      const title = `${label}: water the cactus`;
+      await addRepeatingTask(page, title, '2026-11-14', 'Daily');
+      await openCheckbox(page, 'Overdue', title).click();
+      expect(bodies).toEqual([{ completed: true, today }]);
+      await expect(statusMessage(page)).toHaveText(`"${title}" is next due today.`);
+      await expect(openCheckbox(page, 'Today', title)).toBeFocused();
+      await expect(rowOf(page, title).getByText(next)).toBeVisible();
+      const response = await page.request.get('/api/tasks');
+      const { tasks } = (await response.json()) as { tasks: { title: string; dueDate: string; completed: boolean }[] };
+      expect(tasks.find((task) => task.title === title && !task.completed)?.dueDate).toBe(today);
+    });
+  });
+}

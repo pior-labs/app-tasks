@@ -1,5 +1,6 @@
 import type { Server } from 'node:http';
 import { serve } from '@hono/node-server';
+import { Hono } from 'hono';
 import { createFixture } from './fixture.js';
 
 // The API server for the browser end-to-end suite (packages/e2e). It serves the
@@ -17,7 +18,17 @@ const port = Number(required('E2E_API_PORT'));
 if (!Number.isInteger(port) || port <= 0) throw new Error('E2E_API_PORT must be a port number');
 
 const fixture = await createFixture(webOrigin);
-const server = serve({ fetch: fixture.app.fetch, port, hostname: 'localhost' }, () => {
+// The browser tests fix the browser clock, and the API checks the browser's
+// "today" against its own date, so the tests set the API clock to match. This
+// route exists only in this test server, never in the application.
+const testServer = new Hono();
+testServer.put('/e2e/clock', async (c) => {
+  const { time } = (await c.req.json()) as { time: string | null };
+  fixture.setNow(time === null ? null : new Date(time));
+  return c.json({ now: fixture.now().toISOString() });
+});
+testServer.all('*', (c) => fixture.app.fetch(c.req.raw));
+const server = serve({ fetch: testServer.fetch, port, hostname: 'localhost' }, () => {
   console.log(`End-to-end API for ${webOrigin} listening on http://localhost:${port}`);
 });
 

@@ -4,9 +4,22 @@ import {
   MAX_DUE_DATE,
   MIN_DUE_DATE,
   dueDateProblem,
+  dueLabel,
+  holdsNoDate,
   localDate,
   msUntilNextLocalMidnight,
 } from './dueDate';
+import { RepeatControl, RepeatHint } from './RepeatControl';
+import {
+  NO_REPEAT,
+  type Repeat,
+  type RepeatForm,
+  nextIsBeyond,
+  repeatForm,
+  repeatFromForm,
+  sameRepeat,
+  withoutRepeat,
+} from './repeat';
 import { type RowMode, type Task, TaskRow } from './TaskRow';
 import { groupTasks, visibleTasks } from './taskGroups';
 
@@ -56,8 +69,9 @@ async function serverError(response: Response, fallback: string) {
   return { message: fallback, code: '' };
 }
 
-type Field = 'title' | 'dueDate';
-const fieldOf = (code: string): Field => (code === 'invalid_due_date' ? 'dueDate' : 'title');
+type Field = 'title' | 'dueDate' | 'repeat';
+const fieldOf = (code: string): Field =>
+  code === 'invalid_due_date' ? 'dueDate' : code === 'invalid_repeat' ? 'repeat' : 'title';
 
 // A date input that holds a partly typed date reports an empty value and
 // badInput. That is not "no due date", so it is refused instead of sent.
@@ -69,11 +83,38 @@ function movedMessage(task: Task) {
   return `"${task.title}" was moved to Completed.`;
 }
 
+// After ticking a repeating task: when the next occurrence is due, in the
+// words of the row labels ("today", "tomorrow", "Wed, Nov 26").
+function nextDueMessage(next: Task, today: string) {
+  const when = next.dueDate === null ? '' : dueLabel(next.dueDate, today).replace(/^Due /, '');
+  return `"${next.title}" is next due ${when}.`;
+}
+// The server creates no next occurrence for a repeating task only when its
+// date would be after the last supported due date, or when the occurrence
+// created from this task already exists (it was kept when the task was
+// un-ticked, or another tab completed the task first).
+function noNextMessage(task: Task, today: string) {
+  const beyond =
+    task.dueDate !== null && task.repeat !== null && nextIsBeyond(task.dueDate, today, task.repeat, MAX_DUE_DATE);
+  return beyond
+    ? `"${task.title}" was moved to Completed. No further occurrence was created, because it would be after December 31, 2100.`
+    : `"${task.title}" was moved to Completed. Its next occurrence already exists.`;
+}
+function removedNextMessage(task: Task) {
+  return `"${task.title}" is open again, and its next occurrence was removed.`;
+}
+
+// The answer to a task update. Older stubs and servers may leave out the
+// repeat fields; missing means none.
+type UpdateReply = { task: Task; nextTask?: Task | null; removedTaskId?: number | null };
+const withRepeat = (task: Task): Task => ({ ...task, repeat: task.repeat ?? null });
+
 export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [listState, setListState] = useState<'loading' | 'ready' | 'failed'>('loading');
   const [title, setTitle] = useState('');
   const [dueDate, setDueDate] = useState('');
+  const [repeat, setRepeat] = useState<RepeatForm>(NO_REPEAT);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<{ message: string; field: Field } | null>(null);
   const [updatingIds, setUpdatingIds] = useState<number[]>([]);
@@ -85,6 +126,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
     id: number;
     text: string;
     dueDate: string;
+    repeat: RepeatForm;
     error: string;
     errorField: Field;
   } | null>(null);
@@ -224,7 +266,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
         if (!response.ok) throw new Error();
         const body: { tasks: Task[] } = await response.json();
         if (!isCurrent()) return;
-        setTasks(body.tasks);
+        setTasks(body.tasks.map(withRepeat));
         setListState('ready');
       } catch {
         if (isCurrent()) setListState('failed');
@@ -248,6 +290,9 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
     if (problem) return setCreateError({ message: problem, field: 'title' });
     const dateProblem = dateFieldProblem(dueDateInput.current, dueDate);
     if (dateProblem) return setCreateError({ message: dateProblem, field: 'dueDate' });
+    // A repeat needs a due date; without one the control is unavailable.
+    const repeatChoice = dueDate === '' ? { repeat: null } : repeatFromForm(repeat);
+    if ('problem' in repeatChoice) return setCreateError({ message: repeatChoice.problem, field: 'repeat' });
     creatingRef.current = true;
     setCreating(true);
     setCreateError(null);
@@ -255,8 +300,12 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
       const response = await fetch('/api/tasks', {
         method: 'POST',
         headers: jsonHeaders,
-        // No due date is sent as no field at all.
-        body: JSON.stringify(dueDate === '' ? { title: trimmed } : { title: trimmed, dueDate }),
+        // No due date, or no repeat, is sent as no field at all.
+        body: JSON.stringify({
+          title: trimmed,
+          ...(dueDate === '' ? {} : { dueDate }),
+          ...(repeatChoice.repeat === null ? {} : { repeat: repeatChoice.repeat }),
+        }),
       });
       if (!mounted.current) return;
       if (response.status === 401) return onSignedOut();
@@ -267,9 +316,10 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
       if (!response.ok) throw new Error();
       const body: { task: Task } = await response.json();
       // Only a task the server confirmed is added to the list.
-      setTasks((current) => [body.task, ...current]);
+      setTasks((current) => [withRepeat(body.task), ...current]);
       setTitle('');
       setDueDate('');
+      setRepeat(NO_REPEAT);
       // Ready for the next task, also when the add button was clicked.
       titleInput.current?.focus();
     } catch {
@@ -288,23 +338,35 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
     setUpdatingIds((ids) => [...ids, task.id]);
     setUpdateError('');
     setNotice('');
+    const sentToday = localDate(new Date());
     try {
       const response = await fetch(`/api/tasks/${task.id}`, {
         method: 'PATCH',
         headers: jsonHeaders,
-        body: JSON.stringify({ completed }),
+        // Completing sends the browser's local date, which decides where a
+        // repeating task's schedule goes next.
+        body: JSON.stringify(completed ? { completed, today: sentToday } : { completed }),
       });
       if (!mounted.current) return;
       if (response.status === 401) return onSignedOut();
       // The task was deleted and has already left the list: nothing to report.
       if (response.status === 404 && removedRef.current.has(task.id)) return;
       if (!response.ok) throw new Error();
-      const body: { task: Task } = await response.json();
-      const updated = body.task;
+      const body: UpdateReply = await response.json();
+      const updated = withRepeat(body.task);
+      const nextTask = body.nextTask ? withRepeat(body.nextTask) : null;
+      const removedTaskId = body.removedTaskId ?? null;
       // A task completed while the Completed section is collapsed leaves view.
       const leavesView = updated.completed && !completedOpenRef.current;
+      // Un-ticking took back the next occurrence: that row goes away too. This
+      // comes first so the focus rules below win.
+      if (removedTaskId !== null) removeRow(removedTaskId);
       if (hasFocus(task.id)) {
-        if (leavesView) {
+        if (nextTask) {
+          // The new occurrence is where the user carries on, wherever the
+          // completed one went.
+          focusAfterRender.current = () => control(nextTask.id, 'toggle');
+        } else if (leavesView) {
           // Like after a delete: the next row, else the previous one, else the
           // Completed toggle, which now exists.
           const neighbour = visibleNeighbour(task.id);
@@ -315,13 +377,18 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
           focusAfterRender.current = () => control(updated.id, 'toggle');
         }
       }
-      if (leavesView) {
-        setNotice(movedMessage(updated));
-        // A delete question cannot stay open on a row nobody can see.
-        setConfirmingId((current) => (current === task.id ? null : current));
-      }
-      // The checkbox changes, and the row moves, only once the server has stored the new state.
-      setTasks((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+      if (nextTask) setNotice(nextDueMessage(nextTask, todayRef.current));
+      else if (updated.completed && updated.repeat) setNotice(noNextMessage(updated, sentToday));
+      else if (removedTaskId !== null) setNotice(removedNextMessage(updated));
+      else if (leavesView) setNotice(movedMessage(updated));
+      // A delete question cannot stay open on a row nobody can see.
+      if (leavesView) setConfirmingId((current) => (current === task.id ? null : current));
+      // The checkbox changes, and the row moves, only once the server has
+      // stored the new state. The next occurrence is the newest task.
+      setTasks((current) => [
+        ...(nextTask && !current.some((item) => item.id === nextTask.id) ? [nextTask] : []),
+        ...current.map((item) => (item.id === updated.id ? updated : item)),
+      ]);
     } catch {
       setUpdateError(`"${task.title}" could not be updated. Please try again.`);
     } finally {
@@ -352,6 +419,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
       id: task.id,
       text: task.title,
       dueDate: task.dueDate ?? '',
+      repeat: repeatForm(task.repeat),
       error: '',
       errorField: 'title',
     });
@@ -382,13 +450,21 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
       editing.dueDate,
     );
     if (dateProblem) return setEditing({ ...editing, error: dateProblem, errorField: 'dueDate' });
+    // Without a due date nothing repeats (the control was reset with the date).
+    const repeatChoice = editing.dueDate === '' ? { repeat: null } : repeatFromForm(editing.repeat);
+    if ('problem' in repeatChoice) {
+      return setEditing({ ...editing, error: repeatChoice.problem, errorField: 'repeat' });
+    }
     // Only the fields that changed are sent.
-    const changes: { title?: string; dueDate?: string | null } = {};
+    const changes: { title?: string; dueDate?: string | null; repeat?: Repeat | null } = {};
     if (trimmed !== task.title) changes.title = trimmed;
     const newDueDate = editing.dueDate === '' ? null : editing.dueDate;
     if (newDueDate !== task.dueDate) changes.dueDate = newDueDate;
+    if (!sameRepeat(repeatChoice.repeat, task.repeat)) changes.repeat = repeatChoice.repeat;
     // Nothing to store: leave edit mode without a request.
-    if (changes.title === undefined && changes.dueDate === undefined) return leaveEdit(task);
+    if (changes.title === undefined && changes.dueDate === undefined && changes.repeat === undefined) {
+      return leaveEdit(task);
+    }
     savingRef.current = true;
     setSaving(true);
     setUpdateError('');
@@ -413,20 +489,20 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
         return fail(message, fieldOf(code));
       }
       if (!response.ok) throw new Error();
-      const body: { task: Task } = await response.json();
-      // The row shows the new title and date, and moves to its new group,
-      // only once the server has stored them. Focus follows it to Edit.
-      setTasks((current) => current.map((item) => (item.id === body.task.id ? body.task : item)));
+      const body: UpdateReply = await response.json();
+      const updated = withRepeat(body.task);
+      // The row shows the new title, date and repeat, and moves to its new
+      // group, only once the server has stored them. Focus follows it to Edit.
+      setTasks((current) => current.map((item) => (item.id === updated.id ? updated : item)));
       leaveEdit(task);
     } catch {
       // Edit mode and the typed values are kept so the user can retry.
+      const changed = (['title', 'dueDate', 'repeat'] as const).filter((field) => changes[field] !== undefined);
       const what =
-        changes.dueDate === undefined
-          ? 'The new title'
-          : changes.title === undefined
-            ? 'The new due date'
-            : 'The changes';
-      fail(`${what} could not be saved. Please try again.`, changes.title === undefined ? 'dueDate' : 'title');
+        changed.length > 1
+          ? 'The changes'
+          : { title: 'The new title', dueDate: 'The new due date', repeat: 'The new repeat' }[changed[0]];
+      fail(`${what} could not be saved. Please try again.`, changed[0]);
     } finally {
       savingRef.current = false;
       setSaving(false);
@@ -479,6 +555,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
         kind: 'edit',
         text: editing.text,
         dueDate: editing.dueDate,
+        repeat: editing.repeat,
         error: editing.error,
         errorField: editing.errorField,
         saving,
@@ -529,17 +606,36 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
           current?.id === task.id && !savingRef.current ? { ...current, text, error: '' } : current,
         )
       }
-      onEditDueDate={(value) =>
+      onEditDueDate={(value, badInput) =>
         setEditing((current) =>
           current?.id === task.id && !savingRef.current
-            ? { ...current, dueDate: value, error: '' }
+            ? {
+                ...current,
+                dueDate: value,
+                // Removing the date stops the repeat. A partly typed date is
+                // not a removal, so the repeat is kept while typing.
+                repeat: value === '' && !badInput ? NO_REPEAT : current.repeat,
+                error: '',
+              }
             : current,
+        )
+      }
+      onDueDateEmptied={() =>
+        setEditing((current) => {
+          if (current?.id !== task.id || savingRef.current || current.dueDate !== '') return current;
+          const repeat = withoutRepeat(current.repeat);
+          return repeat === current.repeat ? current : { ...current, repeat };
+        })
+      }
+      onEditRepeat={(value) =>
+        setEditing((current) =>
+          current?.id === task.id && !savingRef.current ? { ...current, repeat: value, error: '' } : current,
         )
       }
       onRemoveDueDate={() => {
         if (savingRef.current) return;
         setEditing((current) =>
-          current?.id === task.id ? { ...current, dueDate: '', error: '' } : current,
+          current?.id === task.id ? { ...current, dueDate: '', repeat: NO_REPEAT, error: '' } : current,
         );
         // The Remove control goes away with the date, so focus moves to the date field.
         focusAfterRender.current = () => control(task.id, 'edit-due-date');
@@ -590,7 +686,17 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
               max={MAX_DUE_DATE}
               onChange={(event) => {
                 setDueDate(event.target.value);
+                // Removing the date resets the repeat; a partly typed date does not.
+                if (holdsNoDate(event.target)) setRepeat(NO_REPEAT);
                 setCreateError(null);
+              }}
+              // Emptying the last part of a date fires no change event, so the
+              // key that did it, or leaving the field, resets the repeat.
+              onKeyUp={(event) => {
+                if (holdsNoDate(event.currentTarget)) setRepeat(withoutRepeat);
+              }}
+              onBlur={(event) => {
+                if (holdsNoDate(event.currentTarget)) setRepeat(withoutRepeat);
               }}
               readOnly={creating}
               aria-invalid={createError?.field === 'dueDate' || undefined}
@@ -598,6 +704,22 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
               className="rounded-md border border-border bg-card px-4 py-3 text-card-foreground read-only:opacity-60"
             />
           </div>
+          <RepeatControl
+            idBase="new-task"
+            visibleLabels
+            names={{ choice: 'Repeats', every: 'Every', unit: 'Repeat unit' }}
+            form={repeat}
+            seed={null}
+            available={dueDate !== ''}
+            locked={creating}
+            invalid={createError?.field === 'repeat'}
+            errorId="new-task-error"
+            className="rounded-md border border-border bg-card px-4 py-3 text-card-foreground"
+            onChange={(value) => {
+              setRepeat(value);
+              setCreateError(null);
+            }}
+          />
           <button
             type="submit"
             aria-disabled={creating || undefined}
@@ -606,6 +728,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
             {creating ? 'Adding...' : 'Add task'}
           </button>
         </div>
+        {dueDate === '' && <RepeatHint idBase="new-task" />}
         {createError && (
           <p id="new-task-error" role="alert" className="text-sm text-destructive">
             {createError.message}

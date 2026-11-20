@@ -1,5 +1,8 @@
+import { sql } from 'drizzle-orm';
 import {
+  type AnyPgColumn,
   boolean,
+  check,
   date,
   index,
   integer,
@@ -89,8 +92,31 @@ export const tasks = pgTable(
     // A calendar date without a time or timezone. String mode keeps it as
     // "YYYY-MM-DD" end to end, so no timezone conversion can shift the day.
     dueDate: date('due_date', { mode: 'string' }),
+    // A repeat is an interval: every `repeat_every` days, weeks, months or
+    // years. Both are null for a task that does not repeat.
+    repeatUnit: text('repeat_unit'),
+    repeatEvery: integer('repeat_every'),
+    // The day the schedule counts from: the due date when the repeat was set
+    // or the due date last changed. Occurrences are this day plus whole
+    // intervals (months and years keep its day of month, clamped to shorter
+    // months), so month-end schedules do not drift. Internal, never returned.
+    repeatAnchor: date('repeat_anchor', { mode: 'string' }),
+    // The occurrence whose completion created this task. Unique, so one
+    // completed occurrence can never have two next occurrences.
+    repeatedFromId: integer('repeated_from_id')
+      .references((): AnyPgColumn => tasks.id, { onDelete: 'set null' })
+      .unique('tasks_repeated_from_id_unique'),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
-  (table) => [index('tasks_user_id_idx').on(table.userId)],
+  (table) => [
+    index('tasks_user_id_idx').on(table.userId),
+    check('tasks_repeat_unit_check', sql`${table.repeatUnit} in ('day', 'week', 'month', 'year')`),
+    check('tasks_repeat_every_check', sql`${table.repeatEvery} between 1 and 99`),
+    // A repeat is all or nothing: unit, interval and anchor together.
+    check(
+      'tasks_repeat_complete_check',
+      sql`(${table.repeatUnit} is null) = (${table.repeatEvery} is null) and (${table.repeatUnit} is null) = (${table.repeatAnchor} is null)`,
+    ),
+  ],
 );

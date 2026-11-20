@@ -4,8 +4,14 @@ import { createTaskRoutes, type AppDatabase } from './tasks.js';
 
 export type AppEnv = { Variables: { user: AppAuth['$Infer']['Session']['user'] } };
 
-// appOrigin is the configured application origin (BETTER_AUTH_URL).
-export function createApp(auth: AppAuth, db: AppDatabase, appOrigin: string) {
+// appOrigin is the configured application origin (BETTER_AUTH_URL). `now` is
+// the server clock; tests replace it to pin the server's date.
+export function createApp(
+  auth: AppAuth,
+  db: AppDatabase,
+  appOrigin: string,
+  { now = () => new Date() }: { now?: () => Date } = {},
+) {
   const app = new Hono<AppEnv>();
   app.get('/health', (c) => c.json({ ok: true }));
   app.get('/api/health', (c) => c.json({ ok: true }));
@@ -30,7 +36,7 @@ export function createApp(auth: AppAuth, db: AppDatabase, appOrigin: string) {
     const { id, name, email } = c.get('user');
     return c.json({ user: { id, name, email } });
   });
-  app.route('/api/tasks', createTaskRoutes(db, appOrigin));
+  app.route('/api/tasks', createTaskRoutes(db, appOrigin, now));
   app.onError((error, c) => {
     console.error('API request failed', error.name);
     return c.json({ error: 'internal_error' }, 500);
