@@ -214,6 +214,47 @@ test('names are unique per user ignoring letter case; two users may share one (A
   assert.notEqual(theirs.id, errands.id);
 });
 
+// Names that would show as a built-in view's tab: they differ from "Inbox" or
+// "All tasks" only by letter case, invisible code points, or the white space
+// between the words.
+const reservedLookalikes = [
+  'Inbox\u200b', // zero width space
+  '\u200bInbox',
+  'In\u200bbox',
+  'In\u00adbox', // soft hyphen
+  'In\u200dbox', // zero width joiner
+  '\u200eInbox\u200f', // direction marks
+  'Inbox\ufeff', // zero width no-break space
+  'Inbox\u3164', // Hangul filler, invisible but not white space
+  'In\u0001box', // a control character
+  'INBOX\u2060', // word joiner
+  'All\u00a0tasks', // no-break space
+  'All  tasks',
+  'All\ttasks',
+  'All \u200b tasks',
+  'All\u2003tasks', // em space
+  'All\u3000TASKS', // ideographic space
+  'All\u202ftasks', // narrow no-break space
+  'All\u200b tasks\u200b',
+];
+// Names that only contain or resemble the words stay allowed.
+const notReserved = ['Inbox later', 'In box', 'Inboxes', 'Alltasks', 'All tasks 2', 'All my tasks', 'Inbox\u200bzero'];
+
+test('names that only look like "Inbox" or "All tasks" are reserved too (AC-1, D-3)', async () => {
+  const list = await createList(one, 'Keep me');
+  const before = await storedLists();
+  for (const name of reservedLookalikes) {
+    const created = await send(one, 'POST', '/api/lists', { name });
+    assert.equal(created.status, 400, `POST ${JSON.stringify(name)}`);
+    assert.equal((await created.json()).error, 'invalid_list_name');
+    const renamed = await send(one, 'PATCH', `/api/lists/${list.id}`, { name });
+    assert.equal(renamed.status, 400, `PATCH ${JSON.stringify(name)}`);
+    assert.equal((await renamed.json()).error, 'invalid_list_name');
+  }
+  assert.deepEqual(await storedLists(), before);
+  for (const name of notReserved) assert.equal((await createList(one, name)).name, name);
+});
+
 test('lists are listed oldest first with their fields; create answers 201 and rename 200 (AC-2)', async () => {
   assert.deepEqual(await getLists(one), []);
   const home = await createList(one, 'Home');

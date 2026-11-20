@@ -20,16 +20,32 @@ import {
 export const MAX_LIST_NAME_LENGTH = 50;
 // So the tab row stays usable. The web client shows the error.
 export const MAX_LISTS = 50;
-// The built-in views. A list with one of these names, in any letter case,
-// would look like them.
+// The built-in views. A list whose name shows as one of them would look like
+// its tab, so the check compares what a person would see: letter case is
+// ignored, invisible code points (default ignorables such as a zero width
+// space, joiners, direction marks and the soft hyphen, and control
+// characters) are dropped, and any run of white space (a no-break space,
+// repeated spaces) counts as one space. Names that merely contain the words,
+// such as "Inbox zero", are allowed. Only this check uses the folded form:
+// names are stored as typed, and duplicates compare with lower() like the
+// database index. The web form folds the same way (packages/web/src/lists.ts).
 const RESERVED_LIST_NAMES = ['inbox', 'all tasks'];
+const isReservedListName = (name: string) =>
+  RESERVED_LIST_NAMES.includes(
+    name
+      .replace(/\p{White_Space}+/gu, ' ')
+      .replace(/[\p{Cc}\p{Default_Ignorable_Code_Point}]/gu, '')
+      .replace(/ +/g, ' ')
+      .trim()
+      .toLowerCase(),
+  );
 
 // The one definition of a valid list name, used by both create and rename. The
 // rules are those of task titles (packages/api/src/tasks.ts): trimmed, at least
 // one visible character, no U+0000, and the length in code points. The
 // database checks the same length (lists_name_length_check). Names are stored
 // as typed; uniqueness ignores letter case (lists_user_id_name_idx). The web
-// form applies the same rules in packages/web/src/Lists.tsx.
+// forms apply the same rules (listNameProblem in packages/web/src/lists.ts).
 const NAME_MESSAGE = 'A list name is required and must be text.';
 const listName = z
   .string({ error: NAME_MESSAGE })
@@ -41,7 +57,7 @@ const listName = z
     abort: true,
   })
   .max(MAX_LIST_NAME_LENGTH, { error: `List names can be at most ${MAX_LIST_NAME_LENGTH} characters.` })
-  .refine((name) => !RESERVED_LIST_NAMES.includes(name.toLowerCase()), {
+  .refine((name) => !isReservedListName(name), {
     error: '"Inbox" and "All tasks" are built in. Choose another name.',
   });
 // Create and rename take the same body. Unknown keys (such as an owner or an

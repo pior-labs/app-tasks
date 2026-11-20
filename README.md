@@ -245,7 +245,11 @@ deleted or belongs to another user (indistinguishable); 409
 Name rules, from one shared definition used by `POST` and `PATCH`, are those of
 titles with a limit of 50: trimmed, at least one visible character, no null
 character, at most 50 Unicode code points. "Inbox" and "All tasks" are
-reserved in any letter case, so a list can never look like a built-in view.
+reserved, so a list can never look like a built-in view: the check ignores
+letter case, invisible characters (such as a zero width space, joiners,
+direction marks or a soft hyphen) and which white space separates the words
+(a no-break space or repeated spaces count as one space). Names that only
+contain the words, such as "Inbox zero", are allowed.
 Anything else is 400 `invalid_list_name` and nothing changes. A name that
 matches another of the user's lists ignoring letter case is 409
 `duplicate_list_name`; renaming a list to its own name in another case is
@@ -504,7 +508,7 @@ date), undo, a kept completed successor, parallel completions creating exactly
 one successor, delete with a successor, and isolation between users. List
 tests (`packages/api/test/lists.test.ts`) cover name rules on both routes
 (trimming, invisible names, the 50 code point limit, null characters, reserved
-names in any case, non-text bodies), case-insensitive duplicates per user, the
+names in any case and their lookalikes, non-text bodies), case-insensitive duplicates per user, the
 list order and shapes, the 50-list limit including parallel creates, malformed
 JSON and ids, deleting a list with open and completed tasks, ownership and the
 origin check, `listId` on every task response, moves, invalid, unknown,

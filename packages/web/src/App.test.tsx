@@ -2862,6 +2862,38 @@ describe('lists', () => {
     expect(field.value).toBe('Groceries');
   });
 
+  test('the new list field refuses names that only look like a built-in view, as the server does (AC-11, D-3)', async () => {
+    signedIn([milk]);
+    reply('POST /api/lists', json({ list: list(11, 'Inbox zero') }, 201));
+    render(<App />);
+    await ready();
+    await userEvent.click(button('New list'));
+    const field = screen.getByRole('textbox', { name: 'List name' }) as HTMLInputElement;
+    // Letter case, invisible code points, and the white space between the words.
+    for (const typed of [
+      'Inbox\u200b',
+      'In\u00adbox',
+      '\u200eINBOX\u200f',
+      'Inbox\u3164',
+      'In\u0001box',
+      'All\u00a0tasks',
+      'all  TASKS',
+      'All\u3000tasks',
+      'All \u200b tasks',
+    ]) {
+      fireEvent.change(field, { target: { value: typed } });
+      await userEvent.click(button('Create list'));
+      expect(screen.getByRole('alert').textContent).toBe('"Inbox" and "All tasks" are built in. Choose another name.');
+      expect(field.getAttribute('aria-invalid')).toBe('true');
+    }
+    expect(callsTo('POST /api/lists')).toHaveLength(0);
+    // A name that only contains the word is a normal name.
+    fireEvent.change(field, { target: { value: 'Inbox zero' } });
+    await userEvent.click(button('Create list'));
+    await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Inbox zero']));
+    expect(callsTo('POST /api/lists').map((call) => call.body)).toEqual([{ name: 'Inbox zero' }]);
+  });
+
   test('the new list field is read-only while it is saved and ignores repeat submits (AC-11)', async () => {
     signedIn([milk]);
     const created = pending();
