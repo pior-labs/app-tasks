@@ -22,8 +22,8 @@ def write_json(path, value):
     temporary.replace(path)
 
 
-# Production defaults are versioned with deployment tooling; Actions variables
-# can override these without putting public configuration in a secret blob.
+# Production defaults are versioned with deployment tooling. PRODUCTION
+# environment variables can override them, but changes belong here by default.
 PRODUCTION_DEFAULTS = {
     'APP_SLUG': 'tasks',
     'PUBLIC_BASE_URL': 'https://tasks.szarans.ca',
@@ -41,7 +41,7 @@ def production_environment(project):
     for key in ('CENTRAL_AUTH_CLIENT_SECRET', 'BETTER_AUTH_SECRET'):
         value = os.environ.get(key, '').strip()
         if not value or value.startswith('replace-with-'):
-            raise ValueError(f'Set the {key} Actions secret')
+            raise ValueError(f'Set the {key} PRODUCTION environment secret')
         values[key] = value
     if len(values['BETTER_AUTH_SECRET']) < 32:
         raise ValueError('BETTER_AUTH_SECRET must contain at least 32 characters')
@@ -96,13 +96,6 @@ def deploy():
         for name in config['compose_files']:
             shutil.copyfile(candidate / name, runtime / name)
         (runtime / '.env').write_text(app_env)
-        script = config.get('environment_script')
-        if script:
-            # Keep Auth's separately validated client secret and platform-owned
-            # database mount contract while APP_ENV is incrementally split.
-            command('bash', str(Path(__file__).with_name(script).resolve()), cwd=runtime,
-                    env={**os.environ, 'AUTH_ENV': app_env,
-                         'COMPOSE_FILE': ':'.join(config['compose_files'])})
         write_json(runtime / 'release.json', release)
         write_json(runtime / 'images.json', {'services': {s: {'image': image} for s, image in release['images'].items()}})
         base = ['docker', 'compose', '--project-directory', str(runtime), '--project-name', project,

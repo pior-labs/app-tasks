@@ -13,7 +13,7 @@ configuration alone does not provision a runner or establish a live deployment.
   for that runner. Python 3, curl with `--retry-all-errors`, Docker Compose with
   `up --wait`, and GHCR access are required. Registry credentials use the
   workflow's temporary `GITHUB_TOKEN`; production installs no Node dependencies.
-- Set the separate Actions secret `COMPOSE_PROJECT_NAME` to the **existing**
+- Set the `PRODUCTION` environment secret `COMPOSE_PROJECT_NAME` to the **existing**
   production Compose project identity. Inspect an existing container's
   `com.docker.compose.project` label before migrating; a different name can
   create a second project or collide with named containers. For a new app,
@@ -27,7 +27,12 @@ configuration alone does not provision a runner or establish a live deployment.
 
 ## Individual production settings
 
-Set these Actions secrets at repository scope or in the `PRODUCTION` environment:
+All production settings live in the `PRODUCTION` environment, which only the
+`main` branch should be allowed to deploy from. Do not duplicate them at
+repository scope: an environment value silently overrides a repository value
+with the same name, so duplicates hide mistakes.
+
+Set these `PRODUCTION` environment secrets:
 
 | Secret | Value |
 | --- | --- |
@@ -35,9 +40,11 @@ Set these Actions secrets at repository scope or in the `PRODUCTION` environment
 | `CENTRAL_AUTH_CLIENT_SECRET` | The same private value registered as Auth's `TASKS_CLIENT_SECRET` |
 | `BETTER_AUTH_SECRET` | A separate, stable application session secret, at least 32 characters |
 
-Set the Actions variable `DEPLOY_DIR` to `/opt/docker/app-tasks`. It is required.
-The following Actions variables are optional overrides of versioned production
-defaults. Leave them unset to use the values shown:
+Set the `PRODUCTION` environment variable `DEPLOY_DIR` to `/opt/docker/app-tasks`.
+It is required. The following `PRODUCTION` environment variables are optional
+overrides of the versioned defaults in `scripts/deploy.py`. Leave them unset;
+change the default in a reviewed PR instead, and use a variable only for a
+deliberate temporary override:
 
 | Variable | Default |
 | --- | --- |
@@ -52,8 +59,7 @@ defaults. Leave them unset to use the values shown:
 Only this explicit allowlist is written to the private runtime `.env`. Missing,
 placeholder or short session secrets fail before staging or Docker operations.
 Values must be single-line; quotes, backslashes and dollar signs are encoded
-for Compose rather than pasted as dotenv syntax. Existing `APP_ENV` secrets can
-be removed once these individual settings are configured. Local `.env` and
+for Compose rather than pasted as dotenv syntax. Local `.env` and
 `.env.local` development configuration still follow `.env.example`.
 
 The database connection stays in the platform-managed file on the host, mounted
@@ -62,6 +68,32 @@ Actions. Changing an origin, issuer, client ID, slug or database-file path also
 requires the corresponding Auth/platform configuration; the workflow does not
 provision those dependencies. Ingress health probes remain tied to the canonical
 Tasks hostname in `scripts/deployment.json`.
+
+## Changing or rotating one setting
+
+Each setting is independent, so a change touches only that one value:
+
+1. Update the value under Settings, Environments, `PRODUCTION` (or
+   `gh secret set <NAME> --env PRODUCTION`, which prompts for the value; do not
+   pass secrets with `--body`, which leaves them in shell history and process
+   listings).
+2. Dispatch Deploy with the CI run ID of the release that is already live
+   (`run_id` in `$DEPLOY_DIR/.deployments/current.json`). Settings apply only on
+   the next deployment; redeploying the live release changes nothing else.
+3. Verify sign-in at `https://tasks.szarans.ca`.
+
+Value-specific notes:
+
+- `CENTRAL_AUTH_CLIENT_SECRET` must equal Auth's `TASKS_CLIENT_SECRET`. Rotate
+  it in Auth first, deploy Auth, then update and deploy Tasks; sign-in fails
+  between the two deployments.
+- A new `BETTER_AUTH_SECRET` signs everyone out. Keep the value stable unless
+  rotation is intended.
+- `COMPOSE_PROJECT_NAME` is an identity, not a credential. Changing it creates a
+  second Compose project instead of updating the existing one.
+- To copy a current value from the host, use the newest
+  `$DEPLOY_DIR/releases/*/.env`: strip the surrounding double quotes, turn `$$`
+  back into `$` and JSON escapes such as `\\` back into their characters.
 
 ## Release and deployment
 
