@@ -420,17 +420,17 @@ only its mounted platform connection file.
 Deployment is manual, restricted to `main`, using the `PRODUCTION` environment
 and repository-scoped runner labels `self-hosted`, `linux`, `app-tasks`.
 The runner needs Python 3, Docker Compose, curl, and write access to `DEPLOY_DIR`.
-Configure the required Actions variable `DEPLOY_DIR=/opt/docker/app-tasks`,
+Configure the required `PRODUCTION` environment variable `DEPLOY_DIR=/opt/docker/app-tasks`,
 GitHub Packages access for this repository, and the runner before dispatch.
 
-Set these separate Actions secrets:
+Set these `PRODUCTION` environment secrets:
 
 - `COMPOSE_PROJECT_NAME`: `tasks` for a new project.
 - `CENTRAL_AUTH_CLIENT_SECRET`: the same private value as Auth's `TASKS_CLIENT_SECRET`.
 - `BETTER_AUTH_SECRET`: a separate stable application session secret, at least 32 characters.
 
-`APP_ENV` is no longer used. Public runtime configuration has versioned production
-defaults and individual optional Actions variable overrides. See the complete
+Public runtime configuration has versioned production defaults in
+`scripts/deploy.py`, with optional `PRODUCTION` environment variable overrides. See the complete
 [production settings table](docs/DEPLOYMENT.md#individual-production-settings).
 No additional variables are needed for the standard Tasks production setup.
 
@@ -529,5 +529,5 @@ was not observed. Tasks is deployed in production; see
 
 CI publishes immutable images after validation; production deployment is manual
 and selects a successful main CI run. Configure the separate
-`COMPOSE_PROJECT_NAME` Actions secret and follow [deployment operations](docs/DEPLOYMENT.md)
+`COMPOSE_PROJECT_NAME` `PRODUCTION` environment secret and follow [deployment operations](docs/DEPLOYMENT.md)
 for activation, exact run selection, persistent-data boundaries and recovery.
