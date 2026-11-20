@@ -389,5 +389,18 @@ test.describe('lists on a phone', () => {
     }
     expect(measured.page).toBe(0);
     await screenshot(page, testInfo, 'lists-phone-edit-row');
+
+    // Remove the task and the list again. tasks.spec.ts runs later as
+    // Household One, and with this task left in "No date" its edit row test
+    // that resizes the window ("sets a repeat by pointer") missed its Save
+    // click: that test depends on the rows around it.
+    await button(page, 'Cancel').click();
+    await button(page, `Delete "${title}"`).click();
+    await page.getByRole('button', { name: `Confirm deleting "${title}"`, exact: true }).click();
+    await expect(checkbox(page, title)).toHaveCount(0);
+    await openManage(page);
+    await button(page, `Delete list "${name}"`).click();
+    await page.getByRole('button', { name: `Confirm deleting list "${name}"`, exact: true }).click();
+    await expect(tab(page, name)).toHaveCount(0);
   });
 });
