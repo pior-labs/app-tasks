@@ -29,6 +29,13 @@
       "when": 1795119461506,
       "tag": "0003_sticky_fat_cobra",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1795142770474,
+      "tag": "0004_unknown_lizard",
+      "breakpoints": true
     }
   ]
 }

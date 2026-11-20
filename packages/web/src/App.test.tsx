@@ -9,8 +9,8 @@ type Reply = Response | Promise<Response> | (() => Response | Promise<Response>)
 type Call = { method: string; path: string; body: unknown };
 
 const signedInUser = { id: '1', name: 'Household One', email: 'one@example.test' };
-const milk = { id: 1, title: 'Buy oat milk', completed: false, dueDate: null, repeat: null };
-const plants = { id: 2, title: 'Water the plants', completed: true, dueDate: null, repeat: null };
+const milk = { id: 1, title: 'Buy oat milk', notes: null, completed: false, dueDate: null, repeat: null };
+const plants = { id: 2, title: 'Water the plants', notes: null, completed: true, dueDate: null, repeat: null };
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -417,7 +417,7 @@ async function startEditing(title: string) {
   await userEvent.click(await screen.findByRole('button', { name: `Edit "${title}"` }));
   return editField(title);
 }
-const tea = { id: 3, title: 'Order tea', completed: false, dueDate: null, repeat: null };
+const tea = { id: 3, title: 'Order tea', notes: null, completed: false, dueDate: null, repeat: null };
 
 describe('renaming a task', () => {
   test('saves with the Save control and shows the new title only after the server stored it', async () => {
@@ -1116,6 +1116,7 @@ describe('due dates', () => {
   const due = (id: number, title: string, dueDate: string | null, completed = false) => ({
     id,
     title,
+    notes: null,
     completed,
     dueDate,
     repeat: null,
@@ -1677,6 +1678,7 @@ describe('repeating tasks', () => {
   const task = (id: number, title: string, dueDate: string | null, repeat: Repeat = null, completed = false) => ({
     id,
     title,
+    notes: null,
     completed,
     dueDate,
     repeat,
@@ -2217,5 +2219,284 @@ describe('repeating tasks', () => {
     );
     await waitFor(() => expect(rowTitles(group('Upcoming'))).toEqual(['Bins out']));
     expect(callsTo('PATCH /api/tasks/2')).toHaveLength(1);
+  });
+});
+
+describe('notes', () => {
+  const withNotes = (notes: string | null) => ({ ...milk, notes });
+  const notesToggle = () => screen.getByRole('button', { name: 'Add notes' });
+  const addNotesField = () => screen.getByRole('textbox', { name: 'Notes' }) as HTMLTextAreaElement;
+  const editNotesField = (title: string) =>
+    screen.getByRole('textbox', { name: `Notes for "${title}"` }) as HTMLTextAreaElement;
+  // The notes shown in a row, found by their text inside the row.
+  const rowNotes = (title: string) =>
+    screen.getByRole('checkbox', { name: title }).closest('li')!.querySelector<HTMLElement>('[data-notes]');
+
+  test('"Add notes" reveals a labelled notes field after Add task; Ctrl+Enter adds with notes', async () => {
+    signedIn([]);
+    reply(
+      'POST /api/tasks',
+      json({ task: { id: 7, title: 'Call the plumber', notes: 'Kitchen tap\n  and the shower', completed: false, dueDate: null, repeat: null } }, 201),
+    );
+    render(<App />);
+    const title = (await screen.findByLabelText('New task')) as HTMLInputElement;
+    const toggle = notesToggle();
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByRole('textbox', { name: 'Notes' })).toBeNull();
+    // The toggle comes after Add task, so the existing order is unchanged.
+    const addTask = screen.getByRole('button', { name: 'Add task' });
+    expect(addTask.compareDocumentPosition(toggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await userEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    const notes = addNotesField();
+    expect(document.getElementById(toggle.getAttribute('aria-controls')!)!.contains(notes)).toBe(true);
+    await userEvent.type(title, 'Call the plumber');
+    // Enter in the notes field is a new line, not a submit.
+    await userEvent.type(notes, '  Kitchen tap{Enter}  and the shower  ');
+    expect(notes.value).toBe('  Kitchen tap\n  and the shower  ');
+    expect(callsTo('POST /api/tasks')).toHaveLength(0);
+    await userEvent.keyboard('{Control>}{Enter}{/Control}');
+
+    await waitFor(() => expect(taskTitles()).toEqual(['Call the plumber']));
+    expect(callsTo('POST /api/tasks')[0].body).toEqual({ title: 'Call the plumber', notes: 'Kitchen tap\n  and the shower' });
+    // The notes field is cleared and collapsed; focus is back in the title field.
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByRole('textbox', { name: 'Notes' })).toBeNull();
+    expect(document.activeElement).toBe(title);
+    await userEvent.click(toggle);
+    expect(addNotesField().value).toBe('');
+    expect(rowNotes('Call the plumber')!.textContent).toBe('Kitchen tap\n  and the shower');
+  });
+
+  test('Cmd+Enter also adds; empty or hidden notes are not sent', async () => {
+    signedIn([]);
+    reply(
+      'POST /api/tasks',
+      json({ task: { id: 7, title: 'First', notes: null, completed: false, dueDate: null, repeat: null } }, 201),
+      json({ task: { id: 8, title: 'Second', notes: null, completed: false, dueDate: null, repeat: null } }, 201),
+      json({ task: { id: 9, title: 'Third', notes: 'Shown', completed: false, dueDate: null, repeat: null } }, 201),
+    );
+    render(<App />);
+    const title = (await screen.findByLabelText('New task')) as HTMLInputElement;
+    // Notes with nothing visible are no notes: only the title is sent.
+    await userEvent.click(notesToggle());
+    await userEvent.type(title, 'First');
+    await userEvent.type(addNotesField(), ' {Enter}​ ');
+    await userEvent.keyboard('{Meta>}{Enter}{/Meta}');
+    await waitFor(() => expect(callsTo('POST /api/tasks')).toHaveLength(1));
+    expect(callsTo('POST /api/tasks')[0].body).toEqual({ title: 'First' });
+    await waitFor(() => expect(notesToggle().getAttribute('aria-expanded')).toBe('false'));
+
+    // Notes typed and then hidden again are kept for later, but not sent.
+    await userEvent.click(notesToggle());
+    await userEvent.type(addNotesField(), 'Hidden');
+    await userEvent.click(notesToggle());
+    await userEvent.type(title, 'Second{Enter}');
+    await waitFor(() => expect(callsTo('POST /api/tasks')).toHaveLength(2));
+    expect(callsTo('POST /api/tasks')[1].body).toEqual({ title: 'Second' });
+    await waitFor(() => expect(taskTitles()).toEqual(['Second', 'First']));
+
+    await userEvent.click(notesToggle());
+    await userEvent.type(addNotesField(), 'Shown');
+    await userEvent.type(title, 'Third{Enter}');
+    await waitFor(() => expect(callsTo('POST /api/tasks')).toHaveLength(3));
+    expect(callsTo('POST /api/tasks')[2].body).toEqual({ title: 'Third', notes: 'Shown' });
+  });
+
+  test('over-limit notes in the add form show an error on the field and send nothing', async () => {
+    const emoji = '\u{1F600}';
+    signedIn([]);
+    reply(
+      'POST /api/tasks',
+      json({ task: { id: 7, title: 'Long', notes: emoji.repeat(5000), completed: false, dueDate: null, repeat: null } }, 201),
+    );
+    render(<App />);
+    const title = (await screen.findByLabelText('New task')) as HTMLInputElement;
+    await userEvent.type(title, 'Long');
+    await userEvent.click(notesToggle());
+    const notes = addNotesField();
+    const cases: [string, string][] = [
+      ['x'.repeat(5001), 'Notes can be at most 5000 characters.'],
+      [emoji.repeat(5001), 'Notes can be at most 5000 characters.'],
+      ['a\u0000b', 'Notes cannot contain a null character.'],
+    ];
+    for (const [value, message] of cases) {
+      fireEvent.change(notes, { target: { value } });
+      await userEvent.click(screen.getByRole('button', { name: 'Add task' }));
+      const alert = screen.getByRole('alert');
+      expect(alert.textContent).toBe(message);
+      expect(notes.getAttribute('aria-invalid')).toBe('true');
+      expect(notes.getAttribute('aria-describedby')).toBe(alert.id);
+      expect(title.getAttribute('aria-invalid')).toBeNull();
+    }
+    expect(callsTo('POST /api/tasks')).toHaveLength(0);
+    // Typing clears the error; 5000 characters counted as code points is fine.
+    fireEvent.change(notes, { target: { value: ` ${emoji.repeat(5000)} ` } });
+    expect(notes.getAttribute('aria-invalid')).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'Add task' }));
+    await waitFor(() => expect(callsTo('POST /api/tasks')).toHaveLength(1));
+    expect(callsTo('POST /api/tasks')[0].body).toEqual({ title: 'Long', notes: emoji.repeat(5000) });
+  });
+
+  test('a server notes error in the add form is shown on the notes field', async () => {
+    signedIn([]);
+    reply('POST /api/tasks', json({ error: 'invalid_notes', message: 'Notes must be text of at most 5000 characters, or null.' }, 400));
+    render(<App />);
+    await userEvent.type(await screen.findByLabelText('New task'), 'Milk');
+    await userEvent.click(notesToggle());
+    await userEvent.type(addNotesField(), 'Two litres');
+    await userEvent.click(screen.getByRole('button', { name: 'Add task' }));
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe('Notes must be text of at most 5000 characters, or null.');
+    expect(addNotesField().getAttribute('aria-invalid')).toBe('true');
+    expect(addNotesField().getAttribute('aria-describedby')).toBe(alert.id);
+    expect(addNotesField().value).toBe('Two litres');
+  });
+
+  test('the edit row prefills notes after the repeat controls; Enter is a new line and Ctrl+Enter saves only the notes', async () => {
+    signedIn([withNotes('Two litres')]);
+    const save = pending();
+    reply('PATCH /api/tasks/1', save.response);
+    render(<App />);
+    const title = await startEditing('Buy oat milk');
+    const notes = editNotesField('Buy oat milk');
+    expect(notes.value).toBe('Two litres');
+    // After the date and repeat controls, before Save.
+    const date = screen.getByLabelText('Due date for "Buy oat milk"');
+    expect(date.compareDocumentPosition(notes) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(notes.compareDocumentPosition(button('Save')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(title.compareDocumentPosition(notes) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await userEvent.click(notes);
+    await userEvent.keyboard('{Enter}of oat milk');
+    expect(notes.value).toBe('Two litres\nof oat milk');
+    expect(callsTo('PATCH /api/tasks/1')).toHaveLength(0);
+    await userEvent.keyboard('{Control>}{Enter}{/Control}');
+
+    // Read-only while saving, like the other fields; Escape is ignored then.
+    expect(notes.readOnly).toBe(true);
+    expect(notes.disabled).toBe(false);
+    await userEvent.keyboard('{Escape}');
+    expect(callsTo('PATCH /api/tasks/1')).toHaveLength(1);
+    expect(callsTo('PATCH /api/tasks/1')[0].body).toEqual({ notes: 'Two litres\nof oat milk' });
+    save.finish(json({ task: withNotes('Two litres\nof oat milk') }));
+    await waitFor(() => expect(document.activeElement).toBe(button('Edit "Buy oat milk"')));
+    expect(rowNotes('Buy oat milk')!.textContent).toBe('Two litres\nof oat milk');
+  });
+
+  test('the edit row sends notes only when they changed, null when emptied, and Escape cancels', async () => {
+    signedIn([withNotes('Two litres')]);
+    reply('PATCH /api/tasks/1', json({ task: { ...withNotes('Two litres'), title: 'Buy soy milk' } }));
+    reply('PATCH /api/tasks/1', json({ task: { ...withNotes(null), title: 'Buy soy milk' } }));
+    render(<App />);
+
+    // Only spacing at the ends changed: no change, no request.
+    await startEditing('Buy oat milk');
+    await userEvent.type(editNotesField('Buy oat milk'), '  {Enter} ');
+    await userEvent.click(button('Save'));
+    expect(calls.filter((call) => call.method !== 'GET')).toEqual([]);
+    await waitFor(() => expect(document.activeElement).toBe(button('Edit "Buy oat milk"')));
+
+    // Escape cancels a notes change without a request.
+    await startEditing('Buy oat milk');
+    await userEvent.type(editNotesField('Buy oat milk'), ' thrown away{Escape}');
+    expect(calls.filter((call) => call.method !== 'GET')).toEqual([]);
+    expect(rowNotes('Buy oat milk')!.textContent).toBe('Two litres');
+    expect(document.activeElement).toBe(button('Edit "Buy oat milk"'));
+
+    // A title change alone sends only the title.
+    const field = await startEditing('Buy oat milk');
+    expect(editNotesField('Buy oat milk').value).toBe('Two litres');
+    await userEvent.clear(field);
+    await userEvent.type(field, 'Buy soy milk{Enter}');
+    await waitFor(() => expect(callsTo('PATCH /api/tasks/1')).toHaveLength(1));
+    expect(callsTo('PATCH /api/tasks/1')[0].body).toEqual({ title: 'Buy soy milk' });
+
+    // Emptied notes are sent as null.
+    await waitFor(() => expect(button('Edit "Buy soy milk"')).toBeTruthy());
+    await startEditing('Buy soy milk');
+    await userEvent.clear(editNotesField('Buy soy milk'));
+    await userEvent.click(button('Save'));
+    await waitFor(() => expect(callsTo('PATCH /api/tasks/1')).toHaveLength(2));
+    expect(callsTo('PATCH /api/tasks/1')[1].body).toEqual({ notes: null });
+    await waitFor(() => expect(rowNotes('Buy soy milk')).toBeNull());
+  });
+
+  test('notes errors in the edit row stay on the notes field', async () => {
+    signedIn([withNotes('Two litres')]);
+    reply('PATCH /api/tasks/1', json({ error: 'invalid_notes', message: 'Notes cannot contain a null character.' }, 400));
+    render(<App />);
+    await startEditing('Buy oat milk');
+    const notes = editNotesField('Buy oat milk');
+
+    // Over the limit: refused before any request.
+    fireEvent.change(notes, { target: { value: 'x'.repeat(5001) } });
+    await userEvent.click(button('Save'));
+    let alert = screen.getByRole('alert');
+    expect(alert.textContent).toBe('Notes can be at most 5000 characters.');
+    expect(notes.getAttribute('aria-invalid')).toBe('true');
+    expect(notes.getAttribute('aria-describedby')).toBe(alert.id);
+    expect(editField('Buy oat milk').getAttribute('aria-invalid')).toBeNull();
+    expect(callsTo('PATCH /api/tasks/1')).toHaveLength(0);
+
+    // The server's notes error is shown on the notes field, with the typed text kept.
+    fireEvent.change(notes, { target: { value: 'Three litres' } });
+    expect(notes.getAttribute('aria-invalid')).toBeNull();
+    await userEvent.click(button('Save'));
+    alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe('Notes cannot contain a null character.');
+    expect(notes.getAttribute('aria-invalid')).toBe('true');
+    expect(notes.getAttribute('aria-describedby')).toBe(alert.id);
+    expect(notes.value).toBe('Three litres');
+  });
+
+  test('notes show as plain text with their line breaks, muted when completed, outside the checkbox description', async () => {
+    const markup = '<b>bold</b> and **stars**\nhttps://example.test/page\n\n  indented';
+    signedIn([
+      { ...milk, notes: markup, dueDate: '2026-11-20' },
+      { ...plants, notes: 'Done notes' },
+      tea,
+    ]);
+    render(<App />);
+    const notes = await waitFor(() => rowNotes('Buy oat milk')!);
+    expect(notes.textContent).toBe(markup);
+    expect(notes.querySelector('b, a, strong')).toBeNull();
+    expect(screen.queryByRole('link')).toBeNull();
+    expect(notes.className).toContain('whitespace-pre-wrap');
+    expect(notes.className).toContain('max-h-40');
+    expect(notes.className).toContain('overflow-y-auto');
+    expect(notes.className).not.toContain('text-muted-foreground');
+    // Short notes add no Tab stop and no region (jsdom lays nothing out, so nothing overflows).
+    expect(notes.getAttribute('tabindex')).toBeNull();
+    expect(notes.getAttribute('role')).toBeNull();
+    // The checkbox is still described by the due date line only.
+    const checkbox = screen.getByRole('checkbox', { name: 'Buy oat milk' });
+    expect(document.getElementById(checkbox.getAttribute('aria-describedby')!)!.textContent).not.toContain('bold');
+    // A task without notes shows none.
+    expect(rowNotes('Order tea')).toBeNull();
+    await expandCompleted();
+    expect(rowNotes('Water the plants')!.className).toContain('text-muted-foreground');
+  });
+
+  test('notes taller than the cap become a focusable region named after the task', async () => {
+    // jsdom has no layout: long notes report a scroll height over their box.
+    const scrollHeight = vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.hasAttribute('data-notes') && (this.textContent ?? '').length > 100 ? 600 : 0;
+    });
+    const clientHeight = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.hasAttribute('data-notes') && (this.textContent ?? '').length > 100 ? 160 : 0;
+    });
+    onTestFinished(() => {
+      scrollHeight.mockRestore();
+      clientHeight.mockRestore();
+    });
+    signedIn([withNotes('line\n'.repeat(40)), { ...tea, notes: 'Short' }]);
+    render(<App />);
+    const region = await screen.findByRole('region', { name: 'Notes for "Buy oat milk"' });
+    expect(region.getAttribute('tabindex')).toBe('0');
+    expect(region).toBe(rowNotes('Buy oat milk'));
+    expect(rowNotes('Order tea')!.getAttribute('tabindex')).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Notes for "Order tea"' })).toBeNull();
   });
 });

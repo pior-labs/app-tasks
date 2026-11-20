@@ -1,13 +1,23 @@
-import type { FormEvent, KeyboardEvent, Ref, SyntheticEvent } from 'react';
+import {
+  type FormEvent,
+  type KeyboardEvent,
+  type Ref,
+  type SyntheticEvent,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
 import { MAX_DUE_DATE, MIN_DUE_DATE, dueLabel, dueStatus, holdsNoDate } from './dueDate';
 import { RepeatControl, RepeatHint } from './RepeatControl';
 import { type Repeat, type RepeatForm, repeatLabel } from './repeat';
 
 // dueDate is a calendar day, "YYYY-MM-DD", or null for no due date. repeat is
 // null for a task that does not repeat; only a task with a due date repeats.
+// notes is plain text, or null for none.
 export type Task = {
   id: number;
   title: string;
+  notes: string | null;
   completed: boolean;
   dueDate: string | null;
   repeat: Repeat | null;
@@ -17,15 +27,17 @@ export type Task = {
 // and only one asks for a delete confirmation at a time; Tasks owns that state.
 export type RowMode =
   | { kind: 'view' }
-  // dueDate is the date field's value: "YYYY-MM-DD", or empty for none. The
-  // error belongs to the field named by errorField.
+  // dueDate is the date field's value: "YYYY-MM-DD", or empty for none. notes
+  // is the notes field's value, empty for none. The error belongs to the field
+  // named by errorField.
   | {
       kind: 'edit';
       text: string;
       dueDate: string;
       repeat: RepeatForm;
+      notes: string;
       error: string;
-      errorField: 'title' | 'dueDate' | 'repeat';
+      errorField: 'title' | 'dueDate' | 'repeat' | 'notes';
       saving: boolean;
     }
   | { kind: 'confirm-delete'; deleting: boolean };
@@ -52,6 +64,7 @@ type Props = {
   onDueDateEmptied: () => void;
   onRemoveDueDate: () => void;
   onEditRepeat: (repeat: RepeatForm) => void;
+  onEditNotes: (notes: string) => void;
   onSave: () => void;
   onCancelEdit: () => void;
   onStartDelete: () => void;
@@ -67,6 +80,48 @@ const escapeTo = (cancel: () => void) => (event: KeyboardEvent) => {
     cancel();
   }
 };
+
+// In a notes field Enter is a new line, so Ctrl+Enter (Cmd+Enter on a Mac)
+// submits the form instead, as Enter does in the one-line fields.
+export const submitOnModEnter = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+    event.preventDefault();
+    event.currentTarget.form?.requestSubmit();
+  }
+};
+
+// A task's notes in its row: plain text with its line breaks, never parsed as
+// Markdown or HTML. Long notes are capped at a fixed height (max-h-40) and
+// scroll. Only notes that actually overflow the cap become a focusable, named
+// region, so keyboard users can scroll them; short notes add no Tab stop. The
+// overflow is measured after each render and whenever the box is resized.
+function TaskNotes({ title, notes, completed }: { title: string; notes: string; completed: boolean }) {
+  const box = useRef<HTMLDivElement>(null);
+  const [overflowing, setOverflowing] = useState(false);
+  useLayoutEffect(() => {
+    const element = box.current;
+    if (!element) return;
+    const measure = () => setOverflowing(element.scrollHeight > element.clientHeight);
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [notes]);
+  return (
+    <div
+      ref={box}
+      data-notes
+      {...(overflowing ? { tabIndex: 0, role: 'region', 'aria-label': `Notes for "${title}"` } : {})}
+      // Indented like the due date line, to line up with the title.
+      className={`ml-8 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-sm text-sm ${
+        completed ? 'text-muted-foreground' : ''
+      }`}
+    >
+      {notes}
+    </div>
+  );
+}
 
 const rowButton =
   'shrink-0 rounded-md border border-border px-3 py-1.5 text-sm font-medium aria-disabled:opacity-50';
@@ -91,6 +146,7 @@ export function TaskRow({
   onDueDateEmptied,
   onRemoveDueDate,
   onEditRepeat,
+  onEditNotes,
   onSave,
   onCancelEdit,
   onStartDelete,
@@ -102,6 +158,7 @@ export function TaskRow({
     const titleError = mode.error !== '' && mode.errorField === 'title';
     const dueDateError = mode.error !== '' && mode.errorField === 'dueDate';
     const repeatError = mode.error !== '' && mode.errorField === 'repeat';
+    const notesError = mode.error !== '' && mode.errorField === 'notes';
     const fieldClass =
       'rounded-md border border-border bg-card px-3 py-1.5 text-card-foreground';
     const checkEmptied = (event: SyntheticEvent<HTMLInputElement>) => {
@@ -173,6 +230,21 @@ export function TaskRow({
             className={fieldClass}
             onChange={onEditRepeat}
           />
+          {mode.dueDate === '' && <RepeatHint idBase={`task-${task.id}`} className="basis-full text-right" />}
+          {/* Full width, after the date and repeat and before Save in Tab order. */}
+          <textarea
+            data-action="edit-notes"
+            aria-label={`Notes for "${task.title}"`}
+            placeholder="Notes"
+            value={mode.notes}
+            onChange={(event) => onEditNotes(event.target.value)}
+            onKeyDown={submitOnModEnter}
+            readOnly={mode.saving}
+            rows={3}
+            aria-invalid={notesError || undefined}
+            aria-describedby={notesError ? errorId : undefined}
+            className={`${fieldClass} basis-full read-only:opacity-60`}
+          />
           <button
             type="submit"
             data-action="save"
@@ -190,7 +262,6 @@ export function TaskRow({
           >
             Cancel
           </button>
-          {mode.dueDate === '' && <RepeatHint idBase={`task-${task.id}`} className="basis-full text-right" />}
           {mode.error && (
             <p id={errorId} role="alert" className="basis-full text-sm text-destructive">
               {mode.error}
@@ -245,6 +316,9 @@ export function TaskRow({
               </>
             )}
           </p>
+        )}
+        {task.notes !== null && (
+          <TaskNotes title={task.title} notes={task.notes} completed={task.completed} />
         )}
       </div>
       {mode.kind === 'confirm-delete' ? (
