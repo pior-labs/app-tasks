@@ -1133,6 +1133,67 @@ test.describe('repeating tasks, more edges west of UTC', () => {
     await page.keyboard.press('Escape');
   });
 
+  // R3-F1: Backspace empties the focused part of a date field (month, day,
+  // year) and the arrow moves to the next part. Once the first part is empty
+  // the field holds a partly typed date; once all are, it holds no date.
+  const dateState = (field: ReturnType<Page['getByLabel']>) =>
+    field.evaluate((element) => ({
+      value: (element as HTMLInputElement).value,
+      partial: (element as HTMLInputElement).validity.badInput,
+    }));
+  async function clearDateParts(
+    page: Page,
+    field: ReturnType<Page['getByLabel']>,
+    repeats: ReturnType<Page['getByRole']>,
+  ) {
+    await field.focus();
+    await page.keyboard.press('Backspace');
+    // Partly typed: no date, so the select is disabled, but the choice is kept.
+    expect(await dateState(field)).toEqual({ value: '', partial: true });
+    await expect(repeats).toBeDisabled();
+    await expect(repeats).toHaveValue('weekly');
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('Backspace');
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('Backspace');
+    // Every part is empty. The browser fires no input or change event for
+    // this last step.
+    expect(await dateState(field)).toEqual({ value: '', partial: false });
+    await expect(repeats).toBeDisabled();
+    await expect(repeats).toHaveValue('none');
+    await expect(repeats).toHaveAccessibleDescription('Set a due date to repeat');
+  }
+
+  test('the add form resets the repeat when the date is cleared one part at a time (R3-F1)', async ({ page }) => {
+    await signIn(page, 'Household One');
+    const bodies = recordBodies(page);
+    const date = page.getByLabel('Due date', { exact: true });
+    await page.getByLabel('New task').fill('Parts: water the ferns');
+    await date.fill('2026-11-24');
+    await addRepeats(page).selectOption({ label: 'Weekly' });
+    await clearDateParts(page, date, addRepeats(page));
+    // Typing a date again starts from "Does not repeat", and so does the task.
+    await date.fill('2026-11-24');
+    await expect(addRepeats(page)).toBeEnabled();
+    await expect(addRepeats(page)).toHaveValue('none');
+    await page.getByRole('button', { name: 'Add task' }).click();
+    await expect(checkbox(page, 'Parts: water the ferns')).toBeVisible();
+    expect(bodies).toEqual([{ method: 'POST', body: { title: 'Parts: water the ferns', dueDate: '2026-11-24' } }]);
+  });
+
+  test('the edit row resets the repeat when the date is cleared one part at a time (R3-F1)', async ({ page }) => {
+    await signIn(page, 'Household One');
+    await addRepeatingTask(page, 'Parts: oil the hinges', '2026-11-24', 'Weekly');
+    const bodies = recordPatchBodies(page);
+    await editButton(page, 'Parts: oil the hinges').click();
+    const repeats = rowRepeats(page, 'Parts: oil the hinges');
+    await expect(repeats).toHaveValue('weekly');
+    await clearDateParts(page, dueDateField(page, 'Parts: oil the hinges'), repeats);
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(groupList(page, 'No date').getByText('Parts: oil the hinges')).toBeVisible();
+    expect(bodies).toEqual([{ dueDate: null, repeat: null }]);
+  });
+
   test('rapid repeated ticks complete the task once and create one next occurrence', async ({ page }) => {
     await signIn(page, 'Household One');
     const bodies = recordPatchBodies(page);

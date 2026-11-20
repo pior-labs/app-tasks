@@ -1977,6 +1977,61 @@ describe('repeating tasks', () => {
     expect(rowTitles(group('Upcoming'))).toEqual(['editing: Bins out']);
   });
 
+  // R3-F1: Chromium reports a partly typed date as value '' with badInput.
+  // When the last part is emptied, badInput turns false with no input or
+  // change event, so the value React tracks stays ''. jsdom has no date
+  // parts, so these tests set badInput themselves and send only the events
+  // Chromium sends. The returned function empties the last part.
+  function typePartOfDate(field: HTMLInputElement) {
+    let partial = true;
+    Object.defineProperty(field, 'validity', { configurable: true, get: () => ({ badInput: partial }) });
+    fireEvent.change(field, { target: { value: '' } });
+    return () => {
+      partial = false;
+    };
+  }
+
+  test('the add form resets the repeat once a date emptied part by part has no part left (R3-F1)', async () => {
+    signedIn([]);
+    render(<App />);
+    await screen.findByLabelText('New task');
+    const date = screen.getByLabelText('Due date') as HTMLInputElement;
+    // The reset comes with the key that emptied the last part, or on leaving the field.
+    for (const finish of [() => fireEvent.keyUp(date, { key: 'Backspace' }), () => fireEvent.blur(date)]) {
+      fireEvent.change(date, { target: { value: '2026-11-24' } });
+      await userEvent.selectOptions(select('Repeats'), 'weekly');
+      const emptyLastPart = typePartOfDate(date);
+      // Partly typed: disabled, the choice kept.
+      expect(select('Repeats').value).toBe('weekly');
+      expect(select('Repeats').disabled).toBe(true);
+      emptyLastPart();
+      finish();
+      expect(select('Repeats').value).toBe('none');
+      expect(select('Repeats').disabled).toBe(true);
+      Reflect.deleteProperty(date, 'validity');
+    }
+  });
+
+  test('the edit row resets the repeat once a date emptied part by part has no part left (R3-F1)', async () => {
+    signedIn([task(4, 'Bins out', '2026-11-24', weekly)]);
+    render(<App />);
+    await startEditing('Bins out');
+    const date = screen.getByLabelText('Due date for "Bins out"') as HTMLInputElement;
+    for (const finish of [() => fireEvent.keyUp(date, { key: 'Delete' }), () => fireEvent.blur(date)]) {
+      fireEvent.change(date, { target: { value: '2026-11-24' } });
+      await userEvent.selectOptions(select('Repeats for "Bins out"'), 'weekly');
+      const emptyLastPart = typePartOfDate(date);
+      expect(select('Repeats for "Bins out"').value).toBe('weekly');
+      expect(select('Repeats for "Bins out"').disabled).toBe(true);
+      emptyLastPart();
+      finish();
+      expect(select('Repeats for "Bins out"').value).toBe('none');
+      expect(select('Repeats for "Bins out"').disabled).toBe(true);
+      Reflect.deleteProperty(date, 'validity');
+    }
+    expect(callsTo('PATCH /api/tasks/4')).toHaveLength(0);
+  });
+
   test('the Repeats controls are disabled without a date and keep the aria-disabled lock while pending (D-11)', async () => {
     signedIn([task(4, 'Bins out', '2026-11-24', { every: 2, unit: 'week' })]);
     const save = pending();

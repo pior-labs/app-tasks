@@ -107,6 +107,14 @@ export function nextIsBeyond(dueDate: string, today: string, repeat: Repeat, lim
   }
 }
 
+// The repeat controls once the due date is removed (D-2): no repeat. A form
+// that already has none is returned as it is, so nothing re-renders.
+export function withoutRepeat(form: RepeatForm): RepeatForm {
+  return form.choice === 'none' && form.every === NO_REPEAT.every && form.unit === NO_REPEAT.unit
+    ? form
+    : NO_REPEAT;
+}
+
 export function sameRepeat(a: Repeat | null | undefined, b: Repeat | null | undefined) {
   return (a ?? null) === (b ?? null) || (!!a && !!b && a.every === b.every && a.unit === b.unit);
 }

@@ -5,6 +5,7 @@ import {
   MIN_DUE_DATE,
   dueDateProblem,
   dueLabel,
+  holdsNoDate,
   localDate,
   msUntilNextLocalMidnight,
 } from './dueDate';
@@ -17,6 +18,7 @@ import {
   repeatForm,
   repeatFromForm,
   sameRepeat,
+  withoutRepeat,
 } from './repeat';
 import { type RowMode, type Task, TaskRow } from './TaskRow';
 import { groupTasks, visibleTasks } from './taskGroups';
@@ -618,6 +620,13 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
             : current,
         )
       }
+      onDueDateEmptied={() =>
+        setEditing((current) => {
+          if (current?.id !== task.id || savingRef.current || current.dueDate !== '') return current;
+          const repeat = withoutRepeat(current.repeat);
+          return repeat === current.repeat ? current : { ...current, repeat };
+        })
+      }
       onEditRepeat={(value) =>
         setEditing((current) =>
           current?.id === task.id && !savingRef.current ? { ...current, repeat: value, error: '' } : current,
@@ -678,8 +687,16 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
               onChange={(event) => {
                 setDueDate(event.target.value);
                 // Removing the date resets the repeat; a partly typed date does not.
-                if (event.target.value === '' && !event.target.validity?.badInput) setRepeat(NO_REPEAT);
+                if (holdsNoDate(event.target)) setRepeat(NO_REPEAT);
                 setCreateError(null);
+              }}
+              // Emptying the last part of a date fires no change event, so the
+              // key that did it, or leaving the field, resets the repeat.
+              onKeyUp={(event) => {
+                if (holdsNoDate(event.currentTarget)) setRepeat(withoutRepeat);
+              }}
+              onBlur={(event) => {
+                if (holdsNoDate(event.currentTarget)) setRepeat(withoutRepeat);
               }}
               readOnly={creating}
               aria-invalid={createError?.field === 'dueDate' || undefined}

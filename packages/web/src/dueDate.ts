@@ -36,6 +36,14 @@ export function msUntilNextLocalMidnight(moment: Date): number {
   return Math.max(0, next.getTime() - moment.getTime());
 }
 
+// Whether a date field holds no date at all, not even a partly typed one.
+// Chromium reports a partly typed date as value '' with badInput. When the
+// last part is emptied with the keyboard, badInput turns off without an
+// input or change event, so the forms also check on keyup and on blur.
+export function holdsNoDate(field: HTMLInputElement): boolean {
+  return field.value === '' && !field.validity?.badInput;
+}
+
 // The client-side due date check shared by the add form and the edit row.
 // An empty value means "no due date" and is valid. Returns the message to
 // show, or an empty string.

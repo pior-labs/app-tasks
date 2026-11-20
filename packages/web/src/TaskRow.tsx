@@ -1,5 +1,5 @@
-import type { FormEvent, KeyboardEvent, Ref } from 'react';
-import { MAX_DUE_DATE, MIN_DUE_DATE, dueLabel, dueStatus } from './dueDate';
+import type { FormEvent, KeyboardEvent, Ref, SyntheticEvent } from 'react';
+import { MAX_DUE_DATE, MIN_DUE_DATE, dueLabel, dueStatus, holdsNoDate } from './dueDate';
 import { RepeatControl, RepeatHint } from './RepeatControl';
 import { type Repeat, type RepeatForm, repeatLabel } from './repeat';
 
@@ -47,6 +47,9 @@ type Props = {
   onEditText: (text: string) => void;
   // badInput: the field holds a partly typed date, which is not "no date".
   onEditDueDate: (dueDate: string, badInput: boolean) => void;
+  // The date field holds no date, found on keyup or blur: emptying its last
+  // part fires no change event.
+  onDueDateEmptied: () => void;
   onRemoveDueDate: () => void;
   onEditRepeat: (repeat: RepeatForm) => void;
   onSave: () => void;
@@ -85,6 +88,7 @@ export function TaskRow({
   onStartEdit,
   onEditText,
   onEditDueDate,
+  onDueDateEmptied,
   onRemoveDueDate,
   onEditRepeat,
   onSave,
@@ -100,6 +104,9 @@ export function TaskRow({
     const repeatError = mode.error !== '' && mode.errorField === 'repeat';
     const fieldClass =
       'rounded-md border border-border bg-card px-3 py-1.5 text-card-foreground';
+    const checkEmptied = (event: SyntheticEvent<HTMLInputElement>) => {
+      if (holdsNoDate(event.currentTarget)) onDueDateEmptied();
+    };
     const submit = (event: FormEvent) => {
       event.preventDefault();
       onSave();
@@ -131,6 +138,8 @@ export function TaskRow({
             min={MIN_DUE_DATE}
             max={MAX_DUE_DATE}
             onChange={(event) => onEditDueDate(event.target.value, event.target.validity?.badInput ?? false)}
+            onKeyUp={checkEmptied}
+            onBlur={checkEmptied}
             readOnly={mode.saving}
             aria-invalid={dueDateError || undefined}
             aria-describedby={dueDateError ? errorId : undefined}
