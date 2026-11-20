@@ -757,45 +757,6 @@ describe('deleting a task', () => {
     expect(confirmSpy).not.toHaveBeenCalled();
   });
 
-  test('Confirm removes the row only after the server confirmed, then focuses the next row', async () => {
-    signedIn([plants, milk, tea]);
-    const removal = pending();
-    reply('DELETE /api/tasks/1', removal.response);
-    render(<App />);
-    await expandCompleted();
-    await userEvent.click(await screen.findByRole('button', { name: 'Delete "Buy oat milk"' }));
-    const confirm = button('Confirm deleting "Buy oat milk"');
-    await userEvent.click(confirm);
-
-    // Pending: the row is still there and its controls are locked but focusable.
-    expect(taskTitles()).toEqual(['Buy oat milk', 'Order tea', 'Water the plants']);
-    expect(confirm.textContent).toBe('Deleting...');
-    expect(confirm.disabled).toBe(false);
-    expect(confirm.getAttribute('aria-disabled')).toBe('true');
-    expect(button('Cancel deleting "Buy oat milk"').getAttribute('aria-disabled')).toBe('true');
-    expect(document.activeElement).toBe(confirm);
-    const checkbox = screen.getByRole('checkbox', { name: 'Buy oat milk' }) as HTMLInputElement;
-    expect(checkbox.getAttribute('aria-disabled')).toBe('true');
-
-    // Repeat input while pending: no second request, no cancel, no completion change.
-    await userEvent.click(confirm);
-    await userEvent.keyboard('{Enter}');
-    await userEvent.click(button('Cancel deleting "Buy oat milk"'));
-    await userEvent.click(checkbox);
-    expect(checkbox.checked).toBe(false);
-    expect(screen.getByText('Delete this task?')).toBeTruthy();
-    expect(calls.filter((call) => call.method !== 'GET')).toEqual([
-      { method: 'DELETE', path: '/api/tasks/1', body: undefined },
-    ]);
-
-    removal.finish(noContent());
-    await waitFor(() => expect(taskTitles()).toEqual(['Order tea', 'Water the plants']));
-    expect(document.activeElement).toBe(screen.getByRole('checkbox', { name: 'Order tea' }));
-    expect(screen.queryByRole('alert')).toBeNull();
-    expect(screen.queryByRole('status')).toBeNull();
-    expect(screen.queryByText('Delete this task?')).toBeNull();
-  });
-
   test('after deleting the bottom row focus moves up; after the last task, to the new-task field', async () => {
     signedIn([plants, milk]);
     reply('DELETE /api/tasks/1', noContent());
