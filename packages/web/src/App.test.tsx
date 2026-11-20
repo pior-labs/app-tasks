@@ -2521,4 +2521,36 @@ describe('notes', () => {
     expect(rowNotes('Order tea')!.getAttribute('tabindex')).toBeNull();
     expect(screen.queryByRole('region', { name: 'Notes for "Order tea"' })).toBeNull();
   });
+
+  test('overflowing notes show a bottom fade cue until scrolled to the end', async () => {
+    const scrollHeight = vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.hasAttribute('data-notes') && (this.textContent ?? '').length > 100 ? 600 : 0;
+    });
+    const clientHeight = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.hasAttribute('data-notes') && (this.textContent ?? '').length > 100 ? 160 : 0;
+    });
+    onTestFinished(() => {
+      scrollHeight.mockRestore();
+      clientHeight.mockRestore();
+    });
+    signedIn([withNotes('line\n'.repeat(40)), { ...tea, notes: 'Short' }]);
+    render(<App />);
+    const region = await screen.findByRole('region', { name: 'Notes for "Buy oat milk"' });
+    // Overflowing and at the top: more text below.
+    expect(region.hasAttribute('data-notes-more')).toBe(true);
+    // Short notes never show the cue.
+    expect(rowNotes('Order tea')!.hasAttribute('data-notes-more')).toBe(false);
+    // Part way down: still more below.
+    region.scrollTop = 200;
+    fireEvent.scroll(region);
+    expect(region.hasAttribute('data-notes-more')).toBe(true);
+    // At the end (within a pixel or two): the cue is gone.
+    region.scrollTop = 439;
+    fireEvent.scroll(region);
+    expect(region.hasAttribute('data-notes-more')).toBe(false);
+    // Back up: the cue returns.
+    region.scrollTop = 0;
+    fireEvent.scroll(region);
+    expect(region.hasAttribute('data-notes-more')).toBe(true);
+  });
 });

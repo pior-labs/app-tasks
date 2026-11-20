@@ -1425,6 +1425,7 @@ test.describe('notes', () => {
     expect(await shortNotes.evaluate((element) => element.scrollHeight <= element.clientHeight)).toBe(true);
     await expect(shortNotes).not.toHaveAttribute('tabindex');
     await expect(shortNotes).not.toHaveAttribute('role');
+    await expect(shortNotes).not.toHaveAttribute('data-notes-more');
     await checkbox(page, short).focus();
     await page.keyboard.press('Tab');
     await expect(editButton(page, short)).toBeFocused();
@@ -1446,9 +1447,14 @@ test.describe('notes', () => {
     await checkbox(page, long).focus();
     await page.keyboard.press('Tab');
     await expect(region).toBeFocused();
-    // The keyboard scrolls it.
+    // A bottom fade cues that more text is below, even with overlay scroll bars.
+    await expect(region).toHaveAttribute('data-notes-more');
+    expect(await region.evaluate((element) => getComputedStyle(element).maskImage)).toContain('linear-gradient');
+    // The keyboard scrolls it; at the end the fade is gone.
     await page.keyboard.press('End');
     await expect.poll(() => region.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+    await expect(region).not.toHaveAttribute('data-notes-more');
+    expect(await region.evaluate((element) => getComputedStyle(element).maskImage)).toBe('none');
     await page.keyboard.press('Tab');
     await expect(editButton(page, long)).toBeFocused();
     await page.evaluate(() => window.scrollTo(0, 0));
@@ -1468,6 +1474,21 @@ test.describe('notes', () => {
       await expect(shortNotes).not.toHaveAttribute('tabindex');
       await region.scrollIntoViewIfNeeded();
       await screenshot(page, testInfo, name);
+    }
+
+    // The fade at the top and at the end of the long note, at both widths.
+    for (const [name, width] of [
+      ['notes-fade-narrow', 390],
+      ['notes-fade-wide', 1280],
+    ] as const) {
+      await page.setViewportSize({ width, height: 1000 });
+      await region.evaluate((element) => element.scrollTo(0, 0));
+      await expect(region).toHaveAttribute('data-notes-more');
+      await region.scrollIntoViewIfNeeded();
+      await screenshot(page, testInfo, `${name}-top`);
+      await region.evaluate((element) => element.scrollTo(0, element.scrollHeight));
+      await expect(region).not.toHaveAttribute('data-notes-more');
+      await screenshot(page, testInfo, `${name}-end`);
     }
   });
 

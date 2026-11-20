@@ -95,13 +95,22 @@ export const submitOnModEnter = (event: KeyboardEvent<HTMLTextAreaElement>) => {
 // scroll. Only notes that actually overflow the cap become a focusable, named
 // region, so keyboard users can scroll them; short notes add no Tab stop. The
 // overflow is measured after each render and whenever the box is resized.
+// While the notes overflow and are not scrolled to the end, data-notes-more
+// fades out their bottom edge (see index.css), a cue that works with overlay
+// scroll bars that are not drawn until the box is scrolled.
 function TaskNotes({ title, notes, completed }: { title: string; notes: string; completed: boolean }) {
   const box = useRef<HTMLDivElement>(null);
   const [overflowing, setOverflowing] = useState(false);
+  const [more, setMore] = useState(false);
   useLayoutEffect(() => {
     const element = box.current;
     if (!element) return;
-    const measure = () => setOverflowing(element.scrollHeight > element.clientHeight);
+    const measure = () => {
+      const overflows = element.scrollHeight > element.clientHeight;
+      setOverflowing(overflows);
+      // Within 2px of the bottom counts as the end (scrollTop can be fractional).
+      setMore(overflows && element.scrollHeight - element.clientHeight - element.scrollTop > 2);
+    };
     measure();
     if (typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver(measure);
@@ -112,6 +121,11 @@ function TaskNotes({ title, notes, completed }: { title: string; notes: string; 
     <div
       ref={box}
       data-notes
+      onScroll={() => {
+        const element = box.current;
+        if (element) setMore(element.scrollHeight - element.clientHeight - element.scrollTop > 2);
+      }}
+      {...(more ? { 'data-notes-more': '' } : {})}
       {...(overflowing ? { tabIndex: 0, role: 'region', 'aria-label': `Notes for "${title}"` } : {})}
       // Indented like the due date line, to line up with the title.
       className={`ml-8 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-sm text-sm ${

@@ -270,7 +270,10 @@ their line breaks, lined up with the title, and in muted text on a completed
 task; they are not part of the checkbox's description. Short notes are shown in
 full. Notes taller than 10rem (about six lines) are capped at that height with
 a vertical scroll bar, and only then the notes box is a region named
-`Notes for "<title>"` that Tab stops on, so keyboard users can scroll it. A 401 from a task
+`Notes for "<title>"` that Tab stops on, so keyboard users can scroll it. While more text is below, the bottom 2rem of the
+box fades out (a `data-notes-more` attribute), which cues the overflow where scroll bars
+are hidden until used; the fade goes when the box is scrolled to the end and is never shown for
+notes that fit. A 401 from a task
 request returns the page to the signed-out view, except after an explicit
 sign-out.
 
