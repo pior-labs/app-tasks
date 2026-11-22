@@ -1,4 +1,4 @@
-import { and, asc, count, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import type { AppEnv } from './app.js';
@@ -20,32 +20,37 @@ import {
 export const MAX_LIST_NAME_LENGTH = 50;
 // So the tab row stays usable. The web client shows the error.
 export const MAX_LISTS = 50;
-// The built-in views. A list whose name shows as one of them would look like
-// its tab, so the check compares what a person would see: letter case is
-// ignored, invisible code points (default ignorables such as a zero width
-// space, joiners, direction marks and the soft hyphen, and control
-// characters) are dropped, and any run of white space (a no-break space,
-// repeated spaces) counts as one space. Names that merely contain the words,
-// such as "Inbox zero", are allowed. Only this check uses the folded form:
-// names are stored as typed, and duplicates compare with lower() like the
-// database index. The web form folds the same way (packages/web/src/lists.ts).
+// When two list names count as the same, and whether a name is a built-in
+// view's: both compare what a person would see. The fold applies Unicode NFKC
+// (fullwidth and other compatibility forms become their plain letters), turns
+// any run of white space (a no-break space, repeated spaces) into one space,
+// drops invisible code points (default ignorables such as a zero width space,
+// joiners, direction marks and the soft hyphen, and control characters), trims,
+// and lowercases. Letters from other scripts that only look Latin are not
+// folded. Names are stored as typed; only these checks use the folded form.
+// The web form folds the same way (foldListName in packages/web/src/lists.ts).
+const foldListName = (name: string) =>
+  name
+    .normalize('NFKC')
+    .replace(/\p{White_Space}+/gu, ' ')
+    .replace(/[\p{Cc}\p{Default_Ignorable_Code_Point}]/gu, '')
+    .replace(/ +/g, ' ')
+    .trim()
+    .toLowerCase();
+// The built-in views. A list whose name folds to one of them would look like
+// its tab. Names that merely contain the words, such as "Inbox zero", are
+// allowed.
 const RESERVED_LIST_NAMES = ['inbox', 'all tasks'];
-const isReservedListName = (name: string) =>
-  RESERVED_LIST_NAMES.includes(
-    name
-      .replace(/\p{White_Space}+/gu, ' ')
-      .replace(/[\p{Cc}\p{Default_Ignorable_Code_Point}]/gu, '')
-      .replace(/ +/g, ' ')
-      .trim()
-      .toLowerCase(),
-  );
+const isReservedListName = (name: string) => RESERVED_LIST_NAMES.includes(foldListName(name));
 
 // The one definition of a valid list name, used by both create and rename. The
 // rules are those of task titles (packages/api/src/tasks.ts): trimmed, at least
 // one visible character, no U+0000, and the length in code points. The
 // database checks the same length (lists_name_length_check). Names are stored
-// as typed; uniqueness ignores letter case (lists_user_id_name_idx). The web
-// forms apply the same rules (listNameProblem in packages/web/src/lists.ts).
+// as typed. A user's names are unique by their fold (foldListName), which the
+// routes check; the database index on lower(name) (lists_user_id_name_idx)
+// stays as a backstop. The web forms apply the same rules (listNameProblem in
+// packages/web/src/lists.ts).
 const NAME_MESSAGE = 'A list name is required and must be text.';
 const listName = z
   .string({ error: NAME_MESSAGE })
@@ -82,10 +87,19 @@ const limitReached = {
   error: 'list_limit_reached',
   message: `You can have at most ${MAX_LISTS} lists. Delete one to make room.`,
 };
+// The fold decides duplicates, but PostgreSQL's lower() can fold a letter that
+// JavaScript's toLowerCase() does not (it turns a dotted capital I into a plain
+// i), so the index can still refuse a name the fold allows. That answers 409
+// too.
 const isDuplicateName = (error: unknown) => {
   const cause = databaseError(error);
   return cause?.code === '23505' && cause.constraint_name === 'lists_user_id_name_idx';
 };
+
+// Serialises one user's list creates and renames (see create).
+type Transaction = Parameters<Parameters<AppDatabase['transaction']>[0]>[0];
+const lockListsOf = (tx: Transaction, userId: number) =>
+  tx.select({ id: users.id }).from(users).where(eq(users.id, userId)).for('no key update');
 
 export function createListRoutes(db: AppDatabase, appOrigin: string) {
   const routes = new Hono<AppEnv>();
@@ -111,15 +125,17 @@ export function createListRoutes(db: AppDatabase, appOrigin: string) {
     const userId = sessionUserId(c);
     try {
       const result = await db.transaction(async (tx) => {
-        // Locking the user's row makes creates for one user run one after
-        // another, so parallel requests cannot pass the limit. This lock does
-        // not block task writes, which only take a key share on the user row.
-        await tx.select({ id: users.id }).from(users).where(eq(users.id, userId)).for('no key update');
-        const [{ lists: existing }] = await tx
-          .select({ lists: count() })
-          .from(lists)
-          .where(eq(lists.userId, userId));
-        if (existing >= MAX_LISTS) return { status: 409 as const, body: limitReached };
+        // Locking the user's row makes list creates and renames for one user
+        // run one after another, so parallel requests cannot pass the limit or
+        // add two names with the same fold. This lock does not block task
+        // writes, which only take a key share on the user row.
+        await lockListsOf(tx, userId);
+        const existing = await tx.select({ name: lists.name }).from(lists).where(eq(lists.userId, userId));
+        if (existing.length >= MAX_LISTS) return { status: 409 as const, body: limitReached };
+        const folded = foldListName(parsed.data.name);
+        if (existing.some((list) => foldListName(list.name) === folded)) {
+          return { status: 409 as const, body: duplicateName };
+        }
         const [list] = await tx.insert(lists).values({ userId, name: parsed.data.name }).returning(listColumns);
         return { status: 201 as const, body: { list } };
       });
@@ -141,14 +157,38 @@ export function createListRoutes(db: AppDatabase, appOrigin: string) {
     }
     // Unknown ids and other users' lists are indistinguishable to the caller.
     if (id > MAX_SERIAL_ID) return c.json(listNotFound, 404);
+    const userId = sessionUserId(c);
     try {
-      const [list] = await db
-        .update(lists)
-        .set({ name: parsed.data.name, updatedAt: sql`now()` })
-        .where(and(eq(lists.id, id), eq(lists.userId, sessionUserId(c))))
-        .returning(listColumns);
-      if (!list) return c.json(listNotFound, 404);
-      return c.json({ list });
+      const result = await db.transaction(async (tx) => {
+        // The same lock as create, so a rename and a create (or two renames)
+        // cannot both take one fold.
+        await lockListsOf(tx, userId);
+        const existing = await tx
+          .select({ id: lists.id, name: lists.name })
+          .from(lists)
+          .where(eq(lists.userId, userId));
+        const current = existing.find((list) => list.id === id);
+        if (!current) return { status: 404 as const, body: listNotFound };
+        // Only a new fold is checked: a list may keep its own fold (another
+        // letter case, say) even if another list already shares it, which
+        // only lists stored before this check can.
+        const folded = foldListName(parsed.data.name);
+        if (
+          folded !== foldListName(current.name) &&
+          existing.some((list) => list.id !== id && foldListName(list.name) === folded)
+        ) {
+          return { status: 409 as const, body: duplicateName };
+        }
+        const [list] = await tx
+          .update(lists)
+          .set({ name: parsed.data.name, updatedAt: sql`now()` })
+          .where(and(eq(lists.id, id), eq(lists.userId, userId)))
+          .returning(listColumns);
+        // Deleted meanwhile (a delete does not take the lock).
+        if (!list) return { status: 404 as const, body: listNotFound };
+        return { status: 200 as const, body: { list } };
+      });
+      return c.json(result.body, result.status);
     } catch (error) {
       if (isDuplicateName(error)) return c.json(duplicateName, 409);
       throw error;

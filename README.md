@@ -226,7 +226,8 @@ so an image built before it keeps working against the migrated tables (its new
 tasks land in Inbox). `lists_name_length_check` limits names to 1 to 50
 characters (`char_length`, code points) and the unique index
 `lists_user_id_name_idx` on `(user_id, lower(name))` makes names unique per user
-ignoring letter case.
+ignoring letter case. The API checks the stricter rule, a name's fold (below),
+and keeps this index as a backstop.
 
 | Route | Request | Success |
 | --- | --- | --- |
@@ -244,19 +245,29 @@ deleted or belongs to another user (indistinguishable); 409
 
 Name rules, from one shared definition used by `POST` and `PATCH`, are those of
 titles with a limit of 50: trimmed, at least one visible character, no null
-character, at most 50 Unicode code points. "Inbox" and "All tasks" are
-reserved, so a list can never look like a built-in view: the check ignores
-letter case, invisible characters (such as a zero width space, joiners,
-direction marks or a soft hyphen) and which white space separates the words
-(a no-break space or repeated spaces count as one space). Names that only
+character, at most 50 Unicode code points. Names compare by their fold,
+which is what a person would see: Unicode NFKC (fullwidth and other
+compatibility forms become their plain letters), any run of white space (a
+no-break space, repeated spaces) as one space, invisible characters (such as a
+zero width space, joiners, direction marks or a soft hyphen) dropped, then
+trimmed and lowercased. Letters from other scripts that only look Latin (a
+Cyrillic "І", say) are not folded. A name whose fold is "inbox" or "all tasks"
+is reserved, so a list can never look like a built-in view; names that only
 contain the words, such as "Inbox zero", are allowed.
-Anything else is 400 `invalid_list_name` and nothing changes. A name that
-matches another of the user's lists ignoring letter case is 409
-`duplicate_list_name`; renaming a list to its own name in another case is
-allowed, and two users may have lists with the same name. Names are stored as
-typed. A user can have at most 50 lists, so the tab row stays usable; one more
-is 409 `list_limit_reached` (creates for one user run one after another, so
-parallel requests cannot pass it).
+Anything else is 400 `invalid_list_name` and nothing changes. A name with the
+same fold as another of the user's lists is 409 `duplicate_list_name`;
+renaming a list to another form of its own fold is allowed, and two users may
+have lists with the same name. Names are stored as typed. The database's
+unique index on `lower(name)` stays as a backstop: for a few letters
+PostgreSQL's `lower()` and the fold differ (it turns a dotted capital I into a
+plain i), and a name only the index refuses is 409 `duplicate_list_name` too.
+So "İstanbul" and "i̇stanbul" (an i with a combining dot) share a fold and
+cannot both exist, and "istanbul" next to "İstanbul" is refused by the index.
+Lists stored before the fold check that share a fold stay, and each can keep
+its own name. A user can have at most 50 lists, so the tab row stays usable;
+one more is 409 `list_limit_reached`. Creates and renames for one user run one
+after another, so parallel requests cannot pass the limit or add two names
+with one fold.
 
 Deleting a list never deletes a task. In one transaction it moves every task
 in the list, open and completed, to Inbox (refreshing their `updatedAt`) and
@@ -302,7 +313,8 @@ names the destination ("Add to Errands", "Add to Inbox").
 creates the list, adds its tab, selects it and focuses it; Escape or Cancel
 closes the field without a request and returns focus to "New list". The field
 checks the server's rules first (length, visible characters, reserved names
-and a case-insensitive duplicate of a loaded list) and shows those errors, and
+and a duplicate of a loaded list, with the same fold as the server) and shows
+those errors, and
 `invalid_list_name`, `duplicate_list_name` and `list_limit_reached` from the
 server, on the field with `aria-invalid` and `aria-describedby`. "Manage lists"
 shows each list with Rename and Delete. Rename works like a task rename: Enter
@@ -508,7 +520,8 @@ date), undo, a kept completed successor, parallel completions creating exactly
 one successor, delete with a successor, and isolation between users. List
 tests (`packages/api/test/lists.test.ts`) cover name rules on both routes
 (trimming, invisible names, the 50 code point limit, null characters, reserved
-names in any case and their lookalikes, non-text bodies), case-insensitive duplicates per user, the
+names by their fold, non-text bodies), duplicates by fold per user including
+parallel creates and renames and lists stored before the check, the
 list order and shapes, the 50-list limit including parallel creates, malformed
 JSON and ids, deleting a list with open and completed tasks, ownership and the
 origin check, `listId` on every task response, moves, invalid, unknown,

@@ -2894,6 +2894,83 @@ describe('lists', () => {
     expect(callsTo('POST /api/lists').map((call) => call.body)).toEqual([{ name: 'Inbox zero' }]);
   });
 
+  // The lists cleanup: names compare by their fold (foldListName in
+  // packages/web/src/lists.ts), the same as the server.
+  test('the new list field compares names by their fold, as the server does (cleanup AC-1, AC-2, AC-3)', async () => {
+    signedIn([milk]);
+    withLists(list(11, 'Home'), list(12, 'Weekly shop'), list(13, '\u0130stanbul'));
+    reply('POST /api/lists', json({ error: 'duplicate_list_name', message: 'You already have a list with that name.' }, 409));
+    reply('POST /api/lists', json({ list: list(14, '\u0406nbox') }, 201));
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(tabNames()).toContain('Weekly shop'));
+    await userEvent.click(button('New list'));
+    const field = screen.getByRole('textbox', { name: 'List name' }) as HTMLInputElement;
+    const expectError = (message: string) => {
+      expect(screen.getByRole('alert').textContent).toBe(message);
+      expect(field.getAttribute('aria-invalid')).toBe('true');
+    };
+    const reserved = '"Inbox" and "All tasks" are built in. Choose another name.';
+    const duplicate = 'You already have a list with that name.';
+    for (const [typed, message] of [
+      ['\uff29\uff4e\uff42\uff4f\uff58', reserved], // fullwidth "Inbox"
+      ['\uff21\uff4c\uff4c\u3000\uff54\uff41\uff53\uff4b\uff53', reserved], // fullwidth "All tasks"
+      ['\u{1d408}\u{1d427}\u{1d41b}\u{1d428}\u{1d431}', reserved], // mathematical bold "Inbox"
+      ['In\uff42ox', reserved],
+      ['\uff28\uff4f\uff4d\uff45', duplicate], // fullwidth "Home"
+      ['Home\u200b', duplicate],
+      ['Weekly  shop', duplicate],
+      ['weekly\u3000SHOP', duplicate],
+      // "Istanbul" with a dotted capital I (U+0130) folds to an i followed by
+      // U+0307 on both sides, so this is a duplicate.
+      ['i\u0307stanbul', duplicate],
+    ]) {
+      fireEvent.change(field, { target: { value: typed } });
+      await userEvent.click(button('Create list'));
+      expectError(message);
+    }
+    expect(callsTo('POST /api/lists')).toHaveLength(0);
+    // "istanbul" has another fold, so the form sends it; where the server's
+    // database still refuses it, its 409 shows on the field.
+    fireEvent.change(field, { target: { value: 'istanbul' } });
+    await userEvent.click(button('Create list'));
+    await waitFor(() => expectError(duplicate));
+    expect(field.value).toBe('istanbul');
+    // A Cyrillic letter that only looks Latin is a normal name (D-3).
+    fireEvent.change(field, { target: { value: '\u0406nbox' } });
+    await userEvent.click(button('Create list'));
+    await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Home', 'Weekly shop', '\u0130stanbul', '\u0406nbox']));
+    expect(callsTo('POST /api/lists').map((call) => call.body)).toEqual([{ name: 'istanbul' }, { name: '\u0406nbox' }]);
+  });
+
+  test('a rename may keep the list\'s own fold, even one another list shares (cleanup AC-2, AC-5)', async () => {
+    signedIn([milk]);
+    // Two lists stored before the fold check, with one fold.
+    withLists(list(11, 'Home'), list(12, '\uff28\uff4f\uff4d\uff45'), list(13, 'Work'));
+    reply('PATCH /api/lists/12', json({ list: list(12, '\uff28\uff2f\uff2d\uff25') }));
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(tabNames()).toContain('Work'));
+    await openManage();
+    await userEvent.click(button('Rename "\uff28\uff4f\uff4d\uff45"'));
+    const field = screen.getByRole('textbox', { name: 'New name for "\uff28\uff4f\uff4d\uff45"' }) as HTMLInputElement;
+    // Another list's fold, or a built-in view's, is refused.
+    for (const [typed, message] of [
+      ['WORK\u200b', 'You already have a list with that name.'],
+      ['\uff29\uff4e\uff42\uff4f\uff58', '"Inbox" and "All tasks" are built in. Choose another name.'],
+    ]) {
+      fireEvent.change(field, { target: { value: typed } });
+      await userEvent.type(field, '{Enter}');
+      expect(screen.getByRole('alert').textContent).toBe(message);
+    }
+    expect(callsTo('PATCH /api/lists/12')).toHaveLength(0);
+    // Its own fold in another form is sent.
+    fireEvent.change(field, { target: { value: '\uff28\uff2f\uff2d\uff25' } });
+    await userEvent.type(field, '{Enter}');
+    await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Home', '\uff28\uff2f\uff2d\uff25', 'Work']));
+    expect(callsTo('PATCH /api/lists/12').map((call) => call.body)).toEqual([{ name: '\uff28\uff2f\uff2d\uff25' }]);
+  });
+
   test('the new list field is read-only while it is saved and ignores repeat submits (AC-11)', async () => {
     signedIn([milk]);
     const created = pending();

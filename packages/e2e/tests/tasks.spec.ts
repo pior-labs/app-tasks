@@ -1040,6 +1040,13 @@ test.describe('repeating tasks west of UTC', () => {
       await page.getByRole('listitem').filter({ has: repeats }).screenshot({ path });
       await testInfo.attach(name, { path, contentType: 'image/png' });
     }
+    // After the viewport resizes and element screenshots above, Chromium can
+    // scroll the page when the focused Repeat interval field loses focus. If
+    // that happened on the Save mousedown, the mouseup would land beside Save,
+    // depending on which rows earlier tests left. Leaving the field first
+    // keeps the click on Save. A pointer user at a fixed viewport does not get
+    // that scroll.
+    await page.getByRole('spinbutton', { name: 'Repeat interval for "Edit: descale the kettle"' }).blur();
     await page.getByRole('button', { name: 'Save', exact: true }).click();
     await expect(rowOf(page, 'Edit: descale the kettle').getByText('Repeats every 3 months')).toBeVisible();
     expect(bodies).toEqual([{ dueDate: '2026-11-25', repeat: { every: 3, unit: 'month' } }]);

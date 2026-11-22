@@ -7,37 +7,42 @@ export type List = { id: number; name: string };
 export type View = 'all' | 'inbox' | number;
 
 export const MAX_LIST_NAME_LENGTH = 50;
-// The built-in views' names, compared as a person would see them, like the
-// server (packages/api/src/lists.ts): letter case is ignored, invisible code
-// points (default ignorables such as a zero width space, joiners, direction
-// marks and the soft hyphen, and control characters) are dropped, and any run
-// of white space counts as one space. "Inbox zero" is a normal name.
+// When two list names count as the same, and whether a name is a built-in
+// view's. The same fold as the server (foldListName in
+// packages/api/src/lists.ts): Unicode NFKC (fullwidth and other compatibility
+// forms become their plain letters), any run of white space counts as one
+// space, invisible code points (default ignorables such as a zero width space,
+// joiners, direction marks and the soft hyphen, and control characters) are
+// dropped, then trimmed and lowercased. Letters from other scripts that only
+// look Latin are not folded, and "Inbox zero" is a normal name.
+const foldListName = (name: string) =>
+  name
+    .normalize('NFKC')
+    .replace(/\p{White_Space}+/gu, ' ')
+    .replace(/[\p{Cc}\p{Default_Ignorable_Code_Point}]/gu, '')
+    .replace(/ +/g, ' ')
+    .trim()
+    .toLowerCase();
 const RESERVED_LIST_NAMES = ['inbox', 'all tasks'];
-const isReservedListName = (name: string) =>
-  RESERVED_LIST_NAMES.includes(
-    name
-      .replace(/\p{White_Space}+/gu, ' ')
-      .replace(/[\p{Cc}\p{Default_Ignorable_Code_Point}]/gu, '')
-      .replace(/ +/g, ' ')
-      .trim()
-      .toLowerCase(),
-  );
 
 // The client-side list name check for a new list and a rename, on the trimmed
 // name. It mirrors the server (packages/api/src/lists.ts): at least one visible
-// character, no U+0000, at most 50 code points, not a built-in view's name
-// (isReservedListName), and not the name of another of the user's lists in
-// any letter case (`exceptId` is the list being renamed). Returns the message
-// to show, or an empty string.
+// character, no U+0000, at most 50 code points, not a built-in view's name,
+// and not another of the user's lists by fold (`exceptId` is the list being
+// renamed, which may keep its own fold). Returns the message to show, or an
+// empty string. Where the server's database still refuses a name (its lower()
+// differs from the fold for a few letters), the form shows the server's 409.
 export function listNameProblem(trimmed: string, lists: List[], exceptId?: number) {
   if (!VISIBLE_CHARACTER.test(trimmed)) return 'Enter a list name.';
   if (trimmed.includes('\u0000')) return 'List names cannot contain a null character.';
   if (characterCount(trimmed) > MAX_LIST_NAME_LENGTH) {
     return `List names can be at most ${MAX_LIST_NAME_LENGTH} characters.`;
   }
-  if (isReservedListName(trimmed)) return '"Inbox" and "All tasks" are built in. Choose another name.';
-  const folded = trimmed.toLowerCase();
-  if (lists.some((list) => list.id !== exceptId && list.name.toLowerCase() === folded)) {
+  const folded = foldListName(trimmed);
+  if (RESERVED_LIST_NAMES.includes(folded)) return '"Inbox" and "All tasks" are built in. Choose another name.';
+  const current = lists.find((list) => list.id === exceptId);
+  if (current && foldListName(current.name) === folded) return '';
+  if (lists.some((list) => list.id !== exceptId && foldListName(list.name) === folded)) {
     return 'You already have a list with that name.';
   }
   return '';

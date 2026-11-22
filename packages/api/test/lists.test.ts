@@ -255,6 +255,172 @@ test('names that only look like "Inbox" or "All tasks" are reserved too (AC-1, D
   for (const name of notReserved) assert.equal((await createList(one, name)).name, name);
 });
 
+// The criteria below (AC-1 to AC-5 of the lists cleanup) compare names by
+// their fold (foldListName in packages/api/src/lists.ts): NFKC, white space
+// collapsed, invisible code points dropped, trimmed, lowercased.
+const reservedByFold = [
+  '\uff29\uff4e\uff42\uff4f\uff58', // fullwidth "Inbox"
+  '\uff29\uff2e\uff22\uff2f\uff38', // fullwidth "INBOX"
+  '\uff41\uff4c\uff4c\u3000\uff54\uff41\uff53\uff4b\uff53', // fullwidth "all tasks", ideographic space
+  '\uff21\uff4c\uff4c\u3000\uff54\uff41\uff53\uff4b\uff53\u200b', // and a zero width space
+  '\u{1d408}\u{1d427}\u{1d41b}\u{1d428}\u{1d431}', // mathematical bold "Inbox"
+  '\u24be\u24dd\u24d1\u24de\u24e7', // circled "Inbox"
+  'In\uff42ox', // one fullwidth letter
+];
+// Letters from other scripts that only look Latin are not folded (D-3).
+const homoglyphs = ['\u0406nbox', '\u0410ll tasks', 'Inb\u043ex'];
+
+test('names whose fold is "inbox" or "all tasks" are reserved, fullwidth forms too (cleanup AC-1, D-3)', async () => {
+  const list = await createList(one, 'Keep me');
+  const before = await storedLists();
+  for (const name of reservedByFold) {
+    const created = await send(one, 'POST', '/api/lists', { name });
+    assert.equal(created.status, 400, `POST ${JSON.stringify(name)}`);
+    assert.deepEqual(await created.json(), {
+      error: 'invalid_list_name',
+      message: '"Inbox" and "All tasks" are built in. Choose another name.',
+    });
+    const renamed = await send(one, 'PATCH', `/api/lists/${list.id}`, { name });
+    assert.equal(renamed.status, 400, `PATCH ${JSON.stringify(name)}`);
+    assert.equal((await renamed.json()).error, 'invalid_list_name');
+  }
+  assert.deepEqual(await storedLists(), before);
+  for (const name of ['Inbox zero', 'In box', 'All tasks 2', ...homoglyphs]) {
+    assert.equal((await createList(one, name)).name, name);
+  }
+});
+
+test('two of a user\'s lists cannot share a fold; names are stored as typed (cleanup AC-2)', async () => {
+  const home = await createList(one, 'Home');
+  const weekly = await createList(one, 'Weekly shop');
+  const spare = await createList(one, 'Spare');
+  const before = await storedLists();
+  for (const name of [
+    'HOME',
+    '\uff28\uff4f\uff4d\uff45', // fullwidth "Home"
+    'Home\u200b', // zero width space
+    'Ho\u00adme', // soft hyphen
+    '\u2060home', // word joiner
+    'Weekly  shop',
+    'Weekly\u00a0shop', // no-break space
+    'weekly\u3000SHOP', // ideographic space
+    'Weekly\t\u200b shop',
+  ]) {
+    await assertError(await send(one, 'POST', '/api/lists', { name }), 409, 'duplicate_list_name');
+    await assertError(await send(one, 'PATCH', `/api/lists/${spare.id}`, { name }), 409, 'duplicate_list_name');
+  }
+  assert.deepEqual(await storedLists(), before);
+
+  // A rename to the list's own fold is allowed, and stored as typed.
+  for (const name of ['\uff37\uff45\uff45\uff4b\uff4c\uff59  \uff53\uff48\uff4f\uff50', 'weekly\u200b shop', 'Weekly shop']) {
+    const response = await send(one, 'PATCH', `/api/lists/${weekly.id}`, { name });
+    assert.equal(response.status, 200, JSON.stringify(name));
+    assert.equal((await response.json()).list.name, name);
+    assert.equal((await storedLists()).find((row) => row.id === weekly.id)!.name, name);
+  }
+  // Another user may have lists with the same names, in any form.
+  assert.equal((await createList(two, '\uff28\uff4f\uff4d\uff45')).name, '\uff28\uff4f\uff4d\uff45');
+  assert.equal((await createList(two, 'Weekly  shop')).name, 'Weekly  shop');
+  assert.equal((await getLists(one)).length, 3);
+  assert.equal((await getLists(one)).find((list) => list.id === home.id)!.name, 'Home');
+});
+
+test('"\u0130stanbul" then "i\u0307stanbul" is a duplicate; a name only the index refuses answers 409 (cleanup AC-3)', async () => {
+  // The fixture database's collation decides what lower() does.
+  const [{ ctype, dotted }] = await fixture.client`
+    select datctype as ctype, lower('\u0130stanbul') = 'istanbul' as dotted
+    from pg_database where datname = current_database()`;
+  console.log(`fixture database lc_ctype: ${ctype}; lower('\u0130stanbul') = 'istanbul': ${dotted}`);
+
+  // "Istanbul" with a dotted capital I (U+0130) folds to an i followed by
+  // U+0307, the second name here, as in the web form: so it is refused.
+  const istanbul = await createList(one, '\u0130stanbul');
+  await assertError(await send(one, 'POST', '/api/lists', { name: 'i\u0307stanbul' }), 409, 'duplicate_list_name');
+  const other = await createList(one, 'Other');
+  await assertError(
+    await send(one, 'PATCH', `/api/lists/${other.id}`, { name: 'I\u0307STANBUL' }),
+    409,
+    'duplicate_list_name',
+  );
+
+  // "istanbul" has another fold, so the routes allow it, but where lower()
+  // turns U+0130 into a plain i the index refuses it: still 409, never 500.
+  if (dotted) {
+    await assertError(await send(one, 'POST', '/api/lists', { name: 'istanbul' }), 409, 'duplicate_list_name');
+    await assertError(await send(one, 'PATCH', `/api/lists/${other.id}`, { name: 'istanbul' }), 409, 'duplicate_list_name');
+  } else {
+    assert.equal((await createList(one, 'istanbul')).name, 'istanbul');
+  }
+  assert.equal((await getLists(one)).find((list) => list.id === istanbul.id)!.name, '\u0130stanbul');
+  assert.equal((await getLists(one)).find((list) => list.id === other.id)!.name, 'Other');
+});
+
+test('parallel creates and renames of names with one fold leave one list with it (cleanup AC-4)', async () => {
+  const forms = ['Groceries', '\uff27\uff52\uff4f\uff43\uff45\uff52\uff49\uff45\uff53', 'groceries\u200b', 'GROCERIES', 'Groceries\u00a0'];
+  for (let round = 0; round < 5; round++) {
+    await fixture.client`delete from lists`;
+    const responses = await Promise.all(forms.map((name) => send(one, 'POST', '/api/lists', { name })));
+    assert.deepEqual(
+      responses.map((response) => response.status).sort(),
+      [201, 409, 409, 409, 409],
+    );
+    for (const response of responses) {
+      if (response.status === 409) assert.equal((await response.json()).error, 'duplicate_list_name');
+    }
+    assert.equal((await getLists(one)).length, 1);
+  }
+
+  // A create and a rename, and two renames, to one fold.
+  for (let round = 0; round < 5; round++) {
+    await fixture.client`delete from lists`;
+    const first = await createList(one, 'First');
+    const second = await createList(one, 'Second');
+    const responses = await Promise.all([
+      send(one, 'POST', '/api/lists', { name: 'Chores' }),
+      send(one, 'PATCH', `/api/lists/${first.id}`, { name: '\uff43\uff48\uff4f\uff52\uff45\uff53' }),
+      send(one, 'PATCH', `/api/lists/${second.id}`, { name: 'CHORES\u200b' }),
+    ]);
+    const statuses = responses.map((response) => response.status);
+    assert.equal(statuses.filter((status) => status === 409).length, 2, String(statuses));
+    assert.equal(statuses.filter((status) => status === 200 || status === 201).length, 1, String(statuses));
+    const names = (await getLists(one)).map((list) => list.name);
+    assert.equal(names.filter((name) => name.normalize('NFKC').replace('\u200b', '').toLowerCase() === 'chores').length, 1);
+  }
+});
+
+test('lists stored before the fold check that share a fold both stay and can keep their names (cleanup AC-5)', async () => {
+  const [me] = await fixture.client`select id from users where email = 'one@example.test'`;
+  // Possible only for data written before this check: the index on lower()
+  // allows both.
+  const rows = await fixture.client`
+    insert into lists (user_id, name)
+    values (${me.id}, 'Home'), (${me.id}, ${'\uff28\uff4f\uff4d\uff45'}), (${me.id}, ${'Weekly shop'}), (${me.id}, ${'Weekly  shop'})
+    returning id, name`;
+  const before = await storedLists();
+  assert.deepEqual(
+    (await getLists(one)).map((list) => list.name),
+    ['Home', '\uff28\uff4f\uff4d\uff45', 'Weekly shop', 'Weekly  shop'],
+  );
+  // Each can be renamed to its own name, or to another form of its own fold.
+  for (const { id, name } of rows) {
+    const response = await send(one, 'PATCH', `/api/lists/${id}`, { name });
+    assert.equal(response.status, 200, name);
+    assert.equal((await response.json()).list.name, name);
+  }
+  const weekly = rows.find((row) => row.name === 'Weekly  shop')!;
+  const renamed = await send(one, 'PATCH', `/api/lists/${weekly.id}`, { name: 'Weekly   shop' });
+  assert.equal(renamed.status, 200);
+  assert.deepEqual(
+    (await storedLists()).map((row) => row.name),
+    before.map((row) => (row.id === weekly.id ? 'Weekly   shop' : row.name)),
+  );
+  // A new name with that fold is refused, and another name is still fine.
+  await assertError(await send(one, 'POST', '/api/lists', { name: 'home' }), 409, 'duplicate_list_name');
+  const home = rows.find((row) => row.name === 'Home')!;
+  await assertError(await send(one, 'PATCH', `/api/lists/${home.id}`, { name: 'Weekly shop' }), 409, 'duplicate_list_name');
+  assert.equal((await send(one, 'PATCH', `/api/lists/${home.id}`, { name: 'House' })).status, 200);
+});
+
 test('lists are listed oldest first with their fields; create answers 201 and rename 200 (AC-2)', async () => {
   assert.deepEqual(await getLists(one), []);
   const home = await createList(one, 'Home');
