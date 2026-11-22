@@ -325,6 +325,34 @@ test('two of a user\'s lists cannot share a fold; names are stored as typed (cle
   assert.equal((await getLists(one)).find((list) => list.id === home.id)!.name, 'Home');
 });
 
+test('names that differ only by invisible code points share a fold, also between a letter and its mark (cleanup R1-F2)', async () => {
+  // The fold composes again after it drops invisible code points, so one
+  // between a letter and a combining mark does not keep them apart.
+  const cafe = await createList(one, 'Caf\u00e9');
+  const inbox = await createList(one, '\u00cdnbox'); // an I with an acute: not a built-in name
+  const spare = await createList(one, 'Spare');
+  const before = await storedLists();
+  for (const name of [
+    'Cafe\u00ad\u0301', // soft hyphen between the e and a combining acute
+    'Cafe\u200b\u0301', // zero width space
+    'CAFE\u2060\u0301', // word joiner
+    'Cafe\u0301\u200b',
+    'I\u00ad\u0301nbox', // the same fold as "\u00cdnbox", so a duplicate, not reserved
+  ]) {
+    await assertError(await send(one, 'POST', '/api/lists', { name }), 409, 'duplicate_list_name');
+    await assertError(await send(one, 'PATCH', `/api/lists/${spare.id}`, { name }), 409, 'duplicate_list_name');
+  }
+  assert.deepEqual(await storedLists(), before);
+  // The other way round, and a list may move to another form of its own fold.
+  assert.equal((await createList(two, 'Cafe\u200b\u0301')).name, 'Cafe\u200b\u0301');
+  await assertError(await send(two, 'POST', '/api/lists', { name: 'caf\u00e9' }), 409, 'duplicate_list_name');
+  const renamed = await send(one, 'PATCH', `/api/lists/${cafe.id}`, { name: 'Cafe\u00ad\u0301' });
+  assert.equal(renamed.status, 200);
+  assert.equal((await renamed.json()).list.name, 'Cafe\u00ad\u0301');
+  // The reserved check uses the same fold: invisibles still fold away.
+  await assertError(await send(one, 'PATCH', `/api/lists/${inbox.id}`, { name: 'In\u00ad\u200bbox' }), 400, 'invalid_list_name');
+});
+
 test('"\u0130stanbul" then "i\u0307stanbul" is a duplicate; a name only the index refuses answers 409 (cleanup AC-3)', async () => {
   // The fixture database's collation decides what lower() does.
   const [{ ctype, dotted }] = await fixture.client`

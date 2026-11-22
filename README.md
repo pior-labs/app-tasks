@@ -249,11 +249,12 @@ character, at most 50 Unicode code points. Names compare by their fold,
 which is what a person would see: Unicode NFKC (fullwidth and other
 compatibility forms become their plain letters), any run of white space (a
 no-break space, repeated spaces) as one space, invisible characters (such as a
-zero width space, joiners, direction marks or a soft hyphen) dropped, then
-trimmed and lowercased. Letters from other scripts that only look Latin (a
-Cyrillic "І", say) are not folded. A name whose fold is "inbox" or "all tasks"
-is reserved, so a list can never look like a built-in view; names that only
-contain the words, such as "Inbox zero", are allowed.
+zero width space, joiners, direction marks or a soft hyphen) dropped, NFKC
+again (so an invisible character between a letter and its accent does not make
+a second "Café"), then trimmed and lowercased. Letters from other scripts that
+only look Latin (a Cyrillic "І", say) are not folded. A name whose fold is
+"inbox" or "all tasks" is reserved, so a list can never look like a built-in
+view; names that only contain the words, such as "Inbox zero", are allowed.
 Anything else is 400 `invalid_list_name` and nothing changes. A name with the
 same fold as another of the user's lists is 409 `duplicate_list_name`;
 renaming a list to another form of its own fold is allowed, and two users may

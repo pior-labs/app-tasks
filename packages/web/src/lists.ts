@@ -13,13 +13,16 @@ export const MAX_LIST_NAME_LENGTH = 50;
 // forms become their plain letters), any run of white space counts as one
 // space, invisible code points (default ignorables such as a zero width space,
 // joiners, direction marks and the soft hyphen, and control characters) are
-// dropped, then trimmed and lowercased. Letters from other scripts that only
-// look Latin are not folded, and "Inbox zero" is a normal name.
+// dropped, NFKC is applied again (so an invisible one between a letter and its
+// combining mark does not keep them apart), then trimmed and lowercased.
+// Letters from other scripts that only look Latin are not folded, and "Inbox
+// zero" is a normal name.
 const foldListName = (name: string) =>
   name
     .normalize('NFKC')
     .replace(/\p{White_Space}+/gu, ' ')
     .replace(/[\p{Cc}\p{Default_Ignorable_Code_Point}]/gu, '')
+    .normalize('NFKC')
     .replace(/ +/g, ' ')
     .trim()
     .toLowerCase();

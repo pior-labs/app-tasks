@@ -25,15 +25,18 @@ export const MAX_LISTS = 50;
 // (fullwidth and other compatibility forms become their plain letters), turns
 // any run of white space (a no-break space, repeated spaces) into one space,
 // drops invisible code points (default ignorables such as a zero width space,
-// joiners, direction marks and the soft hyphen, and control characters), trims,
-// and lowercases. Letters from other scripts that only look Latin are not
-// folded. Names are stored as typed; only these checks use the folded form.
-// The web form folds the same way (foldListName in packages/web/src/lists.ts).
+// joiners, direction marks and the soft hyphen, and control characters),
+// applies NFKC again (so an invisible one between a letter and its combining
+// mark does not keep them apart), trims, and lowercases. Letters from other
+// scripts that only look Latin are not folded. Names are stored as typed;
+// only these checks use the folded form. The web form folds the same way
+// (foldListName in packages/web/src/lists.ts).
 const foldListName = (name: string) =>
   name
     .normalize('NFKC')
     .replace(/\p{White_Space}+/gu, ' ')
     .replace(/[\p{Cc}\p{Default_Ignorable_Code_Point}]/gu, '')
+    .normalize('NFKC')
     .replace(/ +/g, ' ')
     .trim()
     .toLowerCase();

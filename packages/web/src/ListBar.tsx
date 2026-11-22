@@ -179,10 +179,12 @@ export function ListBar({
     event.preventDefault();
     if (!renaming || renaming.id !== list.id || pendingRef.current) return;
     const trimmed = renaming.text.trim();
+    // Nothing to store: leave rename mode without a request. Before the checks,
+    // so a list stored before them keeps its name even where they would refuse
+    // it now (a fullwidth "Inbox", say).
+    if (trimmed === list.name) return cancelRename(list);
     const problem = listNameProblem(trimmed, lists, list.id);
     if (problem) return setRenaming({ ...renaming, error: problem });
-    // Nothing to store: leave rename mode without a request.
-    if (trimmed === list.name) return cancelRename(list);
     pendingRef.current = true;
     setRenaming({ ...renaming, error: '', saving: true });
     const fail = (error: string) =>

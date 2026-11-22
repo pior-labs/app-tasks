@@ -2971,6 +2971,69 @@ describe('lists', () => {
     expect(callsTo('PATCH /api/lists/12').map((call) => call.body)).toEqual([{ name: '\uff28\uff2f\uff2d\uff25' }]);
   });
 
+  test('an unchanged rename closes without a request, even for an older list the checks now refuse (cleanup R1-F1, AC-5)', async () => {
+    signedIn([milk]);
+    // Stored before the fold check: a fullwidth "Inbox", and a fullwidth
+    // "Home" next to "Home".
+    const fullInbox = '\uff29\uff4e\uff42\uff4f\uff58';
+    const fullHome = '\uff28\uff4f\uff4d\uff45';
+    withLists(list(11, fullInbox), list(12, 'Home'), list(13, fullHome));
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(tabNames()).toContain(fullHome));
+    await openManage();
+    const nameField = (name: string) => screen.queryByRole('textbox', { name: `New name for "${name}"` }) as HTMLInputElement | null;
+    for (const name of [fullInbox, fullHome]) {
+      // Enter on the name as it is.
+      await userEvent.click(button(`Rename "${name}"`));
+      await userEvent.type(nameField(name)!, '{Enter}');
+      expect(nameField(name)).toBeNull();
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(document.activeElement).toBe(button(`Rename "${name}"`));
+      // Save with only surrounding white space added.
+      await userEvent.click(button(`Rename "${name}"`));
+      fireEvent.change(nameField(name)!, { target: { value: ` ${name} ` } });
+      await userEvent.click(button(`Save the new name for "${name}"`));
+      expect(nameField(name)).toBeNull();
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(document.activeElement).toBe(button(`Rename "${name}"`));
+    }
+    // A changed name is still checked.
+    await userEvent.click(button(`Rename "${fullInbox}"`));
+    const field = nameField(fullInbox)!;
+    for (const [typed, message] of [
+      ['INBOX', '"Inbox" and "All tasks" are built in. Choose another name.'],
+      ['home', 'You already have a list with that name.'],
+    ]) {
+      fireEvent.change(field, { target: { value: typed } });
+      await userEvent.type(field, '{Enter}');
+      expect(screen.getByRole('alert').textContent).toBe(message);
+    }
+    expect(calls.filter((call) => call.method !== 'GET')).toEqual([]);
+  });
+
+  test('names that differ only by invisible code points share a fold, also between a letter and its mark (cleanup R1-F2)', async () => {
+    signedIn([milk]);
+    withLists(list(11, 'Caf\u00e9'), list(12, '\u00cdnbox'));
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(tabNames()).toContain('\u00cdnbox'));
+    await userEvent.click(button('New list'));
+    const field = screen.getByRole('textbox', { name: 'List name' }) as HTMLInputElement;
+    for (const [typed, message] of [
+      ['Cafe\u00ad\u0301', 'You already have a list with that name.'], // soft hyphen between the e and a combining acute
+      ['Cafe\u200b\u0301', 'You already have a list with that name.'], // zero width space
+      ['CAFE\u2060\u0301', 'You already have a list with that name.'], // word joiner
+      ['I\u00ad\u0301nbox', 'You already have a list with that name.'], // the fold of "\u00cdnbox", not a built-in name
+      ['In\u00ad\u200bbox', '"Inbox" and "All tasks" are built in. Choose another name.'],
+    ]) {
+      fireEvent.change(field, { target: { value: typed } });
+      await userEvent.click(button('Create list'));
+      expect(screen.getByRole('alert').textContent).toBe(message);
+    }
+    expect(callsTo('POST /api/lists')).toHaveLength(0);
+  });
+
   test('the new list field is read-only while it is saved and ignores repeat submits (AC-11)', async () => {
     signedIn([milk]);
     const created = pending();
