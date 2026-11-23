@@ -9,7 +9,8 @@ const webOrigin = `http://localhost:${webPort}`;
 export default defineConfig({
   testDir: './tests',
   // One API, one disposable database and two fixture users are shared by the
-  // whole run, so the tests run one after another.
+  // whole run, so the tests run one after another. Each test starts from an
+  // empty task domain and the real clock (tests/fixtures.ts).
   fullyParallel: false,
   workers: 1,
   retries: 0,

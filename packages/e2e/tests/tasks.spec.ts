@@ -1,31 +1,21 @@
-import { type APIRequestContext, expect, type Page, type Request, test, type TestInfo } from '@playwright/test';
+import type { APIRequestContext, Page, Request, TestInfo } from '@playwright/test';
+import { expect, setServerClock, test } from './fixtures';
 
 // End-to-end checks in a real browser against the Vite dev server and the real
 // API on a disposable database. Sign-in goes through the fixture SSO provider
 // (packages/api/test/fixture.ts); no real credentials or hosted SSO are used.
 //
-// All tests share one database for the run, and "Household One" keeps the
-// tasks earlier tests left behind. Each test therefore uses its own titles and
-// only looks at those rows.
+// Every test starts with no lists or tasks and the real clock on both sides
+// (./fixtures.ts).
 
 type FixtureUser = 'Household One' | 'Household Two';
 
-// The API checks the "today" a completing browser sends against its own date,
-// so a test that fixes the browser clock sets the API clock to the same moment
-// (packages/api/test/e2e-server.ts). Both keep running from there. Every test
-// starts with the real clock on both sides.
-const apiOrigin = `http://localhost:${process.env.E2E_API_PORT ?? 3173}`;
-async function setServerClock(request: APIRequestContext, time: Date | null) {
-  const response = await request.put(`${apiOrigin}/e2e/clock`, { data: { time: time?.toISOString() ?? null } });
-  expect(response.ok()).toBe(true);
-}
+// A test that fixes the browser clock sets the API clock to the same moment
+// (setServerClock in ./fixtures.ts).
 async function fixClock(page: Page, request: APIRequestContext, time: Date) {
   await page.clock.install({ time });
   await setServerClock(request, time);
 }
-test.beforeEach(async ({ request }) => {
-  await setServerClock(request, null);
-});
 
 async function signIn(page: Page, user: FixtureUser) {
   await page.goto('/');
@@ -504,9 +494,10 @@ test.describe('due dates west of UTC', () => {
       .evaluate((element) => getComputedStyle(element).color);
     expect(colour).not.toBe(plain);
 
-    // Completing the overdue task: it leaves view, and once expanded the
-    // Completed section shows it without overdue marking.
-    await expect(completedToggle(page)).toHaveAttribute('aria-expanded', 'false');
+    // Completing the overdue task: it leaves view into a Completed section
+    // that starts collapsed (nothing was completed before, so there is none
+    // yet), and once expanded the section shows it without overdue marking.
+    await expect(completedToggle(page)).toHaveCount(0);
     await checkbox(page, 'Groups: pay the electricity bill').click();
     await expect(page.getByRole('status')).toHaveText(
       '"Groups: pay the electricity bill" was moved to Completed.',

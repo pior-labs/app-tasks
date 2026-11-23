@@ -743,13 +743,16 @@ to Two; Two renames and stops sharing One's list and loses it while One keeps
 it with every task; deleting a shared list sends each task to its creator's
 Inbox; and the share toggle and the "Assigned to" select work by keyboard, with
 the shared tab fitting a 390px screen (with screenshots). The page clock is
-installed so a test can jump to the next 30-second refresh, and each scenario
-removes what it created, leaving Household Two empty for `tasks.spec.ts`.
-Because the API
+installed so a test can jump to the next 30-second refresh. Because the API
 checks `today` against its own date, the test API server
 (`packages/api/test/e2e-server.ts`) has a test-only `PUT /e2e/clock` route, and
 each scenario that fixes the browser clock sets the API clock to the same
-moment; every test starts with the real clock on both sides. The configuration sets the browser's
+moment. It also has a test-only `POST /e2e/reset` route that deletes every
+list and task (users and sessions stay). Every spec imports `test` from
+`packages/e2e/tests/fixtures.ts`, which resets the clock and the data before
+each test, so a test sees only what it creates, needs no clean-up, and the
+spec files can run in any order. A new spec file must import `test` from
+there too. The configuration sets the browser's
 `LANGUAGE` to `en_US`, because Chromium orders the parts of a date field by
 that variable rather than by the context locale. `@playwright/test` is a dev dependency of
 `@tasks/e2e` only, so it is installed neither with the API or web package nor
