@@ -95,8 +95,11 @@ test('a signed-in user creates tasks and lists them newest first (AC-1)', async 
   assert.equal(first.completed, false);
   assert.ok(Number.isInteger(first.id));
   assert.deepEqual(Object.keys(first).sort(), [
+    'assigneeId',
     'completed',
+    'completedById',
     'createdAt',
+    'createdById',
     'dueDate',
     'id',
     'listId',
@@ -464,8 +467,11 @@ test('a task can be renamed; the title is trimmed and nothing else changes (edit
   assert.equal(renamed.status, 200);
   const renamedTask: Task = (await renamed.json()).task;
   assert.deepEqual(Object.keys(renamedTask).sort(), [
+    'assigneeId',
     'completed',
+    'completedById',
     'createdAt',
+    'createdById',
     'dueDate',
     'id',
     'listId',

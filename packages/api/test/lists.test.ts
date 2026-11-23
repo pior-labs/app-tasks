@@ -184,9 +184,11 @@ test('invalid and reserved list names answer 400 invalid_list_name and change no
     await assertError(await send(one, 'PATCH', `/api/lists/${list.id}`, { name }), 400, 'invalid_list_name');
   }
   // A body without a name, or that is not an object, is an invalid name too.
+  // A rename body with neither a name nor shared is an invalid update (shared
+  // lists AC-3).
   for (const body of [{}, { title: 'Home' }, [], '"Home"', '7', 'null']) {
     await assertError(await send(one, 'POST', '/api/lists', body), 400, 'invalid_list_name');
-    await assertError(await send(one, 'PATCH', `/api/lists/${list.id}`, body), 400, 'invalid_list_name');
+    await assertError(await send(one, 'PATCH', `/api/lists/${list.id}`, body), 400, 'invalid_list_update');
   }
   assert.deepEqual(await storedLists(), before);
 });
@@ -452,7 +454,7 @@ test('lists stored before the fold check that share a fold both stay and can kee
 test('lists are listed oldest first with their fields; create answers 201 and rename 200 (AC-2)', async () => {
   assert.deepEqual(await getLists(one), []);
   const home = await createList(one, 'Home');
-  assert.deepEqual(Object.keys(home).sort(), ['createdAt', 'id', 'name', 'updatedAt']);
+  assert.deepEqual(Object.keys(home).sort(), ['createdAt', 'id', 'name', 'ownerId', 'shared', 'updatedAt']);
   assert.ok(Number.isInteger(home.id));
   assert.equal(home.createdAt, home.updatedAt);
   const errands = await createList(one, 'Errands');
