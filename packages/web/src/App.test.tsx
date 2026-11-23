@@ -83,7 +83,16 @@ beforeEach(() => {
       if (!next && `${call.method} ${call.path}` === 'GET /api/lists') return json({ lists: [] });
       if (!next && `${call.method} ${call.path}` === 'GET /api/members') return json({ members: fixtureMembers });
       if (!next) throw new Error(`Unexpected request: ${call.method} ${call.path}`);
-      return typeof next === 'function' ? next() : next;
+      const answer = typeof next === 'function' ? next() : next;
+      const signal = init?.signal;
+      if (!signal) return answer;
+      // Like a real fetch, an aborted request rejects.
+      return new Promise<Response>((resolve, reject) => {
+        const abort = () => reject(new DOMException('The operation was aborted.', 'AbortError'));
+        if (signal.aborted) return abort();
+        signal.addEventListener('abort', abort);
+        Promise.resolve(answer).then(resolve, reject);
+      });
     }),
   );
 });
@@ -3890,5 +3899,56 @@ describe('shared lists', () => {
     });
     expect(callsTo('GET /api/tasks')).toHaveLength(3);
     await waitFor(() => expect(taskTitles()).toEqual(['Eggs', 'Bread', 'Milk']));
+  });
+
+  test('a refresh that loses the task behind the edit row closes the row with a notice (AC-14, R1-F1)', async () => {
+    history.replaceState(null, '', '/?list=12');
+    signedIn([task(1, 'Sweep porch', 12, { createdById: 2 }), task(2, 'Mine', null)]);
+    withLists(groceries);
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(selectedTab()).toEqual(['Groceries (shared)']));
+    await userEvent.click(button('Edit "Sweep porch"'));
+    await userEvent.type(screen.getByRole('textbox', { name: 'New title for "Sweep porch"' }), ' twice');
+
+    // The owner unshared the list: its task is not the viewer's any more.
+    refreshReplies([task(2, 'Mine', null)], []);
+    await refreshOnFocus();
+    await waitFor(() => expect(selectedTab()).toEqual(['Inbox']));
+    expect(screen.getByRole('status').textContent).toBe(
+      '"Groceries" was deleted or is no longer shared with you, so Inbox is shown. "Sweep porch" is no longer shared with you.',
+    );
+    // No edit row claims the task is in Inbox, and nothing was saved.
+    expect(screen.queryByRole('textbox', { name: /^New title for/ })).toBeNull();
+    expect(screen.queryByRole('combobox', { name: /^List for/ })).toBeNull();
+    expect(taskTitles()).toEqual(['Mine']);
+    expect(calls.filter((call) => call.method !== 'GET')).toEqual([]);
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText('New task')));
+  });
+
+  test('a refresh that never answers is aborted and does not block the next trigger (AC-14, R1-F2)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout'] });
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
+    signedIn([task(1, 'Milk', null)]);
+    render(<App />);
+    await ready();
+    reply('GET /api/tasks', new Promise<Response>(() => {}));
+    await refreshOnFocus();
+    // While it hangs, further triggers are dropped.
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+    expect(callsTo('GET /api/tasks')).toHaveLength(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+    expect(screen.queryByRole('alert')).toBeNull();
+    // The next trigger goes out and applies.
+    refreshReplies([task(2, 'Bread', null), task(1, 'Milk', null)], []);
+    await refreshOnFocus();
+    expect(callsTo('GET /api/tasks')).toHaveLength(3);
+    await waitFor(() => expect(taskTitles()).toEqual(['Bread', 'Milk']));
   });
 });

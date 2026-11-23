@@ -135,6 +135,7 @@ const fromServer = (task: Task): Task => ({
 // window gains focus or the page becomes visible, and this often while it is
 // visible. There are no websockets or server-sent events.
 export const REFRESH_INTERVAL_MS = 30_000;
+export const REFRESH_TIMEOUT_MS = 20_000;
 
 // The labels of a row in a shared list (D-5): who added it and who completed
 // it, only when that is someone else, and who it is assigned to. A member
@@ -158,6 +159,7 @@ const inView = (task: Task, view: View) =>
   view === 'all' || task.listId === (view === 'inbox' ? null : view);
 const LIST_GONE_MESSAGE = 'That list no longer exists. Choose another list.';
 const leftListMessage = (list: List) => `"${list.name}" is no longer shared with you, so it was removed.`;
+const lostTaskMessage = (task: Task) => `"${task.title}" is no longer shared with you.`;
 const vanishedListMessage = (list: List) =>
   `"${list.name}" was deleted or is no longer shared with you, so Inbox is shown.`;
 
@@ -329,8 +331,8 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
     };
   }, []);
   // The state a refresh compares against, read when its answer arrives.
-  const latest = useRef({ lists, requestedView, editingId: null as number | null, confirmingId, listState });
-  latest.current = { lists, requestedView, editingId: editing?.id ?? null, confirmingId, listState };
+  const latest = useRef({ tasks, lists, requestedView, editingId: null as number | null, confirmingId, listState });
+  latest.current = { tasks, lists, requestedView, editingId: editing?.id ?? null, confirmingId, listState };
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -493,8 +495,14 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
     if (refreshing.current || !mounted.current || latest.current.listState !== 'ready') return;
     refreshing.current = true;
     const finished = activity.current.finished;
+    // A request that never answers must not stop live refresh for good: it is
+    // aborted after a while and counts as any other failed refresh.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REFRESH_TIMEOUT_MS);
     try {
-      const responses = await Promise.all(['/api/tasks', '/api/lists', '/api/members'].map((path) => fetch(path)));
+      const responses = await Promise.all(
+        ['/api/tasks', '/api/lists', '/api/members'].map((path) => fetch(path, { signal: controller.signal })),
+      );
       if (!mounted.current) return;
       if (responses.some((response) => response.status === 401)) return onSignedOut();
       if (!responses.every((response) => response.ok)) return;
@@ -505,7 +513,24 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
       if (activity.current.pending > 0 || activity.current.finished !== finished) return;
       const before = latest.current;
       const nextLists = listsBody.lists.map((list) => listFromServer(list, me));
-      const pinned = new Set([before.editingId, before.confirmingId].filter((id): id is number => id !== null));
+      const server = tasksBody.tasks.map(fromServer);
+      const serverIds = new Set(server.map((task) => task.id));
+      // The task behind the edit row is gone from the answer while its list
+      // is too: it was unshared or deleted by someone else, and the task is
+      // not the viewer's to keep. Its row closes with a notice, since there is
+      // no list it could be shown under.
+      const lostTask =
+        before.editingId === null || serverIds.has(before.editingId)
+          ? undefined
+          : before.tasks.find(
+              (task) =>
+                task.id === before.editingId &&
+                task.listId !== null &&
+                !nextLists.some((list) => list.id === task.listId),
+            );
+      const pinned = new Set(
+        [before.editingId, before.confirmingId].filter((id): id is number => id !== null && id !== lostTask?.id),
+      );
       // Remember focus, in case its element is replaced (see focusAfterRefresh).
       const active = document.activeElement;
       if (active instanceof HTMLElement && active !== document.body) {
@@ -523,11 +548,9 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
           tab: active.getAttribute('role') === 'tab',
         };
       }
-      const server = tasksBody.tasks.map(fromServer);
       setTasks((current) => {
         const byId = new Map(current.map((task) => [task.id, task]));
         const merged = server.map((task) => (pinned.has(task.id) ? (byId.get(task.id) ?? task) : task));
-        const serverIds = new Set(server.map((task) => task.id));
         current.forEach((task, index) => {
           if (pinned.has(task.id) && !serverIds.has(task.id)) merged.splice(Math.min(index, merged.length), 0, task);
         });
@@ -536,18 +559,26 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
       applyLists(nextLists);
       setListsState('ready');
       setMembers(membersBody.members);
+      if (lostTask) {
+        setEditing((current) => (current?.id === lostTask.id ? null : current));
+        setConfirmingId((current) => (current === lostTask.id ? null : current));
+      }
       // The selected list was deleted or unshared by someone else.
       const selected = before.requestedView;
       const gone = typeof selected === 'number' ? before.lists.find((list) => list.id === selected) : undefined;
       if (gone && !nextLists.some((list) => list.id === gone.id)) {
-        // Not selectView: an open edit row stays open (its task is in Inbox now).
+        // Not selectView: an open edit row of a task that is still the
+        // viewer's stays open (the task is in Inbox now); one whose task is
+        // lost is closed above.
         setRequestedView('inbox');
         writeViewToUrl('inbox');
         setNotice(vanishedListMessage(gone));
       }
+      if (lostTask) setNotice((current) => `${current ? `${current} ` : ''}${lostTaskMessage(lostTask)}`);
     } catch {
-      // Silent, see above.
+      // Silent, see above (an aborted request ends up here).
     } finally {
+      clearTimeout(timeout);
       refreshing.current = false;
     }
   }, [onSignedOut, applyLists, me]);
