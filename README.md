@@ -483,10 +483,16 @@ list in Manage lists, and when they stop sharing someone else's list (`"Milk"
 is no longer shared with you.` after the list's notice); focus stays in
 Manage lists. In every other view, stopping sharing someone else's list,
 deleting a list, or a Manage lists change that finds the list gone closes an
-open edit row or delete question on a task that is no longer the user's, with
-`"Milk" is no longer shared with you.` after the list's notice, so it does not
-show again if the task comes back; one on a task that moves to the user's
-Inbox stays open. A 401 returns to the
+open edit row or delete question on a task that is no longer the user's, so it
+does not show again if the task comes back. The notice names the task
+(`"Milk" is no longer shared with you.`), after the list's notice when there is
+one; a successful delete has no list notice, so it is only that sentence. One
+on a task that moves to the user's Inbox stays open. A change that finds
+someone else's list gone cannot tell whether it was deleted or stopped being
+shared, so it keeps the user's own tasks from it in Inbox until the refresh it
+starts: a task that refresh (or the next one that applies) does not return
+leaves, and an open edit row or delete question on it closes with the same
+notice. A 401 returns to the
 signed-out view; any other failure is silent and retried on the next trigger.
 Saving an edit of a task another member deleted meanwhile shows the usual "no
 longer exists" notice.

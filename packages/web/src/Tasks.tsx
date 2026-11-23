@@ -570,10 +570,18 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
   // notice). Drafts in the edit row and the add form live outside the task
   // data, so they are kept as typed.
   const refreshing = useRef(false);
+  // Tasks dropList kept in Inbox without knowing whether their list was
+  // deleted (they are the user's now) or stopped being shared by its owner
+  // (they are not). The next refresh that applies its answer settles them:
+  // one the server returns is an ordinary Inbox task again, one it does not
+  // return is lost, as a task of a vanished list.
+  const provisional = useRef(new Set<number>());
   const refresh = useCallback(async () => {
     if (refreshing.current || !mounted.current || latest.current.listState !== 'ready') return;
     refreshing.current = true;
     const finished = activity.current.finished;
+    // Kept before this refresh's requests went out, so its answer can settle them.
+    const settling = new Set(provisional.current);
     // A request that never answers must not stop live refresh for good: it is
     // aborted after a while and counts as any other failed refresh.
     const controller = new AbortController();
@@ -597,14 +605,14 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
       // The task behind the edit row or the confirm-delete row is gone from
       // the answer while its list is too: it was unshared or deleted by
       // someone else, and the task is not the viewer's to keep. Its row closes
-      // with a notice, since there is no list it could be shown under.
+      // with a notice, since there is no list it could be shown under. A task
+      // dropList kept provisionally counts as one of its vanished list's.
       const openIds = [...new Set([before.editingId, before.confirmingId])].filter((id): id is number => id !== null);
       const lostTasks = before.tasks.filter(
         (task) =>
           openIds.includes(task.id) &&
           !serverIds.has(task.id) &&
-          task.listId !== null &&
-          !nextLists.some((list) => list.id === task.listId),
+          (settling.has(task.id) || (task.listId !== null && !nextLists.some((list) => list.id === task.listId))),
       );
       const lostIds = new Set(lostTasks.map((task) => task.id));
       // In "Assigned to me" the task of an open row can also leave the view
@@ -657,6 +665,7 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
       applyLists(nextLists);
       setListsState('ready');
       setMembers(membersBody.members);
+      settling.forEach((id) => provisional.current.delete(id));
       if (closedIds.size > 0) {
         setEditing((current) => (current && closedIds.has(current.id) ? null : current));
         setConfirmingId((current) => (current !== null && closedIds.has(current) ? null : current));
@@ -776,8 +785,12 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
 
   // A list the server no longer has for the user (deleted in another tab, or
   // unshared or deleted by another member): it goes as if deleted, with a
-  // notice, and a refresh then shows where its tasks really went.
+  // notice, and a refresh then shows where its tasks really went. The tasks
+  // it keeps in Inbox are provisional until then (see `provisional`).
   function dropList(list: List, message: string) {
+    latest.current.tasks.forEach((task) => {
+      if (task.listId === list.id && keptAfterDelete(task, list)) provisional.current.add(task.id);
+    });
     const { left, lost } = removeList(list, true);
     setNotice([message, ...left.map(unassignedByListMessage), ...lost.map(lostTaskMessage)].join(' '));
     if (list.shared) setTimeout(() => void refresh(), 0);
