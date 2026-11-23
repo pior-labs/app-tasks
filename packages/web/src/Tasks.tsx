@@ -157,6 +157,14 @@ function sharedLabels(task: Task, me: number, members: Member[]): ShareLabels {
 // list in Inbox, and a list's own tasks in that list.
 const inView = (task: Task, view: View) =>
   view === 'all' || task.listId === (view === 'inbox' ? null : view);
+// Puts a saved caret back, on a control that has one: only text fields do,
+// and setSelectionRange throws on others, such as a checkbox or date input.
+const restoreCaret = (element: Element | null | undefined, caret: { start: number; end: number } | null) => {
+  if (!caret) return;
+  if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)) return;
+  if (element.selectionStart === null) return;
+  element.setSelectionRange(caret.start, caret.end);
+};
 const LIST_GONE_MESSAGE = 'That list no longer exists. Choose another list.';
 const leftListMessage = (list: List) => `"${list.name}" is no longer shared with you, so it was removed.`;
 const lostTaskMessage = (task: Task) => `"${task.title}" is no longer shared with you.`;
@@ -277,16 +285,18 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
         element && !element.closest('[hidden]') ? element : undefined;
       let next: HTMLElement | undefined;
       if (refreshed.rowId !== undefined) {
+        const same = refreshed.action ? shown(control(refreshed.rowId, refreshed.action)) : undefined;
         next =
-          (refreshed.action ? shown(control(refreshed.rowId, refreshed.action)) : undefined) ??
+          same ??
           (refreshed.neighbourId === undefined ? undefined : shown(firstControl(refreshed.neighbourId))) ??
           shown(titleInput.current);
+        next?.focus();
+        // The caret belongs to the control it was saved from, not to the
+        // neighbour's checkbox or the new-task field that takes focus instead.
+        if (next === same) restoreCaret(next, refreshed.caret);
       } else if (refreshed.tab) {
         next = shown(document.getElementById(tabId(view)));
-      }
-      next?.focus();
-      if (refreshed.caret && (next instanceof HTMLInputElement || next instanceof HTMLTextAreaElement)) {
-        next.setSelectionRange(refreshed.caret.start, refreshed.caret.end);
+        next?.focus();
       }
     }
   });
@@ -358,9 +368,7 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
           day: next,
           target: () => {
             const target = control(id, action);
-            if (target && caret && (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) {
-              target.setSelectionRange(caret.start, caret.end);
-            }
+            restoreCaret(target, caret);
             return target;
           },
         };
@@ -515,22 +523,20 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
       const nextLists = listsBody.lists.map((list) => listFromServer(list, me));
       const server = tasksBody.tasks.map(fromServer);
       const serverIds = new Set(server.map((task) => task.id));
-      // The task behind the edit row is gone from the answer while its list
-      // is too: it was unshared or deleted by someone else, and the task is
-      // not the viewer's to keep. Its row closes with a notice, since there is
-      // no list it could be shown under.
-      const lostTask =
-        before.editingId === null || serverIds.has(before.editingId)
-          ? undefined
-          : before.tasks.find(
-              (task) =>
-                task.id === before.editingId &&
-                task.listId !== null &&
-                !nextLists.some((list) => list.id === task.listId),
-            );
-      const pinned = new Set(
-        [before.editingId, before.confirmingId].filter((id): id is number => id !== null && id !== lostTask?.id),
+      // The task behind the edit row or the confirm-delete row is gone from
+      // the answer while its list is too: it was unshared or deleted by
+      // someone else, and the task is not the viewer's to keep. Its row closes
+      // with a notice, since there is no list it could be shown under.
+      const openIds = [...new Set([before.editingId, before.confirmingId])].filter((id): id is number => id !== null);
+      const lostTasks = before.tasks.filter(
+        (task) =>
+          openIds.includes(task.id) &&
+          !serverIds.has(task.id) &&
+          task.listId !== null &&
+          !nextLists.some((list) => list.id === task.listId),
       );
+      const lostIds = new Set(lostTasks.map((task) => task.id));
+      const pinned = new Set(openIds.filter((id) => !lostIds.has(id)));
       // Remember focus, in case its element is replaced (see focusAfterRefresh).
       const active = document.activeElement;
       if (active instanceof HTMLElement && active !== document.body) {
@@ -559,22 +565,28 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
       applyLists(nextLists);
       setListsState('ready');
       setMembers(membersBody.members);
-      if (lostTask) {
-        setEditing((current) => (current?.id === lostTask.id ? null : current));
-        setConfirmingId((current) => (current === lostTask.id ? null : current));
+      if (lostTasks.length > 0) {
+        setEditing((current) => (current && lostIds.has(current.id) ? null : current));
+        setConfirmingId((current) => (current !== null && lostIds.has(current) ? null : current));
       }
       // The selected list was deleted or unshared by someone else.
       const selected = before.requestedView;
-      const gone = typeof selected === 'number' ? before.lists.find((list) => list.id === selected) : undefined;
-      if (gone && !nextLists.some((list) => list.id === gone.id)) {
+      const known = typeof selected === 'number' ? before.lists.find((list) => list.id === selected) : undefined;
+      const gone = known && !nextLists.some((list) => list.id === known.id) ? known : undefined;
+      if (gone) {
         // Not selectView: an open edit row of a task that is still the
         // viewer's stays open (the task is in Inbox now); one whose task is
         // lost is closed above.
         setRequestedView('inbox');
         writeViewToUrl('inbox');
-        setNotice(vanishedListMessage(gone));
       }
-      if (lostTask) setNotice((current) => `${current ? `${current} ` : ''}${lostTaskMessage(lostTask)}`);
+      // One notice for this refresh: it replaces any older one, and a lost
+      // task is named after the vanished list.
+      const messages = [
+        ...(gone ? [vanishedListMessage(gone)] : []),
+        ...lostTasks.map(lostTaskMessage),
+      ];
+      if (messages.length > 0) setNotice(messages.join(' '));
     } catch {
       // Silent, see above (an aborted request ends up here).
     } finally {

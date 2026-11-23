@@ -3926,6 +3926,68 @@ describe('shared lists', () => {
     await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText('New task')));
   });
 
+  test('a refresh that closes a lost edit row moves focus to the neighbour row without restoring a caret there (AC-14, R2-F1)', async () => {
+    signedIn([task(1, 'Sweep porch', 12, { createdById: 2 }), task(2, 'Mine', null)]);
+    withLists(groceries);
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(selectedTab()).toEqual(['All tasks']));
+    await userEvent.click(button('Edit "Sweep porch"'));
+    const field = screen.getByRole('textbox', { name: 'New title for "Sweep porch"' });
+    await userEvent.type(field, ' twice');
+    act(() => (field as HTMLInputElement).setSelectionRange(2, 4));
+    expect(document.activeElement).toBe(field);
+
+    // The owner unshared the list; "Mine" is still shown next to the closed row.
+    refreshReplies([task(2, 'Mine', null)], []);
+    await refreshOnFocus();
+    await waitFor(() => expect(screen.queryByRole('textbox', { name: /^New title for/ })).toBeNull());
+    expect(screen.getByRole('status').textContent).toBe('"Sweep porch" is no longer shared with you.');
+    expect(selectedTab()).toEqual(['All tasks']);
+    expect(taskTitles()).toEqual(['Mine']);
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('checkbox', { name: 'Mine' })));
+    // The page still works: the add form takes a task.
+    expect(screen.getByLabelText('New task')).toBeTruthy();
+    expect(calls.filter((call) => call.method !== 'GET')).toEqual([]);
+  });
+
+  test('a refresh that loses the task behind a confirm-delete row closes the row with a notice (AC-14, R2-F2)', async () => {
+    signedIn([task(1, 'Sweep porch', 12, { createdById: 2 }), task(2, 'Mine', null)]);
+    withLists(groceries);
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(selectedTab()).toEqual(['All tasks']));
+    await userEvent.click(button('Delete "Sweep porch"'));
+    expect(button('Confirm deleting "Sweep porch"')).toBeTruthy();
+
+    // The owner deleted the list: the task went to its creator's Inbox.
+    refreshReplies([task(2, 'Mine', null)], []);
+    await refreshOnFocus();
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Confirm deleting "Sweep porch"' })).toBeNull());
+    expect(screen.getByRole('status').textContent).toBe('"Sweep porch" is no longer shared with you.');
+    expect(taskTitles()).toEqual(['Mine']);
+    expect(calls.filter((call) => call.method !== 'GET')).toEqual([]);
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('checkbox', { name: 'Mine' })));
+  });
+
+  test('the lost-task notice replaces an older notice instead of joining it (AC-14, R2-F3)', async () => {
+    signedIn([task(1, 'Sweep porch', 12, { createdById: 2 }), task(2, 'Mine', null)]);
+    withLists(groceries);
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(selectedTab()).toEqual(['All tasks']));
+    reply('PATCH /api/tasks/2', json({ task: task(2, 'Mine', null, { completed: true, completedById: 1 }) }));
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Mine' }));
+    await waitFor(() => expect(screen.getByRole('status').textContent).toBe('"Mine" was moved to Completed.'));
+    await userEvent.click(button('Edit "Sweep porch"'));
+    expect(screen.getByRole('status').textContent).toBe('"Mine" was moved to Completed.');
+
+    refreshReplies([task(2, 'Mine', null, { completed: true, completedById: 1 })], []);
+    await refreshOnFocus();
+    await waitFor(() => expect(screen.queryByRole('textbox', { name: /^New title for/ })).toBeNull());
+    expect(screen.getByRole('status').textContent).toBe('"Sweep porch" is no longer shared with you.');
+  });
+
   test('a refresh that never answers is aborted and does not block the next trigger (AC-14, R1-F2)', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout'] });
     onTestFinished(() => {
