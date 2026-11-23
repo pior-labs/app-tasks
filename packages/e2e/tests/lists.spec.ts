@@ -101,6 +101,16 @@ test('creates lists and switches between them with the keyboard only (AC-8, AC-1
   await expect(button(page, 'New list')).toBeFocused();
   expect(writes).toEqual([]);
 
+  // A fullwidth "Inbox" folds to "inbox": refused on the field, nothing sent.
+  await page.keyboard.press('Enter');
+  await page.keyboard.type('\uff29\uff4e\uff42\uff4f\uff58');
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('alert')).toHaveText('"Inbox" and "All tasks" are built in. Choose another name.');
+  await expect(page.getByRole('textbox', { name: 'List name' })).toHaveAttribute('aria-invalid', 'true');
+  await page.keyboard.press('Escape');
+  await expect(button(page, 'New list')).toBeFocused();
+  expect(writes).toEqual([]);
+
   // Enter creates the list, adds its tab, selects it and focuses it.
   await page.keyboard.press('Enter');
   await page.keyboard.type('Keys: Errands');
