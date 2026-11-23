@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import type { AppAuth } from './auth.js';
 import { createListRoutes } from './lists.js';
+import { createMemberRoutes } from './members.js';
 import { createTaskRoutes, type AppDatabase } from './tasks.js';
 
 export type AppEnv = { Variables: { user: AppAuth['$Infer']['Session']['user'] } };
@@ -39,6 +40,7 @@ export function createApp(
   });
   app.route('/api/tasks', createTaskRoutes(db, appOrigin, now));
   app.route('/api/lists', createListRoutes(db, appOrigin));
+  app.route('/api/members', createMemberRoutes(db));
   app.onError((error, c) => {
     console.error('API request failed', error.name);
     return c.json({ error: 'internal_error' }, 500);

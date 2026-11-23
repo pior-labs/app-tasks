@@ -1,11 +1,17 @@
 import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from 'react';
 import { jsonHeaders, serverError } from './http';
-import { type List, type View, listNameProblem, tabId, viewName } from './lists';
+import { type List, type Member, type View, listFromServer, listNameProblem, tabId, viewName } from './lists';
 
 export const TASKS_PANEL_ID = 'tasks-panel';
+// For moving focus after a background refresh (see Tasks.tsx).
+export const NEW_LIST_BUTTON_ID = 'new-list-button';
+export const MANAGE_LISTS_BUTTON_ID = 'manage-lists-button';
 
 type Props = {
   lists: List[];
+  // The user's id, and every member, to tell whose a shared list is.
+  me: number;
+  members: Member[];
   // The lists could not be loaded: the built-in views still work.
   failed: boolean;
   // The view shown now (a missing list is already resolved to "All tasks").
@@ -13,21 +19,50 @@ type Props = {
   onSelect: (view: View) => void;
   onRetry: () => void;
   onCreated: (list: List) => void;
-  onRenamed: (list: List) => void;
-  // The server deleted the list and moved these tasks to Inbox.
-  onDeleted: (id: number, movedTaskIds: number[]) => void;
+  // The server stored a rename, share or unshare of the list, which is still
+  // the user's to see.
+  onUpdated: (list: List) => void;
+  // The user stopped sharing another member's list and can no longer see it.
+  onLeft: (list: List) => void;
+  // The server deleted the list and moved these tasks to Inbox (for a shared
+  // list, each to the Inbox of whoever added it).
+  onDeleted: (list: List, movedTaskIds: number[]) => void;
   // The list was already gone (deleted in another tab): drop it with a notice.
   onGone: (list: List, notice: string) => void;
   onSignedOut: () => void;
   // How many of the loaded tasks, open and completed, are in a list.
   taskCount: (id: number) => number;
+  // Marks a list request as pending until the returned function is called, so
+  // a background refresh does not overwrite its result (see Tasks.tsx).
+  track: () => () => void;
 };
 
 export const goneListMessage = (list: List) => `"${list.name}" no longer exists, so it was removed.`;
 
 function deleteQuestion(list: List, count: number) {
   if (count === 0) return `Delete ${list.name}? It has no tasks.`;
-  return `Delete ${list.name}? Its ${count} ${count === 1 ? 'task' : 'tasks'} will move to Inbox.`;
+  const tasks = `${count} ${count === 1 ? 'task' : 'tasks'}`;
+  // A shared list's tasks go back to whoever added each one (D-4).
+  if (list.shared) return `Delete ${list.name}? Its ${tasks} will return to the Inbox of whoever added them.`;
+  return `Delete ${list.name}? Its ${tasks} will move to Inbox.`;
+}
+
+// The visible mark of a shared list: two people. The text next to it says
+// "shared" to screen readers.
+function SharedIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 20 20"
+      fill="currentColor"
+      className="inline-block size-4 shrink-0 align-[-0.2em]"
+    >
+      <circle cx="7" cy="6" r="3" />
+      <circle cx="14" cy="7" r="2.5" />
+      <path d="M1.5 16.5c0-3 2.5-5.5 5.5-5.5s5.5 2.5 5.5 5.5z" />
+      <path d="M13.5 16.5c0-1.9-.6-3.6-1.7-4.9.6-.3 1.4-.5 2.2-.5 2.6 0 4.5 2 4.5 4.6v.8z" />
+    </svg>
+  );
 }
 
 const smallButton =
@@ -51,22 +86,35 @@ const escapeTo = (cancel: () => void) => (event: KeyboardEvent) => {
 // with readOnly and aria-disabled instead of disabled, which would drop focus.
 export function ListBar({
   lists,
+  me,
+  members,
   failed,
   view,
   onSelect,
   onRetry,
   onCreated,
-  onRenamed,
+  onUpdated,
+  onLeft,
   onDeleted,
   onGone,
   onSignedOut,
   taskCount,
+  track,
 }: Props) {
   const [creating, setCreating] = useState<{ name: string; error: string; saving: boolean } | null>(null);
   const [manageOpen, setManageOpen] = useState(false);
+  // A refresh can remove the last list too: Manage lists closes then, as when
+  // the last list is deleted here, so it does not reopen with the next list.
+  useEffect(() => {
+    if (lists.length === 0) setManageOpen(false);
+  }, [lists.length]);
   const [renaming, setRenaming] = useState<{ id: number; text: string; error: string; saving: boolean } | null>(null);
   const [confirming, setConfirming] = useState<{ id: number; deleting: boolean } | null>(null);
-  const [deleteError, setDeleteError] = useState('');
+  // Sharing or unsharing a list: the request in progress, or the question
+  // before a member stops sharing someone else's list (they lose access).
+  const [sharing, setSharing] = useState<{ id: number; confirm: boolean; saving: boolean } | null>(null);
+  // A failed delete, share or unshare.
+  const [manageError, setManageError] = useState('');
   const pendingRef = useRef(false);
   const newListButton = useRef<HTMLButtonElement>(null);
   const manageRef = useRef<HTMLDivElement>(null);
@@ -88,6 +136,8 @@ export function ListBar({
   }, []);
 
   const views: View[] = ['all', 'inbox', ...lists.map((list) => list.id)];
+  const ownLists = lists.filter((list) => list.ownerId === me);
+  const ownerName = (list: List) => members.find((member) => member.id === list.ownerId)?.name;
   const manageControl = (id: number, action: string) =>
     manageRef.current?.querySelector<HTMLElement>(`[data-list-id="${id}"] [data-action="${action}"]`);
   // After a list leaves the manage panel: the next list's Rename, else the
@@ -129,9 +179,12 @@ export function ListBar({
     event.preventDefault();
     if (!creating || pendingRef.current) return;
     const trimmed = creating.name.trim();
-    const problem = listNameProblem(trimmed, lists);
+    // Names are unique among the user's own lists; another member's shared
+    // list may have the same name.
+    const problem = listNameProblem(trimmed, ownLists);
     if (problem) return setCreating({ ...creating, error: problem });
     pendingRef.current = true;
+    const end = track();
     setCreating({ ...creating, error: '', saving: true });
     const fail = (error: string) => setCreating((current) => current && { ...current, error, saving: false });
     try {
@@ -146,7 +199,8 @@ export function ListBar({
         return fail((await serverError(response, 'That list name was not accepted.')).message);
       }
       if (!response.ok) throw new Error();
-      const { list }: { list: List } = await response.json();
+      const { list: created }: { list: List } = await response.json();
+      const list = listFromServer(created, me);
       setCreating(null);
       onCreated(list);
       // The new tab is selected; keyboard users carry on from it.
@@ -155,12 +209,14 @@ export function ListBar({
       fail('The list could not be saved. Please try again.');
     } finally {
       pendingRef.current = false;
+      end();
     }
   }
 
   function startRename(list: List) {
     if (pendingRef.current) return;
     setConfirming(null);
+    setSharing(null);
     setRenaming({ id: list.id, text: list.name, error: '', saving: false });
     focusAfterRender.current = () => {
       const field = manageControl(list.id, 'rename-field') as HTMLInputElement | null | undefined;
@@ -183,9 +239,15 @@ export function ListBar({
     // so a list stored before them keeps its name even where they would refuse
     // it now (a fullwidth "Inbox", say).
     if (trimmed === list.name) return cancelRename(list);
-    const problem = listNameProblem(trimmed, lists, list.id);
+    // Checked against the owner's lists (D-3), as far as the user sees them.
+    const problem = listNameProblem(
+      trimmed,
+      lists.filter((item) => item.ownerId === list.ownerId),
+      list.id,
+    );
     if (problem) return setRenaming({ ...renaming, error: problem });
     pendingRef.current = true;
+    const end = track();
     setRenaming({ ...renaming, error: '', saving: true });
     const fail = (error: string) =>
       setRenaming((current) => (current?.id === list.id ? { ...current, error, saving: false } : current));
@@ -208,18 +270,84 @@ export function ListBar({
       if (!response.ok) throw new Error();
       const body: { list: List } = await response.json();
       setRenaming(null);
-      onRenamed(body.list);
+      onUpdated(listFromServer(body.list, me));
       focusAfterRender.current = () => manageControl(list.id, 'rename-list');
     } catch {
       fail('The new name could not be saved. Please try again.');
     } finally {
       pendingRef.current = false;
+      end();
+    }
+  }
+
+  // Share with household, or stop sharing. Stopping sharing someone else's
+  // list first asks, because the user then loses access to it (D-2).
+  function startShareChange(list: List) {
+    if (pendingRef.current) return;
+    setRenaming(null);
+    setConfirming(null);
+    if (list.shared && list.ownerId !== me) {
+      setSharing({ id: list.id, confirm: true, saving: false });
+      // Focus lands on Cancel, so a repeated key press or click does not unshare.
+      focusAfterRender.current = () => manageControl(list.id, 'cancel-unshare-list');
+      return;
+    }
+    void saveShared(list, !list.shared);
+  }
+
+  function cancelUnshare(list: List) {
+    if (pendingRef.current) return;
+    setSharing(null);
+    focusAfterRender.current = () => manageControl(list.id, 'share-list');
+  }
+
+  async function saveShared(list: List, shared: boolean) {
+    if (pendingRef.current) return;
+    pendingRef.current = true;
+    const end = track();
+    const leaving = !shared && list.ownerId !== me;
+    setSharing({ id: list.id, confirm: leaving, saving: true });
+    setManageError('');
+    try {
+      const response = await fetch(`/api/lists/${list.id}`, {
+        method: 'PATCH',
+        headers: jsonHeaders,
+        body: JSON.stringify({ shared }),
+      });
+      if (!mounted.current) return;
+      if (response.status === 401) return onSignedOut();
+      if (response.status === 404) {
+        setSharing(null);
+        focusAfterLeaving(list.id);
+        return onGone(list, goneListMessage(list));
+      }
+      if (!response.ok) throw new Error();
+      const body: { list: List } = await response.json();
+      setSharing(null);
+      if (leaving) {
+        focusAfterLeaving(list.id);
+        return onLeft(list);
+      }
+      onUpdated(listFromServer(body.list, me));
+      // The button stays where it was, with its new label.
+      focusAfterRender.current = () => manageControl(list.id, 'share-list');
+    } catch {
+      setSharing(leaving ? { id: list.id, confirm: true, saving: false } : null);
+      setManageError(
+        shared
+          ? `"${list.name}" could not be shared. Please try again.`
+          : `Sharing "${list.name}" could not be stopped. Please try again.`,
+      );
+    } finally {
+      pendingRef.current = false;
+      end();
     }
   }
 
   function startDelete(list: List) {
     if (pendingRef.current) return;
     setRenaming(null);
+    setSharing(null);
     setConfirming({ id: list.id, deleting: false });
     // Focus lands on Cancel, so a repeated key press or click does not delete.
     focusAfterRender.current = () => manageControl(list.id, 'cancel-delete-list');
@@ -234,8 +362,9 @@ export function ListBar({
   async function confirmDelete(list: List) {
     if (confirming?.id !== list.id || pendingRef.current) return;
     pendingRef.current = true;
+    const end = track();
     setConfirming({ id: list.id, deleting: true });
-    setDeleteError('');
+    setManageError('');
     try {
       const response = await fetch(`/api/lists/${list.id}`, { method: 'DELETE' });
       if (!mounted.current) return;
@@ -249,17 +378,21 @@ export function ListBar({
       const body: { movedTaskIds: number[] } = await response.json();
       setConfirming(null);
       focusAfterLeaving(list.id);
-      onDeleted(list.id, body.movedTaskIds);
+      onDeleted(list, body.movedTaskIds);
     } catch {
       // The question stays, so the user can retry or cancel.
       setConfirming({ id: list.id, deleting: false });
-      setDeleteError(`"${list.name}" could not be deleted. Please try again.`);
+      setManageError(`"${list.name}" could not be deleted. Please try again.`);
     } finally {
       pendingRef.current = false;
+      end();
     }
   }
+  // relative: the screen-reader-only "(shared)" text is absolutely positioned,
+  // and must stay inside its tab, which the row clips, instead of widening
+  // the page on a phone.
   const tabClass =
-    'shrink-0 whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium aria-selected:bg-primary aria-selected:text-primary-foreground';
+    'relative shrink-0 whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium aria-selected:bg-primary aria-selected:text-primary-foreground';
   const showManage = manageOpen && lists.length > 0;
   return (
     <div className="space-y-3">
@@ -284,12 +417,20 @@ export function ListBar({
               className={tabClass}
             >
               {viewName(item, lists)}
+              {typeof item === 'number' && lists.find((list) => list.id === item)?.shared && (
+                <>
+                  {' '}
+                  <SharedIcon />
+                  <span className="sr-only">(shared)</span>
+                </>
+              )}
             </button>
           ))}
         </div>
         {!failed && (
           <button
             type="button"
+            id={NEW_LIST_BUTTON_ID}
             ref={newListButton}
             aria-expanded={creating !== null}
             aria-controls={creating ? 'new-list-form' : undefined}
@@ -306,6 +447,7 @@ export function ListBar({
         {!failed && lists.length > 0 && (
           <button
             type="button"
+            id={MANAGE_LISTS_BUTTON_ID}
             aria-expanded={showManage}
             aria-controls={showManage ? 'manage-lists' : undefined}
             onClick={() => setManageOpen((open) => !open)}
@@ -374,9 +516,9 @@ export function ListBar({
       )}
       {showManage && (
         <div id="manage-lists" ref={manageRef} className="rounded-lg border border-border">
-          {deleteError && (
+          {manageError && (
             <p role="alert" className="px-4 pt-3 text-sm text-destructive">
-              {deleteError}
+              {manageError}
             </p>
           )}
           <ul aria-label="Your lists" className="divide-y divide-border">
@@ -434,12 +576,52 @@ export function ListBar({
                 );
               }
               const deleting = confirming?.id === list.id && confirming.deleting;
+              const shareState = sharing?.id === list.id ? sharing : null;
+              const owner = list.ownerId === me ? null : (ownerName(list) ?? 'another member');
               return (
                 <li key={list.id} data-list-id={list.id} className="flex flex-wrap items-center gap-2 px-4 py-2">
-                  <span data-list-name className="min-w-0 flex-1 break-words">
-                    {list.name}
+                  {/* At least 10rem wide, so on a phone the buttons wrap below the name. */}
+                  <span className="min-w-40 flex-1 break-words">
+                    <span data-list-name>{list.name}</span>
+                    {list.shared && (
+                      <span data-list-sharing className="block text-sm text-muted-foreground">
+                        <SharedIcon /> {owner === null ? 'Shared with household' : `Shared by ${owner}`}
+                      </span>
+                    )}
                   </span>
-                  {confirming?.id === list.id ? (
+                  {shareState?.confirm ? (
+                    <div
+                      role="group"
+                      aria-label={`Stop sharing "${list.name}"?`}
+                      onKeyDown={escapeTo(() => cancelUnshare(list))}
+                      className="flex flex-wrap items-center gap-2"
+                    >
+                      <span className="text-sm">
+                        Stop sharing {list.name}? It goes back to {owner} with all its tasks, and you will lose access
+                        to it.
+                      </span>
+                      <button
+                        type="button"
+                        data-action="confirm-unshare-list"
+                        aria-label={`Confirm stopping sharing "${list.name}"`}
+                        aria-disabled={shareState.saving || undefined}
+                        onClick={() => void saveShared(list, false)}
+                        className={`${smallButton} border-destructive text-destructive`}
+                      >
+                        {shareState.saving ? 'Stopping...' : 'Stop sharing'}
+                      </button>
+                      <button
+                        type="button"
+                        data-action="cancel-unshare-list"
+                        aria-label={`Cancel stopping sharing "${list.name}"`}
+                        aria-disabled={shareState.saving || undefined}
+                        onClick={() => cancelUnshare(list)}
+                        className={smallButton}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : confirming?.id === list.id ? (
                     <div
                       role="group"
                       aria-label={`Delete list "${list.name}"?`}
@@ -478,6 +660,24 @@ export function ListBar({
                         className={smallButton}
                       >
                         Rename
+                      </button>
+                      <button
+                        type="button"
+                        data-action="share-list"
+                        aria-label={
+                          list.shared ? `Stop sharing "${list.name}"` : `Share "${list.name}" with household`
+                        }
+                        aria-disabled={shareState?.saving || undefined}
+                        onClick={() => startShareChange(list)}
+                        className={smallButton}
+                      >
+                        {shareState?.saving
+                          ? list.shared
+                            ? 'Stopping...'
+                            : 'Sharing...'
+                          : list.shared
+                            ? 'Stop sharing'
+                            : 'Share with household'}
                       </button>
                       <button
                         type="button"

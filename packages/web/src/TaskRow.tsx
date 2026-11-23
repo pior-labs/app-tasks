@@ -9,13 +9,14 @@ import {
 } from 'react';
 import { MAX_DUE_DATE, MIN_DUE_DATE, dueLabel, dueStatus, holdsNoDate } from './dueDate';
 import { RepeatControl, RepeatHint } from './RepeatControl';
-import type { List } from './lists';
+import type { List, Member } from './lists';
 import { type Repeat, type RepeatForm, repeatLabel } from './repeat';
 
 // dueDate is a calendar day, "YYYY-MM-DD", or null for no due date. repeat is
 // null for a task that does not repeat; only a task with a due date repeats.
 // notes is plain text, or null for none. listId is the task's list, or null
-// for Inbox.
+// for Inbox. createdById, completedById and assigneeId are member ids, or null
+// when unknown or none; only a task in a shared list has an assignee.
 export type Task = {
   id: number;
   title: string;
@@ -24,7 +25,15 @@ export type Task = {
   completed: boolean;
   dueDate: string | null;
   repeat: Repeat | null;
+  createdById: number | null;
+  completedById: number | null;
+  assigneeId: number | null;
 };
+
+// Who added, completed and is assigned a task in a shared list, as the row
+// says it. Each is null when there is nothing to say (see sharedLabels in
+// Tasks.tsx).
+export type ShareLabels = { addedBy: string | null; doneBy: string | null; assigned: string | null };
 
 // What a row is doing besides showing its task. Only one row edits at a time
 // and only one asks for a delete confirmation at a time; Tasks owns that state.
@@ -32,7 +41,8 @@ export type RowMode =
   | { kind: 'view' }
   // dueDate is the date field's value: "YYYY-MM-DD", or empty for none. notes
   // is the notes field's value, empty for none. listId is the List select's
-  // value, null for Inbox. The error belongs to the field named by errorField.
+  // value, null for Inbox. assigneeId is the "Assigned to" select's value,
+  // null for Nobody. The error belongs to the field named by errorField.
   | {
       kind: 'edit';
       text: string;
@@ -40,8 +50,9 @@ export type RowMode =
       repeat: RepeatForm;
       notes: string;
       listId: number | null;
+      assigneeId: number | null;
       error: string;
-      errorField: 'title' | 'dueDate' | 'repeat' | 'notes' | 'list';
+      errorField: 'title' | 'dueDate' | 'repeat' | 'notes' | 'list' | 'assignee';
       saving: boolean;
     }
   | { kind: 'confirm-delete'; deleting: boolean };
@@ -55,6 +66,12 @@ type Props = {
   lists: List[];
   // The name of the task's list to show in the row, or null for none.
   listName: string | null;
+  // The attribution and assignee labels, for a task in a shared list only.
+  shareLabels: ShareLabels | null;
+  // The members to offer in the "Assigned to" select, or null for no select
+  // (the edit row's List choice is not a shared list). `me` is the user's id.
+  assignees: Member[] | null;
+  me: number;
   // A completion change for this task is waiting for the server.
   updating: boolean;
   // Edit or Delete would be ignored now: another row is saving or deleting, or
@@ -74,6 +91,7 @@ type Props = {
   onEditRepeat: (repeat: RepeatForm) => void;
   onEditNotes: (notes: string) => void;
   onEditList: (listId: number | null) => void;
+  onEditAssignee: (assigneeId: number | null) => void;
   onSave: () => void;
   onCancelEdit: () => void;
   onStartDelete: () => void;
@@ -160,6 +178,9 @@ export function TaskRow({
   today,
   lists,
   listName,
+  shareLabels,
+  assignees,
+  me,
   updating,
   editLocked,
   deleteLocked,
@@ -173,6 +194,7 @@ export function TaskRow({
   onEditRepeat,
   onEditNotes,
   onEditList,
+  onEditAssignee,
   onSave,
   onCancelEdit,
   onStartDelete,
@@ -186,6 +208,7 @@ export function TaskRow({
     const repeatError = mode.error !== '' && mode.errorField === 'repeat';
     const notesError = mode.error !== '' && mode.errorField === 'notes';
     const listError = mode.error !== '' && mode.errorField === 'list';
+    const assigneeError = mode.error !== '' && mode.errorField === 'assignee';
     const fieldClass =
       'rounded-md border border-border bg-card px-3 py-1.5 text-card-foreground';
     const checkEmptied = (event: SyntheticEvent<HTMLInputElement>) => {
@@ -278,10 +301,33 @@ export function TaskRow({
             <option value="">Inbox</option>
             {lists.map((list) => (
               <option key={list.id} value={String(list.id)}>
-                {list.name}
+                {list.shared ? `${list.name} (shared)` : list.name}
               </option>
             ))}
           </select>
+          {/* Only for a task that stays in (or moves to) a shared list, after the List select. */}
+          {assignees && (
+            <select
+              data-action="edit-assignee"
+              aria-label={`Assigned to, for "${task.title}"`}
+              value={mode.assigneeId === null ? '' : String(mode.assigneeId)}
+              onChange={(event) => {
+                if (mode.saving) return;
+                onEditAssignee(event.target.value === '' ? null : Number(event.target.value));
+              }}
+              aria-disabled={mode.saving || undefined}
+              aria-invalid={assigneeError || undefined}
+              aria-describedby={assigneeError ? errorId : undefined}
+              className={`${fieldClass} min-w-0 max-w-full text-ellipsis aria-disabled:opacity-60`}
+            >
+              <option value="">Nobody</option>
+              {assignees.map((member) => (
+                <option key={member.id} value={String(member.id)}>
+                  {member.id === me ? `Me (${member.name})` : member.name}
+                </option>
+              ))}
+            </select>
+          )}
           {/* Full width, after the date and repeat and before Save in Tab order. */}
           <textarea
             data-action="edit-notes"
@@ -373,6 +419,18 @@ export function TaskRow({
           <p data-list-label className="break-words pl-8 text-sm text-muted-foreground">
             <span className="sr-only">List: </span>
             {listName}
+          </p>
+        )}
+        {shareLabels && (shareLabels.addedBy || shareLabels.doneBy || shareLabels.assigned) && (
+          <p data-share-labels className="break-words pl-8 text-sm text-muted-foreground">
+            {[shareLabels.addedBy, shareLabels.doneBy, shareLabels.assigned]
+              .filter((label): label is string => label !== null)
+              .map((label, index) => (
+                <span key={label}>
+                  {index > 0 && ' \u00B7 '}
+                  <span className="whitespace-nowrap">{label}</span>
+                </span>
+              ))}
           </p>
         )}
         {task.notes !== null && (

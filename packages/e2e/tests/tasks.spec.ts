@@ -669,9 +669,12 @@ test.describe('due dates west of UTC', () => {
     await addTaskDue(page, 'Midnight: call grandma', '2026-11-21');
     await expect(groupList(page, 'Today').getByText('Midnight: take out the recycling')).toBeVisible();
     await expect(rowOf(page, 'Midnight: call grandma').getByText('Due tomorrow')).toBeVisible();
+    // The page is never reloaded: a reload asks for the session (/api/me)
+    // again. The background refresh (shared lists AC-14) fetches /api/tasks
+    // every 30 seconds while visible, so task fetches are not counted.
     const loads: string[] = [];
     page.on('request', (request) => {
-      if (request.method() === 'GET' && new URL(request.url()).pathname === '/api/tasks') loads.push(request.url());
+      if (request.method() === 'GET' && new URL(request.url()).pathname === '/api/me') loads.push(request.url());
     });
 
     // Pass local midnight with keyboard focus on the task that will move.

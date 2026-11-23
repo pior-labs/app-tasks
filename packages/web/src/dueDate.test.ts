@@ -88,6 +88,9 @@ describe('grouping', () => {
     completed,
     dueDate,
     repeat: null,
+    createdById: null,
+    completedById: null,
+    assigneeId: null,
   });
 
   test('open tasks go to Overdue, Today, Upcoming and No date; completed tasks to Completed', () => {

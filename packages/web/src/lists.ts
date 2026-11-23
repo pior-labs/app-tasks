@@ -1,7 +1,22 @@
 import { VISIBLE_CHARACTER, characterCount } from './text';
 
-// A list the user named. Inbox is not a list: a task with listId null is in Inbox.
-export type List = { id: number; name: string };
+// A list the user can see: one of their own, or one another member shared
+// (ownerId tells whose). Inbox is not a list: a task with listId null is in
+// Inbox. A shared list is shared with the household: every Tasks user sees it
+// and can do everything with it that the owner can.
+export type List = { id: number; name: string; shared: boolean; ownerId: number };
+
+// A Tasks user: everyone who has signed in to Tasks (packages/api/src/members.ts).
+export type Member = { id: number; name: string };
+
+// The answer of an older server or stub may leave out shared and ownerId:
+// such a list is the user's own and not shared.
+export const listFromServer = (list: Partial<List> & { id: number; name: string }, me: number): List => ({
+  id: list.id,
+  name: list.name,
+  shared: list.shared ?? false,
+  ownerId: list.ownerId ?? me,
+});
 
 // What the task area shows: every task, Inbox, or one list (by id).
 export type View = 'all' | 'inbox' | number;
@@ -31,10 +46,13 @@ const RESERVED_LIST_NAMES = ['inbox', 'all tasks'];
 // The client-side list name check for a new list and a rename, on the trimmed
 // name. It mirrors the server (packages/api/src/lists.ts): at least one visible
 // character, no U+0000, at most 50 code points, not a built-in view's name,
-// and not another of the user's lists by fold (`exceptId` is the list being
-// renamed, which may keep its own fold). Returns the message to show, or an
-// empty string. Where the server's database still refuses a name (its lower()
-// differs from the fold for a few letters), the form shows the server's 409.
+// and not another of the owner's lists by fold (`exceptId` is the list being
+// renamed, which may keep its own fold). `lists` are the lists of the owner
+// (the user for a new list; the renamed list's owner, as far as the user can
+// see them). Returns the message to show, or an empty string. Where the
+// server still refuses a name (its lower() differs from the fold for a few
+// letters, or the owner has an unshared list the user cannot see), the form
+// shows the server's 409.
 export function listNameProblem(trimmed: string, lists: List[], exceptId?: number) {
   if (!VISIBLE_CHARACTER.test(trimmed)) return 'Enter a list name.';
   if (trimmed.includes('\u0000')) return 'List names cannot contain a null character.';

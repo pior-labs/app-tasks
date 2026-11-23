@@ -3,8 +3,9 @@ import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import { Hono, type Context, type MiddlewareHandler } from 'hono';
 import { z } from 'zod';
 import type { AppEnv } from './app.js';
+import { accessibleListById, accessibleTask, accessibleTaskById } from './access.js';
 import * as schema from './db/schema.js';
-import { tasks } from './db/schema.js';
+import { lists, tasks, users } from './db/schema.js';
 import {
   MAX_REPEAT_EVERY,
   MIN_REPEAT_EVERY,
@@ -129,14 +130,16 @@ function fieldError(field: PropertyKey | undefined, fallback: string) {
   if (field === 'dueDate') return 'invalid_due_date';
   if (field === 'repeat') return 'invalid_repeat';
   if (field === 'listId') return 'invalid_list';
+  if (field === 'assigneeId') return 'invalid_assignee';
   return fallback;
 }
 
 // The one definition of a valid list reference, used by both create and update:
-// a list id, or null for Inbox. Whether the list exists and belongs to the user
-// is decided by the database (tasks_list_fk), so a list deleted at the same
-// moment cannot slip through. Ids beyond the column range cannot exist.
-const LIST_MESSAGE = 'listId must be the id of one of your lists, or null for Inbox.';
+// a list id, or null for Inbox. The list must be one the user can access (their
+// own or a shared one, see access.ts), which the routes check with the list
+// locked; the database backs this up (tasks_list_fk), so a list deleted at the
+// same moment cannot slip through. Ids beyond the column range cannot exist.
+const LIST_MESSAGE = 'listId must be the id of one of your lists or a shared list, or null for Inbox.';
 const invalidList = { error: 'invalid_list', message: LIST_MESSAGE };
 const taskListId = z
   .int({ error: LIST_MESSAGE })
@@ -144,8 +147,24 @@ const taskListId = z
   .max(MAX_SERIAL_ID, { error: LIST_MESSAGE })
   .nullable();
 
+// The one definition of a valid assignee, used by both create and update: the
+// id of a Tasks user, or null for nobody. Assigning exists only in shared
+// lists: the routes accept assigneeId (null too) only when the task ends up in
+// a shared list after the same request, and check that the user exists. A
+// task that leaves a shared list (moved out, the list unshared or deleted)
+// loses its assignee.
+const ASSIGNEE_MESSAGE =
+  'assigneeId must be the id of a Tasks user, or null for nobody, and only a task in a shared list can have one.';
+const invalidAssignee = { error: 'invalid_assignee', message: ASSIGNEE_MESSAGE };
+const taskAssigneeId = z
+  .int({ error: ASSIGNEE_MESSAGE })
+  .positive({ error: ASSIGNEE_MESSAGE })
+  .max(MAX_SERIAL_ID, { error: ASSIGNEE_MESSAGE })
+  .nullable();
+
 // A missing or null dueDate both mean "no due date"; the same for notes and
-// repeat, and a missing or null listId means Inbox.
+// repeat, and a missing or null listId means Inbox. A missing assigneeId means
+// nobody.
 const createTaskBody = z.object(
   {
     title: taskTitle,
@@ -153,13 +172,14 @@ const createTaskBody = z.object(
     dueDate: taskDueDate.optional(),
     repeat: taskRepeat.optional(),
     listId: taskListId.optional(),
+    assigneeId: taskAssigneeId.optional(),
   },
   { error: 'Send a JSON object with a title.' },
 );
 // Any of the fields may be sent alone. Unknown keys (such as an owner or an id)
 // are dropped. `today` is read separately: it only matters when completing.
 const UPDATE_FIELDS_MESSAGE =
-  'Send a JSON object with a title, notes, a completed value, a due date (dueDate), a repeat, a list (listId), or any of them together.';
+  'Send a JSON object with a title, notes, a completed value, a due date (dueDate), a repeat, a list (listId), an assignee (assigneeId), or any of them together.';
 const updateTaskBody = z.object(
   {
     title: taskTitle.optional(),
@@ -168,13 +188,16 @@ const updateTaskBody = z.object(
     dueDate: taskDueDate.optional(),
     repeat: taskRepeat.optional(),
     listId: taskListId.optional(),
+    assigneeId: taskAssigneeId.optional(),
     today: z.unknown().optional(),
   },
   { error: UPDATE_FIELDS_MESSAGE },
 );
 
-// Never expose user_id, repeat_anchor or repeated_from_id: the owner is implied
-// by the session, and the other two are internal to the schedule.
+// Never expose user_id, repeat_anchor or repeated_from_id: the owner follows
+// from the task's list (or is the session user, for Inbox), and the other two
+// are internal to the schedule. createdById, completedById and assigneeId are
+// user ids, or null when unknown or none.
 const taskColumns = {
   id: tasks.id,
   title: tasks.title,
@@ -184,6 +207,9 @@ const taskColumns = {
   dueDate: tasks.dueDate,
   repeatEvery: tasks.repeatEvery,
   repeatUnit: tasks.repeatUnit,
+  createdById: tasks.createdById,
+  completedById: tasks.completedById,
+  assigneeId: tasks.assigneeId,
   createdAt: tasks.createdAt,
   updatedAt: tasks.updatedAt,
 };
@@ -196,6 +222,9 @@ type TaskRow = {
   dueDate: string | null;
   repeatEvery: number | null;
   repeatUnit: string | null;
+  createdById: number | null;
+  completedById: number | null;
+  assigneeId: number | null;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -269,6 +298,68 @@ const isListReferenceError = (error: unknown) => {
   const cause = databaseError(error);
   return cause?.code === '23503' && cause.constraint_name === 'tasks_list_fk';
 };
+// The assignee's user was deleted at this moment.
+const isAssigneeReferenceError = (error: unknown) => {
+  const cause = databaseError(error);
+  return cause?.code === '23503' && cause.constraint_name === 'tasks_assignee_fk';
+};
+
+export type Transaction = Parameters<Parameters<AppDatabase['transaction']>[0]>[0];
+
+// Locks a list the user can access and answers its owner and whether it is
+// shared, or null for an unknown, deleted or inaccessible list. FOR SHARE
+// waits for a delete, rename, share or unshare of the list in progress and
+// holds them off until this transaction ends, so the answer stays true for
+// the task written with it.
+export async function lockAccessibleList(tx: Transaction, userId: number, id: number) {
+  const [list] = await tx
+    .select({ ownerId: lists.userId, shared: lists.shared })
+    .from(lists)
+    .where(accessibleListById(userId, id))
+    .for('share');
+  return list ?? null;
+}
+
+// Locks a task the user can access, or answers null. The task is locked
+// first, then its list (the order a list delete or unshare takes them in
+// reverse, see lists.ts). The access check is repeated on the locked list:
+// a list unshared while this transaction waited for the task is seen here, so
+// a member who just lost access cannot still change the task.
+async function lockAccessibleTask(tx: Transaction, userId: number, id: number) {
+  const [task] = await tx
+    .select({
+      userId: tasks.userId,
+      listId: tasks.listId,
+      completed: tasks.completed,
+      dueDate: tasks.dueDate,
+      repeatEvery: tasks.repeatEvery,
+      repeatUnit: tasks.repeatUnit,
+      repeatAnchor: tasks.repeatAnchor,
+      createdById: tasks.createdById,
+      assigneeId: tasks.assigneeId,
+    })
+    .from(tasks)
+    .where(accessibleTaskById(userId, id))
+    .for('update');
+  if (!task) return null;
+  let listShared = false;
+  if (task.listId !== null) {
+    const [list] = await tx
+      .select({ shared: lists.shared })
+      .from(lists)
+      .where(eq(lists.id, task.listId))
+      .for('share');
+    listShared = list?.shared ?? false;
+  }
+  if (task.userId !== userId && !listShared) return null;
+  return { ...task, listShared };
+}
+
+// Whether a user with this id exists (a Tasks user, so a member to assign).
+async function isMember(tx: Transaction, id: number) {
+  const [user] = await tx.select({ id: users.id }).from(users).where(eq(users.id, id));
+  return user !== undefined;
+}
 
 // Runs a transaction again when PostgreSQL chose it as the victim of a
 // deadlock. Deleting a list locks its tasks and then the list, while a task
@@ -292,7 +383,7 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string, now: () => 
     const rows = await db
       .select(taskColumns)
       .from(tasks)
-      .where(eq(tasks.userId, sessionUserId(c)))
+      .where(accessibleTask(sessionUserId(c)))
       .orderBy(desc(tasks.createdAt), desc(tasks.id));
     return c.json({ tasks: rows.map(toTask) });
   });
@@ -310,27 +401,47 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string, now: () => 
     const dueDate = parsed.data.dueDate ?? null;
     const repeat = parsed.data.repeat ?? null;
     if (repeat && dueDate === null) return c.json(invalidRepeat(REPEAT_NEEDS_DUE_DATE_MESSAGE), 400);
-    let task: TaskRow;
+    const userId = sessionUserId(c);
+    const listId = parsed.data.listId ?? null;
+    const { assigneeId } = parsed.data;
+    let result: { status: 400; body: typeof invalidList } | { status: 201; body: { task: ReturnType<typeof toTask> } };
     try {
-      [task] = await db
-        .insert(tasks)
-        .values({
-          userId: sessionUserId(c),
-          title: parsed.data.title,
-          listId: parsed.data.listId ?? null,
-          notes: parsed.data.notes ?? null,
-          dueDate,
-          repeatEvery: repeat?.every ?? null,
-          repeatUnit: repeat?.unit ?? null,
-          repeatAnchor: repeat ? dueDate : null,
-        })
-        .returning(taskColumns);
+      result = await db.transaction(async (tx) => {
+        // A task in a list is stored with the list owner's user_id
+        // (tasks_list_fk), also when another member adds it to their shared
+        // list; the adder is kept in created_by_id. In Inbox the adder owns it.
+        const list = listId === null ? null : await lockAccessibleList(tx, userId, listId);
+        if (listId !== null && !list) return { status: 400 as const, body: invalidList };
+        if (assigneeId !== undefined) {
+          if (!list?.shared) return { status: 400 as const, body: invalidAssignee };
+          if (assigneeId !== null && !(await isMember(tx, assigneeId))) {
+            return { status: 400 as const, body: invalidAssignee };
+          }
+        }
+        const [task]: TaskRow[] = await tx
+          .insert(tasks)
+          .values({
+            userId: list?.ownerId ?? userId,
+            createdById: userId,
+            assigneeId: assigneeId ?? null,
+            title: parsed.data.title,
+            listId,
+            notes: parsed.data.notes ?? null,
+            dueDate,
+            repeatEvery: repeat?.every ?? null,
+            repeatUnit: repeat?.unit ?? null,
+            repeatAnchor: repeat ? dueDate : null,
+          })
+          .returning(taskColumns);
+        return { status: 201 as const, body: { task: toTask(task) } };
+      });
     } catch (error) {
-      // An unknown, deleted or foreign list: the same answer for all three.
+      // An unknown, deleted or inaccessible list: the same answer for all three.
       if (isListReferenceError(error)) return c.json(invalidList, 400);
+      if (isAssigneeReferenceError(error)) return c.json(invalidAssignee, 400);
       throw error;
     }
-    return c.json({ task: toTask(task) }, 201);
+    return c.json(result.body, result.status);
   });
 
   routes.patch('/:id', async (c) => {
@@ -345,14 +456,15 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string, now: () => 
       const [issue] = parsed.error.issues;
       return c.json({ error: fieldError(issue.path[0], 'invalid_update'), message: issue.message }, 400);
     }
-    const { title, notes, completed, dueDate, repeat, listId } = parsed.data;
+    const { title, notes, completed, dueDate, repeat, listId, assigneeId } = parsed.data;
     if (
       title === undefined &&
       notes === undefined &&
       completed === undefined &&
       dueDate === undefined &&
       repeat === undefined &&
-      listId === undefined
+      listId === undefined &&
+      assigneeId === undefined
     ) {
       return c.json({ error: 'invalid_update', message: UPDATE_FIELDS_MESSAGE }, 400);
     }
@@ -360,23 +472,12 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string, now: () => 
     if (id > MAX_TASK_ID) return c.json(taskNotFound, 404);
     const userId = sessionUserId(c);
     const serverToday = utcDate(now());
-    const ownTask = and(eq(tasks.id, id), eq(tasks.userId, userId));
 
     // One transaction: the update, and the next occurrence created or removed
     // with it. The row is locked first, so concurrent changes to one task run
     // one after another and see each other's result.
     const transaction = () => db.transaction(async (tx) => {
-      const [current] = await tx
-        .select({
-          completed: tasks.completed,
-          dueDate: tasks.dueDate,
-          repeatEvery: tasks.repeatEvery,
-          repeatUnit: tasks.repeatUnit,
-          repeatAnchor: tasks.repeatAnchor,
-        })
-        .from(tasks)
-        .where(ownTask)
-        .for('update');
+      const current = await lockAccessibleTask(tx, userId, id);
       if (!current) return { status: 404 as const, body: taskNotFound };
 
       const currentRepeat = repeatOf(current);
@@ -409,6 +510,29 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string, now: () => 
           ? newDueDate
           : current.repeatAnchor;
 
+      // Where the task ends up, and so who owns it (tasks_list_fk): moving it
+      // into a list gives it to that list's owner, moving it to Inbox gives it
+      // to the mover. Without a move, owner and list stay.
+      let owner = current.userId;
+      let endsShared = current.listShared;
+      if (listId === null) {
+        owner = userId;
+        endsShared = false;
+      } else if (listId !== undefined) {
+        const list = await lockAccessibleList(tx, userId, listId);
+        if (!list) return { status: 400 as const, body: invalidList };
+        owner = list.ownerId;
+        endsShared = list.shared;
+      }
+      // Only a task in a shared list has an assignee (see taskAssigneeId).
+      if (assigneeId !== undefined) {
+        if (!endsShared) return { status: 400 as const, body: invalidAssignee };
+        if (assigneeId !== null && !(await isMember(tx, assigneeId))) {
+          return { status: 400 as const, body: invalidAssignee };
+        }
+      }
+      const newAssignee = !endsShared ? null : assigneeId === undefined ? current.assigneeId : assigneeId;
+
       const [task] = await tx
         .update(tasks)
         .set({
@@ -418,20 +542,22 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string, now: () => 
           ...(completed === undefined ? {} : { completed }),
           ...(dueDate === undefined ? {} : { dueDate }),
           ...(repeat === undefined ? {} : { repeatEvery: repeat?.every ?? null, repeatUnit: repeat?.unit ?? null }),
+          // Who completed it: the session user when this update completes
+          // it, nobody once it is open again, otherwise unchanged.
+          ...(completing ? { completedById: userId } : reopening ? { completedById: null } : {}),
+          userId: owner,
+          assigneeId: newAssignee,
           repeatAnchor: newAnchor,
           updatedAt: sql`now()`,
         })
-        .where(ownTask)
-        .returning(taskColumns);
+        .where(eq(tasks.id, id))
+        .returning({ ...taskColumns, userId: tasks.userId });
 
       let nextTask: TaskRow | null = null;
       if (completing && newRepeat && newDueDate !== null && newAnchor !== null) {
         // Completing again while an earlier next occurrence still exists (it
         // was completed itself, so un-completing kept it) creates no second one.
-        const [existing] = await tx
-          .select({ id: tasks.id })
-          .from(tasks)
-          .where(and(eq(tasks.repeatedFromId, id), eq(tasks.userId, userId)));
+        const [existing] = await tx.select({ id: tasks.id }).from(tasks).where(eq(tasks.repeatedFromId, id));
         const next = nextDueDate({
           anchor: newAnchor,
           dueDate: newDueDate,
@@ -445,9 +571,12 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string, now: () => 
           [nextTask = null] = await tx
             .insert(tasks)
             .values({
-              userId,
-              // The next occurrence carries the title, notes and list as this
-              // update stored them.
+              // The next occurrence carries the title, notes, list (and so
+              // owner) and assignee as this update stored them, and the
+              // original's creator. Nobody has completed it yet.
+              userId: task.userId,
+              createdById: task.createdById,
+              assigneeId: task.assigneeId,
               title: task.title,
               listId: task.listId,
               notes: task.notes,
@@ -464,16 +593,18 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string, now: () => 
       let removedTaskId: number | null = null;
       if (reopening) {
         // Undo: the next occurrence goes away while it is still open. One that
-        // was completed meanwhile is kept.
+        // was completed meanwhile is kept, and so is one the user cannot
+        // access (another member moved it to their own Inbox).
         const [removed] = await tx
           .delete(tasks)
-          .where(and(eq(tasks.repeatedFromId, id), eq(tasks.userId, userId), eq(tasks.completed, false)))
+          .where(and(eq(tasks.repeatedFromId, id), eq(tasks.completed, false), accessibleTask(userId)))
           .returning({ id: tasks.id });
         removedTaskId = removed?.id ?? null;
       }
+      const { userId: _owner, ...stored } = task;
       return {
         status: 200 as const,
-        body: { task: toTask(task), nextTask: nextTask && toTask(nextTask), removedTaskId },
+        body: { task: toTask(stored), nextTask: nextTask && toTask(nextTask), removedTaskId },
       };
     });
     let result: Awaited<ReturnType<typeof transaction>>;
@@ -483,6 +614,7 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string, now: () => 
       // The list was unknown, deleted (perhaps at this moment) or another
       // user's. The whole transaction was rolled back, so nothing changed.
       if (isListReferenceError(error)) return c.json(invalidList, 400);
+      if (isAssigneeReferenceError(error)) return c.json(invalidAssignee, 400);
       throw error;
     }
     return c.json(result.body, result.status);
@@ -491,15 +623,19 @@ export function createTaskRoutes(db: AppDatabase, appOrigin: string, now: () => 
   routes.delete('/:id', async (c) => {
     const id = taskId(c.req.param('id'));
     if (id === null) return c.json(invalidTaskId, 400);
-    // The owner filter is part of the delete itself, so a missing, already
-    // deleted or foreign task all end the same way.
-    const [deleted] =
+    const userId = sessionUserId(c);
+    // The task is locked with the access check (see lockAccessibleTask), so a
+    // missing, already deleted or inaccessible task all end the same way.
+    const deleted =
       id > MAX_TASK_ID
-        ? []
-        : await db
-            .delete(tasks)
-            .where(and(eq(tasks.id, id), eq(tasks.userId, sessionUserId(c))))
-            .returning({ id: tasks.id });
+        ? false
+        : await retryOnDeadlock(() =>
+            db.transaction(async (tx) => {
+              if (!(await lockAccessibleTask(tx, userId, id))) return false;
+              await tx.delete(tasks).where(eq(tasks.id, id));
+              return true;
+            }),
+          );
     if (!deleted) return c.json(taskNotFound, 404);
     return c.body(null, 204);
   });
