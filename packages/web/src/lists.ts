@@ -18,8 +18,11 @@ export const listFromServer = (list: Partial<List> & { id: number; name: string 
   ownerId: list.ownerId ?? me,
 });
 
-// What the task area shows: every task, Inbox, or one list (by id).
-export type View = 'all' | 'inbox' | number;
+// What the task area shows: every task, Inbox, the tasks assigned to the
+// signed-in user in any shared list ("Assigned to me"), or one list (by id).
+export type View = 'all' | 'inbox' | 'assigned' | number;
+// The built-in views, in tab order before the lists.
+export const BUILT_IN_VIEWS: View[] = ['all', 'inbox', 'assigned'];
 
 export const MAX_LIST_NAME_LENGTH = 50;
 // When two list names count as the same, and whether a name is a built-in
@@ -31,7 +34,7 @@ export const MAX_LIST_NAME_LENGTH = 50;
 // dropped, NFKC is applied again (so an invisible one between a letter and its
 // combining mark does not keep them apart), then trimmed and lowercased.
 // Letters from other scripts that only look Latin are not folded, and "Inbox
-// zero" is a normal name.
+// zero" or "Assigned to me later" is a normal name.
 const foldListName = (name: string) =>
   name
     .normalize('NFKC')
@@ -41,7 +44,7 @@ const foldListName = (name: string) =>
     .replace(/ +/g, ' ')
     .trim()
     .toLowerCase();
-const RESERVED_LIST_NAMES = ['inbox', 'all tasks'];
+const RESERVED_LIST_NAMES = ['inbox', 'all tasks', 'assigned to me'];
 
 // The client-side list name check for a new list and a rename, on the trimmed
 // name. It mirrors the server (packages/api/src/lists.ts): at least one visible
@@ -60,7 +63,9 @@ export function listNameProblem(trimmed: string, lists: List[], exceptId?: numbe
     return `List names can be at most ${MAX_LIST_NAME_LENGTH} characters.`;
   }
   const folded = foldListName(trimmed);
-  if (RESERVED_LIST_NAMES.includes(folded)) return '"Inbox" and "All tasks" are built in. Choose another name.';
+  if (RESERVED_LIST_NAMES.includes(folded)) {
+    return '"Inbox", "All tasks" and "Assigned to me" are built in. Choose another name.';
+  }
   const current = lists.find((list) => list.id === exceptId);
   if (current && foldListName(current.name) === folded) return '';
   if (lists.some((list) => list.id !== exceptId && foldListName(list.name) === folded)) {
@@ -69,12 +74,13 @@ export function listNameProblem(trimmed: string, lists: List[], exceptId?: numbe
   return '';
 }
 
-// The view is kept in the URL as ?list=all, ?list=inbox or ?list=<id>, so a
+// The view is kept in the URL as ?list=all, ?list=inbox, ?list=assigned or
+// ?list=<id>, so a
 // reload keeps it. Anything else is "All tasks" (as is an id that is not one
 // of the user's lists, which the caller checks once the lists are known).
 export function viewFromSearch(search: string): View {
   const value = new URLSearchParams(search).get('list');
-  if (value === 'inbox') return 'inbox';
+  if (value === 'inbox' || value === 'assigned') return value;
   if (value !== null && /^[1-9]\d{0,9}$/.test(value)) return Number(value);
   return 'all';
 }
@@ -87,6 +93,7 @@ export function writeViewToUrl(view: View) {
 export function viewName(view: View, lists: List[]) {
   if (view === 'all') return 'All tasks';
   if (view === 'inbox') return 'Inbox';
+  if (view === 'assigned') return 'Assigned to me';
   return lists.find((list) => list.id === view)?.name ?? 'Inbox';
 }
 export const tabId = (view: View) => `list-tab-${view}`;

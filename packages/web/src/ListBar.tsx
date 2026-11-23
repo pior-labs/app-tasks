@@ -1,6 +1,15 @@
 import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from 'react';
 import { jsonHeaders, serverError } from './http';
-import { type List, type Member, type View, listFromServer, listNameProblem, tabId, viewName } from './lists';
+import {
+  BUILT_IN_VIEWS,
+  type List,
+  type Member,
+  type View,
+  listFromServer,
+  listNameProblem,
+  tabId,
+  viewName,
+} from './lists';
 
 export const TASKS_PANEL_ID = 'tasks-panel';
 // For moving focus after a background refresh (see Tasks.tsx).
@@ -78,8 +87,8 @@ const escapeTo = (cancel: () => void) => (event: KeyboardEvent) => {
   }
 };
 
-// The tab row above the task area: "All tasks", "Inbox" and the user's lists
-// in creation order, as an ARIA tablist with automatic activation (arrow keys,
+// The tab row above the task area: "All tasks", "Inbox", "Assigned to me" and
+// the user's lists in creation order, as an ARIA tablist with automatic activation (arrow keys,
 // Home and End select a tab; only the selected tab is in the Tab order). "New
 // list" and "Manage lists" are ordinary buttons after it. The row scrolls
 // sideways inside itself when the tabs do not fit. Pending controls are locked
@@ -135,7 +144,7 @@ export function ListBar({
     };
   }, []);
 
-  const views: View[] = ['all', 'inbox', ...lists.map((list) => list.id)];
+  const views: View[] = [...BUILT_IN_VIEWS, ...lists.map((list) => list.id)];
   const ownLists = lists.filter((list) => list.ownerId === me);
   const ownerName = (list: List) => members.find((member) => member.id === list.ownerId)?.name;
   const manageControl = (id: number, action: string) =>

@@ -43,9 +43,10 @@ const foldListName = (name: string) =>
     .trim()
     .toLowerCase();
 // The built-in views. A list whose name folds to one of them would look like
-// its tab. Names that merely contain the words, such as "Inbox zero", are
-// allowed.
-const RESERVED_LIST_NAMES = ['inbox', 'all tasks'];
+// its tab. Names that merely contain the words, such as "Inbox zero" or
+// "Assigned to me later", are allowed. Lists stored with such a name before it
+// was reserved keep it; only creates and renames to it are refused.
+const RESERVED_LIST_NAMES = ['inbox', 'all tasks', 'assigned to me'];
 const isReservedListName = (name: string) => RESERVED_LIST_NAMES.includes(foldListName(name));
 
 // The one definition of a valid list name, used by both create and rename. The
@@ -68,7 +69,7 @@ const listName = z
   })
   .max(MAX_LIST_NAME_LENGTH, { error: `List names can be at most ${MAX_LIST_NAME_LENGTH} characters.` })
   .refine((name) => !isReservedListName(name), {
-    error: '"Inbox" and "All tasks" are built in. Choose another name.',
+    error: '"Inbox", "All tasks" and "Assigned to me" are built in. Choose another name.',
   });
 // Create takes a name. Unknown keys (such as an owner, an id or shared) are
 // dropped: a new list is never shared (sharing is a change to an existing list).
