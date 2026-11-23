@@ -716,10 +716,37 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
   const keptAfterDelete = (task: Task, list: List) =>
     (list.shared ? (task.createdById ?? list.ownerId) : list.ownerId) === me;
 
+  // In "Assigned to me", a change made in Manage lists takes every task of
+  // the list (and `movedTaskIds`) out of the view without a save: stopping
+  // sharing a list clears its assignees, deleting it moves its tasks to an
+  // Inbox, and stopping sharing someone else's list takes them away. An open
+  // edit row or delete question on such a task would be left on a row
+  // nothing shows, so it closes, as a refresh closes it for the same change
+  // made by someone else. Returns the tasks whose rows closed, for the
+  // caller's notice. Other views are unchanged. It reads the latest state,
+  // since Manage lists calls back after its request.
+  function closeRowsLeavingAssigned(list: List, movedTaskIds: number[] = []) {
+    const { tasks: current, lists: known, requestedView: shownView, editingId, confirmingId: questionId } = latest.current;
+    if (shownView !== 'assigned') return [];
+    const left = current.filter(
+      (task) =>
+        (task.id === editingId || task.id === questionId) &&
+        (task.listId === list.id || movedTaskIds.includes(task.id)) &&
+        inView(task, 'assigned', me, known),
+    );
+    if (left.length === 0) return [];
+    const ids = new Set(left.map((task) => task.id));
+    setEditing((open) => (open && ids.has(open.id) ? null : open));
+    setConfirmingId((open) => (open !== null && ids.has(open) ? null : open));
+    return left;
+  }
+
   // A list the user can no longer see: its tab goes, a view of it switches
   // to Inbox, and its tasks leave with it (the user stopped sharing someone
-  // else's list) or move to Inbox (it was deleted).
+  // else's list) or move to Inbox (it was deleted). Returns the tasks whose
+  // open rows closed in "Assigned to me" (see closeRowsLeavingAssigned).
   function removeList(list: List, deleted: boolean, movedTaskIds: number[] = []) {
+    const left = closeRowsLeavingAssigned(list, movedTaskIds);
     const moved = new Set(movedTaskIds);
     setTasks((current) =>
       current.flatMap((task) => {
@@ -734,14 +761,15 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
       return task && task.listId === list.id && (!deleted || !keptAfterDelete(task, list)) ? null : current;
     });
     if (requestedView === list.id) selectView('inbox');
+    return left;
   }
 
   // A list the server no longer has for the user (deleted in another tab, or
   // unshared or deleted by another member): it goes as if deleted, with a
   // notice, and a refresh then shows where its tasks really went.
   function dropList(list: List, message: string) {
-    removeList(list, true);
-    setNotice(message);
+    const left = removeList(list, true);
+    setNotice([message, ...left.map(unassignedByListMessage)].join(' '));
     if (list.shared) setTimeout(() => void refresh(), 0);
   }
 
@@ -1280,6 +1308,8 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
           setLists((current) => current.map((item) => (item.id === list.id ? list : item)));
           // Unsharing cleared the assignees of the list's tasks on the server.
           if (!list.shared) {
+            const left = closeRowsLeavingAssigned(list);
+            if (left.length > 0) setNotice(left.map(unassignedByListMessage).join(' '));
             setTasks((current) =>
               current.some((task) => task.listId === list.id && task.assigneeId !== null)
                 ? current.map((task) => (task.listId === list.id ? { ...task, assigneeId: null } : task))
@@ -1289,11 +1319,12 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
           }
         }}
         onLeft={(list) => {
-          removeList(list, false);
-          setNotice(leftListMessage(list));
+          const left = removeList(list, false);
+          setNotice([leftListMessage(list), ...left.map(lostTaskMessage)].join(' '));
         }}
         onDeleted={(list, movedTaskIds) => {
-          removeList(list, true, movedTaskIds);
+          const left = removeList(list, true, movedTaskIds);
+          if (left.length > 0) setNotice(left.map(unassignedByListMessage).join(' '));
           setEditing((current) => (current?.listId === list.id ? { ...current, listId: null, assigneeId: null } : current));
         }}
         onGone={dropList}

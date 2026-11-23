@@ -478,7 +478,10 @@ with the same focus rules; the view itself never switches away. An open edit
 row or delete question there stays, as in other views, unless its list was
 deleted or stopped being shared: then it closes with a notice (`"Milk" is no
 longer assigned to you, because its list was deleted or is no longer
-shared.`). A 401 returns to the
+shared.`). The same happens when the user stops sharing or deletes their own
+list in Manage lists, and when they stop sharing someone else's list (`"Milk"
+is no longer shared with you.` after the list's notice); focus stays in
+Manage lists. A 401 returns to the
 signed-out view; any other failure is silent and retried on the next trigger.
 Saving an edit of a task another member deleted meanwhile shows the usual "no
 longer exists" notice.

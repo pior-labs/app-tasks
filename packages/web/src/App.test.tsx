@@ -4547,6 +4547,161 @@ describe('assigned to me', () => {
     expect(calls.filter((call) => call.method !== 'GET')).toEqual([]);
   });
 
+  // A change made here in Manage lists, without a save, can take the task of
+  // an open edit row or delete question out of the view. The row closes with
+  // the notice a refresh shows for the same change, focus stays in Manage
+  // lists, and nothing stays open on a row nobody sees: a later refresh takes
+  // the server's version of the task instead of keeping it pinned.
+  const garden = list(14, 'Garden', { shared: true });
+  const unassignedNotice = (title: string) =>
+    `"${title}" is no longer assigned to you, because its list was deleted or is no longer shared.`;
+  const inManage = () => document.getElementById('manage-lists')?.contains(document.activeElement) ?? false;
+  const shown = (title: string) => screen.queryByRole('checkbox', { name: title }) !== null;
+
+  test('stopping sharing an own list closes an open edit row or delete question of its task with a notice (tasks-assigned-to-me R1-F1)', async () => {
+    await openAssigned(
+      [task(1, 'Alpha', 11, mine), task(2, 'Bravo', 12, mine), task(4, 'Delta', 14, { ...mine, createdById: 2 })],
+      [errands, home, groceries, work, garden],
+    );
+    const field = await startEditing('Alpha');
+    await userEvent.type(field, ' draft');
+    await userEvent.click(button('Manage lists'));
+    reply('PATCH /api/lists/11', json({ list: { ...home, shared: false } }));
+    await userEvent.click(button('Stop sharing "Home"'));
+    await waitFor(() => expect(tabNames()).toContain('Home'));
+    expect(screen.queryByRole('textbox', { name: /^New title for/ })).toBeNull();
+    expect(shown('Alpha')).toBe(false);
+    expect(shown('Bravo')).toBe(true);
+    expect(status()).toBe(unassignedNotice('Alpha'));
+    expect(document.activeElement).toBe(button('Share "Home" with household'));
+
+    // The same for a delete question, on a task another member added.
+    await userEvent.click(button('Delete "Delta"'));
+    reply('PATCH /api/lists/14', json({ list: { ...garden, shared: false } }));
+    await userEvent.click(button('Stop sharing "Garden"'));
+    await waitFor(() => expect(tabNames()).toContain('Garden'));
+    expect(screen.queryByRole('button', { name: 'Confirm deleting "Delta"' })).toBeNull();
+    expect(shown('Delta')).toBe(false);
+    expect(status()).toBe(unassignedNotice('Delta'));
+    expect(document.activeElement).toBe(button('Share "Garden" with household'));
+
+    refreshReplies(
+      [task(1, 'Alpha renamed', 11), task(2, 'Bravo', 12, mine), task(4, 'Delta renamed', 14, { createdById: 2 })],
+      [errands, { ...home, shared: false }, groceries, work, { ...garden, shared: false }],
+    );
+    await refreshOnFocus();
+    await userEvent.click(tab('Home'));
+    await waitFor(() => expect(shown('Alpha renamed')).toBe(true));
+    await userEvent.click(tab('Garden'));
+    expect(shown('Delta renamed')).toBe(true);
+  });
+
+  test('deleting an own shared list closes an open edit row or delete question of its task with a notice (tasks-assigned-to-me R1-F1)', async () => {
+    await openAssigned(
+      [task(1, 'Alpha', 11, mine), task(2, 'Bravo', 12, mine), task(4, 'Delta', 14, { ...mine, createdById: 2 })],
+      [errands, home, groceries, work, garden],
+    );
+    const field = await startEditing('Alpha');
+    await userEvent.type(field, ' draft');
+    await userEvent.click(button('Manage lists'));
+    // Alpha, added by the user, moves to the user's Inbox.
+    reply('DELETE /api/lists/11', json({ movedTaskIds: [1] }));
+    await userEvent.click(button('Delete list "Home"'));
+    await userEvent.click(button('Confirm deleting list "Home"'));
+    await waitFor(() => expect(tabNames()).not.toContain('Home (shared)'));
+    expect(screen.queryByRole('textbox', { name: /^New title for/ })).toBeNull();
+    expect(shown('Alpha')).toBe(false);
+    expect(status()).toBe(unassignedNotice('Alpha'));
+    expect(inManage()).toBe(true);
+
+    // Delta, added by another member, goes to that member's Inbox.
+    await userEvent.click(button('Delete "Delta"'));
+    reply('DELETE /api/lists/14', json({ movedTaskIds: [4] }));
+    await userEvent.click(button('Delete list "Garden"'));
+    await userEvent.click(button('Confirm deleting list "Garden"'));
+    await waitFor(() => expect(tabNames()).not.toContain('Garden (shared)'));
+    expect(screen.queryByRole('button', { name: 'Confirm deleting "Delta"' })).toBeNull();
+    expect(shown('Delta')).toBe(false);
+    expect(shown('Bravo')).toBe(true);
+    expect(status()).toBe(unassignedNotice('Delta'));
+    expect(inManage()).toBe(true);
+
+    refreshReplies([task(1, 'Alpha renamed', null), task(2, 'Bravo', 12, mine)], [errands, groceries, work]);
+    await refreshOnFocus();
+    await userEvent.click(tab('Inbox'));
+    await waitFor(() => expect(shown('Alpha renamed')).toBe(true));
+  });
+
+  test('stopping sharing someone else\'s list closes an open edit row or delete question of its task with a notice (tasks-assigned-to-me R1-F1)', async () => {
+    await openAssigned([task(1, 'Alpha', 11, mine), task(2, 'Bravo', 12, mine), task(3, 'Charlie', 13, mine)]);
+    const field = await startEditing('Bravo');
+    await userEvent.type(field, ' draft');
+    await userEvent.click(button('Manage lists'));
+    reply('PATCH /api/lists/12', json({ list: { ...groceries, shared: false } }));
+    await userEvent.click(button('Stop sharing "Groceries"'));
+    await userEvent.click(button('Confirm stopping sharing "Groceries"'));
+    await waitFor(() => expect(tabNames()).not.toContain('Groceries (shared)'));
+    expect(screen.queryByRole('textbox', { name: /^New title for/ })).toBeNull();
+    expect(shown('Bravo')).toBe(false);
+    expect(status()).toBe('"Groceries" is no longer shared with you, so it was removed. "Bravo" is no longer shared with you.');
+    expect(inManage()).toBe(true);
+
+    await userEvent.click(button('Delete "Charlie"'));
+    reply('PATCH /api/lists/13', json({ list: { ...work, shared: false } }));
+    await userEvent.click(button('Stop sharing "Work"'));
+    await userEvent.click(button('Confirm stopping sharing "Work"'));
+    await waitFor(() => expect(tabNames()).not.toContain('Work (shared)'));
+    expect(screen.queryByRole('button', { name: 'Confirm deleting "Charlie"' })).toBeNull();
+    expect(shown('Charlie')).toBe(false);
+    expect(shown('Alpha')).toBe(true);
+    expect(status()).toBe('"Work" is no longer shared with you, so it was removed. "Charlie" is no longer shared with you.');
+    expect(inManage()).toBe(true);
+  });
+
+  test('a Manage lists change that finds an own shared list gone closes an open edit row or delete question of its task with a notice (tasks-assigned-to-me R1-F1)', async () => {
+    await openAssigned(
+      [task(1, 'Alpha', 11, mine), task(2, 'Bravo', 12, mine), task(4, 'Delta', 14, mine)],
+      [errands, home, groceries, work, garden],
+    );
+    const field = await startEditing('Alpha');
+    await userEvent.type(field, ' draft');
+    await userEvent.click(button('Manage lists'));
+    // The list was deleted in another tab: it goes as if deleted, and a
+    // refresh then shows where its tasks went.
+    reply('PATCH /api/lists/11', json({ error: 'list_not_found', message: 'That list could not be found.' }, 404));
+    refreshReplies(
+      [task(1, 'Alpha renamed', null), task(2, 'Bravo', 12, mine), task(4, 'Delta', 14, mine)],
+      [errands, groceries, work, garden],
+    );
+    await userEvent.click(button('Stop sharing "Home"'));
+    await waitFor(() => expect(tabNames()).not.toContain('Home (shared)'));
+    expect(screen.queryByRole('textbox', { name: /^New title for/ })).toBeNull();
+    expect(shown('Alpha')).toBe(false);
+    expect(status()).toBe(`"Home" no longer exists, so it was removed. ${unassignedNotice('Alpha')}`);
+    expect(inManage()).toBe(true);
+    await waitFor(() => expect(callsTo('GET /api/tasks')).toHaveLength(2));
+
+    await userEvent.click(button('Delete "Delta"'));
+    reply('DELETE /api/lists/14', json({ error: 'list_not_found', message: 'That list could not be found.' }, 404));
+    refreshReplies(
+      [task(1, 'Alpha renamed', null), task(2, 'Bravo', 12, mine), task(4, 'Delta renamed', null)],
+      [errands, groceries, work],
+    );
+    await userEvent.click(button('Delete list "Garden"'));
+    await userEvent.click(button('Confirm deleting list "Garden"'));
+    await waitFor(() => expect(tabNames()).not.toContain('Garden (shared)'));
+    expect(screen.queryByRole('button', { name: 'Confirm deleting "Delta"' })).toBeNull();
+    expect(shown('Delta')).toBe(false);
+    expect(status()).toBe(`"Garden" no longer exists, so it was removed. ${unassignedNotice('Delta')}`);
+    expect(inManage()).toBe(true);
+    await waitFor(() => expect(callsTo('GET /api/tasks')).toHaveLength(3));
+
+    // Neither task stayed pinned by a hidden row: Inbox shows the server's versions.
+    await userEvent.click(tab('Inbox'));
+    await waitFor(() => expect(shown('Alpha renamed')).toBe(true));
+    expect(shown('Delta renamed')).toBe(true);
+  });
+
   test('"Assigned to me" is a reserved list name; a list stored with it still shows and can be renamed away (AC-7)', async () => {
     signedIn([]);
     withLists(list(14, 'Assigned to me'), list(15, 'Spare'));
