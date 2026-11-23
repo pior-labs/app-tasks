@@ -268,7 +268,8 @@ test('the share toggle and the Assigned to select work by keyboard; the tab row 
     await button(one, 'Manage lists').focus();
     await one.keyboard.press('Enter');
     const toggle = button(one, 'Share "Shared: kitchen and pantry restock" with household');
-    for (let presses = 0; presses < 40 && !(await toggle.evaluate((element) => element === document.activeElement)); presses++) {
+    // Earlier files leave Household One with more lists, so this may take a while.
+    for (let presses = 0; presses < 200 && !(await toggle.evaluate((element) => element === document.activeElement)); presses++) {
       await one.keyboard.press('Tab');
     }
     await expect(toggle).toBeFocused();
@@ -297,7 +298,12 @@ test('the share toggle and the Assigned to select work by keyboard; the tab row 
       .evaluate((element) => element.getBoundingClientRect().width);
     expect(nameWidth).toBeGreaterThanOrEqual(160);
     await expect(sharedTab(one, 'Shared: kitchen and pantry restock').locator('svg')).toBeVisible();
+    // Reached by keyboard (Shift+Tab back to the tab row), the tab scrolls into
+    // view within the row; the page still does not scroll sideways.
+    await sharedTab(one, 'Shared: kitchen and pantry restock').focus();
     await expect(sharedTab(one, 'Shared: kitchen and pantry restock')).toBeInViewport();
+    expect(await one.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBe(0);
+    expect(await one.evaluate(() => window.scrollX)).toBe(0);
     await screenshot(one, testInfo, 'sharing-phone-tab-row');
 
     // The Assigned to select, by keyboard: Tab from the List select, arrow
@@ -311,6 +317,7 @@ test('the share toggle and the Assigned to select work by keyboard; the tab row 
     await expect(assigned).toBeFocused();
     await expect(assigned).toHaveValue('');
     await one.keyboard.press('ArrowDown');
+    await expect(assigned.locator('option:checked')).toHaveText('Me (Household One)');
     await one.keyboard.press('ArrowDown');
     await expect(assigned.locator('option:checked')).toHaveText('Household Two');
     await expect(one.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).resolves.toBe(0);
