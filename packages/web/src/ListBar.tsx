@@ -380,8 +380,11 @@ export function ListBar({
       end();
     }
   }
+  // relative: the screen-reader-only "(shared)" text is absolutely positioned,
+  // and must stay inside its tab, which the row clips, instead of widening
+  // the page on a phone.
   const tabClass =
-    'shrink-0 whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium aria-selected:bg-primary aria-selected:text-primary-foreground';
+    'relative shrink-0 whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium aria-selected:bg-primary aria-selected:text-primary-foreground';
   const showManage = manageOpen && lists.length > 0;
   return (
     <div className="space-y-3">
@@ -567,7 +570,8 @@ export function ListBar({
               const owner = list.ownerId === me ? null : (ownerName(list) ?? 'another member');
               return (
                 <li key={list.id} data-list-id={list.id} className="flex flex-wrap items-center gap-2 px-4 py-2">
-                  <span className="min-w-0 flex-1 break-words">
+                  {/* At least 10rem wide, so on a phone the buttons wrap below the name. */}
+                  <span className="min-w-40 flex-1 break-words">
                     <span data-list-name>{list.name}</span>
                     {list.shared && (
                       <span data-list-sharing className="block text-sm text-muted-foreground">

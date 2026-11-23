@@ -3,8 +3,10 @@
 Pior Labs Tasks. A signed-in user can create tasks, see their saved tasks,
 mark a task complete or clear it again, rename a task, give a task an optional
 due date and optional plain-text notes, make a task with a due date repeat,
-sort tasks into lists they name (with a built-in Inbox), and delete a task.
-Open tasks are grouped by when they are due.
+sort tasks into lists they name (with a built-in Inbox), share a list with
+the household, and delete a task. In a shared list every member can do
+everything, rows say who added and completed a task, and a task can be
+assigned to a member. Open tasks are grouped by when they are due.
 Deletion is permanent: there is no archive or undo. Priorities are not
 implemented.
 
@@ -106,44 +108,48 @@ by `char_length`, which counts code points); it only adds the column, so
 existing rows have no notes and an image built before it keeps working against
 the migrated table. Migration `0005` adds lists (see [Lists](#lists)): the
 `lists` table and the nullable `tasks.list_id`; existing rows get `NULL`, which
-means Inbox. The owner is always
-taken from the server session, never from the request, and `user_id` is not
-returned. All task routes sit behind the session boundary and return 401
-without a valid session.
+means Inbox. Migration `0006` adds sharing, attribution and assignment (see
+[Shared lists](#shared-lists)). The owner is never taken from the request: it is
+the session user, or the owner of the task's list (see Shared lists), and
+`user_id` is not returned. All task routes sit behind the session boundary and
+return 401 without a valid session.
 
 | Route | Request | Success |
 | --- | --- | --- |
-| `GET /api/tasks` | none | 200 `{ "tasks": [...] }`, the session user's tasks only, newest first |
-| `POST /api/tasks` | `{ "title": string, "notes"?: string or null, "dueDate"?: string or null, "repeat"?: object or null, "listId"?: number or null }` | 201 `{ "task": {...} }`; the title is trimmed, 1 to 200 characters |
-| `PATCH /api/tasks/:id` | any of `{ "title": string }`, `{ "notes": string or null }`, `{ "completed": boolean }`, `{ "dueDate": string or null }`, `{ "repeat": object or null }`, `{ "listId": number or null }`, together or alone, plus an optional `"today"` when completing | 200 `{ "task": {...}, "nextTask": {...} or null, "removedTaskId": number or null }` |
+| `GET /api/tasks` | none | 200 `{ "tasks": [...] }`, the session user's own tasks plus every task in a shared list, newest first |
+| `POST /api/tasks` | `{ "title": string, "notes"?: string or null, "dueDate"?: string or null, "repeat"?: object or null, "listId"?: number or null, "assigneeId"?: number or null }` | 201 `{ "task": {...} }`; the title is trimmed, 1 to 200 characters |
+| `PATCH /api/tasks/:id` | any of `{ "title": string }`, `{ "notes": string or null }`, `{ "completed": boolean }`, `{ "dueDate": string or null }`, `{ "repeat": object or null }`, `{ "listId": number or null }`, `{ "assigneeId": number or null }`, together or alone, plus an optional `"today"` when completing | 200 `{ "task": {...}, "nextTask": {...} or null, "removedTaskId": number or null }` |
 | `DELETE /api/tasks/:id` | none | 204 with no body; the task is removed permanently |
 
-A task is `{ id, title, listId, notes, completed, dueDate, repeat, createdAt, updatedAt }`,
-where `listId` is the id of one of the user's lists or `null` for Inbox,
+A task is `{ id, title, listId, notes, completed, dueDate, repeat, createdById, completedById, assigneeId, createdAt, updatedAt }`,
+where `listId` is the id of a list the user can see (their own or a shared
+one) or `null` for Inbox, `createdById`, `completedById` and `assigneeId` are
+user ids or `null` (see [Shared lists](#shared-lists)),
 `notes` is a string or `null`, `dueDate` is a `"YYYY-MM-DD"` string or
 `null` and `repeat` is
 `{ "every": n, "unit": "day" | "week" | "month" | "year" }` or `null`. Errors are
 `{ "error": code, "message": text }` with stable codes: 400 `invalid_json`,
 `invalid_title`, `invalid_notes`, `invalid_completed`, `invalid_due_date`,
-`invalid_repeat`, `invalid_list`, `invalid_today`, `invalid_update` or `invalid_task_id`; 403
+`invalid_repeat`, `invalid_list`, `invalid_assignee`, `invalid_today`, `invalid_update` or `invalid_task_id`; 403
 `forbidden_origin` when a `POST`/`PATCH`/`DELETE` does not carry the application
 origin (`BETTER_AUTH_URL`) in `Origin`; 404 `task_not_found` for an id that does
-not exist, was already deleted or belongs to another user (the cases are
-indistinguishable).
+not exist, was already deleted or is another user's and not in a shared list
+(the cases are indistinguishable).
 
 `PATCH` changes only the fields that are sent. A title follows the same rules
 as on create, from one shared definition in `packages/api/src/tasks.ts`. A body
-with none of `title`, `notes`, `completed`, `dueDate`, `repeat` and `listId`
-(an empty object, a body with only `today`, or anything that is not an object)
-is 400 `invalid_update`, and its message names all six; before renaming
-existed such a body was answered with `invalid_completed`. If any field is
-invalid nothing is changed, and the first invalid field (in the order title,
-notes, completed, due date, repeat, list) decides the code. Other fields, such as `userId` or `id`, are
-ignored. Every successful update sets `updatedAt`; `createdAt`, and so the list
-order, never changes. All writes filter on the session user in the statements
-that change rows. A `PATCH` locks the task's row and runs in one transaction
-with the next occurrence it creates or removes, so concurrent changes to one
-task run one after another.
+with none of `title`, `notes`, `completed`, `dueDate`, `repeat`, `listId` and
+`assigneeId` (an empty object, a body with only `today`, or anything that is
+not an object) is 400 `invalid_update`, and its message names all seven; before
+renaming existed such a body was answered with `invalid_completed`. If any
+field is invalid nothing is changed, and the first invalid field (in the order
+title, notes, completed, due date, repeat, list, assignee) decides the code.
+Other fields, such as `userId`, `createdById` or `id`, are ignored. Every
+successful update sets `updatedAt`; `createdAt`, and so the list order, never
+changes. Every read and write uses the access rule (see
+[Shared lists](#shared-lists)). A `PATCH` locks the task's row (and then its
+list) and runs in one transaction with the next occurrence it creates or
+removes, so concurrent changes to one task run one after another.
 
 Title rules, applied by the API and mirrored by the forms: the title is trimmed;
 a title with nothing visible (only whitespace, control characters or invisible
@@ -190,8 +196,9 @@ and to occurrences created from it later.
 
 Completing a repeating task (a `PATCH` that changes `completed` from false to
 true, after applying the other fields in the same body) creates the next
-occurrence for the same user: the same title, notes, list and repeat (as
-stored by that same `PATCH`), open, and the due date
+occurrence with the same owner: the same title, notes, list, repeat and
+assignee (as stored by that same `PATCH`) and the original's `createdById`,
+open (`completedById` null), and the due date
 of the earliest occurrence that is after the current due date and not before
 "today". Done early, that is the occurrence after the due date; done late,
 missed occurrences are skipped, so overdue repeats do not pile up. It is
@@ -231,17 +238,21 @@ and keeps this index as a backstop.
 
 | Route | Request | Success |
 | --- | --- | --- |
-| `GET /api/lists` | none | 200 `{ "lists": [...] }`, the session user's lists only, oldest first (ties by id) |
-| `POST /api/lists` | `{ "name": string }` | 201 `{ "list": {...} }` |
-| `PATCH /api/lists/:id` | `{ "name": string }` | 200 `{ "list": {...} }` |
+| `GET /api/lists` | none | 200 `{ "lists": [...] }`, the session user's lists plus every shared list, oldest first (ties by id) |
+| `POST /api/lists` | `{ "name": string }` | 201 `{ "list": {...} }`, never shared |
+| `PATCH /api/lists/:id` | `{ "name": string }`, `{ "shared": boolean }`, or both | 200 `{ "list": {...} }` |
 | `DELETE /api/lists/:id` | none | 200 `{ "movedTaskIds": [...] }`, the ids of the list's tasks, which are now in Inbox |
 
-A list is `{ id, name, createdAt, updatedAt }`. The routes sit behind the same
+A list is `{ id, name, shared, ownerId, createdAt, updatedAt }`, where
+`ownerId` is the id of the user who created it. The routes sit behind the same
 session boundary and origin check as the task routes. Errors: 400
-`invalid_json`, `invalid_list_name` or `invalid_list_id`; 403
+`invalid_json`, `invalid_list_name`, `invalid_shared` (a `shared` that is not
+`true` or `false`), `invalid_list_update` (a `PATCH` body with neither `name`
+nor `shared`, or that is not an object) or `invalid_list_id`; 403
 `forbidden_origin`; 404 `list_not_found` for an id that does not exist, was
-deleted or belongs to another user (indistinguishable); 409
-`duplicate_list_name` or `list_limit_reached`.
+deleted or is another user's unshared list (indistinguishable); 409
+`duplicate_list_name` or `list_limit_reached`. In a `PATCH` the first invalid
+field (name, then shared) decides the code, and nothing changes.
 
 Name rules, from one shared definition used by `POST` and `PATCH`, are those of
 titles with a limit of 50: trimmed, at least one visible character, no null
@@ -256,7 +267,9 @@ only look Latin (a Cyrillic "І", say) are not folded. A name whose fold is
 "inbox" or "all tasks" is reserved, so a list can never look like a built-in
 view; names that only contain the words, such as "Inbox zero", are allowed.
 Anything else is 400 `invalid_list_name` and nothing changes. A name with the
-same fold as another of the user's lists is 409 `duplicate_list_name`;
+same fold as another of the owner's lists is 409 `duplicate_list_name` (also
+when another member renames a shared list: the owner's lists count, not
+theirs);
 renaming a list to another form of its own fold is allowed, and two users may
 have lists with the same name. Names are stored as typed. The database's
 unique index on `lower(name)` stays as a backstop: for a few letters
@@ -272,7 +285,8 @@ with one fold.
 
 Deleting a list never deletes a task. In one transaction it moves every task
 in the list, open and completed, to Inbox (refreshing their `updatedAt`) and
-deletes the list. It locks the list's tasks and then the list, so a task being
+deletes the list; a shared list's tasks go to the Inbox of whoever added each
+one (see [Shared lists](#shared-lists)). It locks the list's tasks and then the list, so a task being
 added to it or moved into it at the same moment either finishes first and is
 moved to Inbox, or fails afterwards.
 
@@ -280,9 +294,10 @@ A task's `listId` follows one shared definition used by `POST` and `PATCH`: a
 positive integer or `null`. Missing or `null` on create means Inbox; on `PATCH`
 it moves the task, and a missing `listId` leaves it where it is. Anything that
 is not a positive integer or `null`, and the id of an unknown, deleted or
-another user's list, is 400 `invalid_list` (the same answer for all of these)
-and nothing changes; the check is the foreign key itself, so a list deleted at
-the same moment cannot slip through and never causes a 500. A transaction that
+another user's unshared list, is 400 `invalid_list` (the same answer for all of
+these) and nothing changes. The route checks the list with it locked, and the
+foreign key backs that up, so a list deleted at the same moment cannot slip
+through and never causes a 500. A transaction that
 PostgreSQL ends as a deadlock victim (a list delete racing a task update) is
 retried, up to three attempts. Lists are not filtered on the server:
 `GET /api/tasks` returns every task with its `listId` and the browser filters.
@@ -339,6 +354,110 @@ and switches to Inbox if it was selected; an add keeps the typed task. Lists
 that fail to load show an error with a "Load lists again" button while the
 tasks still work in "All tasks". A 401 from any list request returns the page
 to the signed-out view.
+
+### Shared lists
+
+The household is every Tasks user: everyone who has signed in to Tasks at
+least once (Auth has no groups). A list's owner, or any member who can see it,
+can mark it "Shared with household"; every member then sees it and its tasks
+next to their own lists and can do everything with them that the owner can:
+add, edit, complete, reopen, move and delete its tasks, and rename, unshare or
+delete the list. Inbox and single tasks cannot be shared, and a member who
+signs in for the first time sees every list shared before.
+
+Migration `0006` is additive. It adds `lists.shared` (boolean, default
+`false`, so existing lists stay private) with the partial index
+`lists_shared_idx` for the shared-list lookups, and three nullable columns on
+`tasks`, each a foreign key to `users` with `ON DELETE SET NULL`, so deleting a
+user clears them on other users' tasks instead of deleting those:
+`created_by_id` (who added the task; backfilled from `user_id` for existing
+rows, by a statement added by hand to the generated SQL), `completed_by_id`
+(who completed it; null while open, and for tasks completed before `0006`) and
+`assignee_id`. An image built before `0006` keeps working against the migrated
+database: it ignores the new columns, shows no shared lists of others, and its
+new tasks have no `created_by_id` (shown without attribution).
+
+The access rule is one definition (`packages/api/src/access.ts`) used by every
+list and task route: a user can read and write a list they own or any shared
+list, and a task whose `user_id` is theirs or that is in a shared list.
+Anything else stays 404 `list_not_found` / `task_not_found`, or 400
+`invalid_list` as a target list, exactly as for something that does not exist.
+A task in a list always has the list owner's `user_id` (`tasks_list_fk` still
+refuses anything else): a task another member adds to someone's shared list is
+stored with the owner's `user_id` and the adder's `created_by_id`. Moving a
+task into a list gives it to that list's owner; moving it to Inbox gives it to
+the member who moved it, so it disappears for the others. `createdById` never
+changes on a move.
+
+| Route | Request | Success |
+| --- | --- | --- |
+| `GET /api/members` | none | 200 `{ "members": [{ "id": number, "name": string }] }`, every Tasks user, by name then id; never email addresses |
+
+- Sharing and unsharing: `PATCH /api/lists/:id` with `{ "shared": true }` or
+  `false`. Unsharing, by anyone, returns the list and all its tasks, also those
+  other members added, to the owner only, and clears their assignees; a member
+  who unshares someone else's list loses access to it.
+- Names: duplicates and the 50-list limit count the owner's lists, so two
+  members may each have a "Groceries", one of them shared. The shared marker
+  tells the tabs apart.
+- Deleting a shared list moves each task, open and completed, to the Inbox of
+  whoever added it (the list owner when that is unknown) and clears its
+  assignee; `movedTaskIds` names them all. An unshared list's tasks go to the
+  owner's Inbox.
+- Attribution: `createdById` is the session user on create; `completedById`
+  is the session user when a `PATCH` changes `completed` from false to true,
+  unchanged by other updates, and null after reopening.
+- Assignment: `assigneeId` on `POST` and `PATCH` is a member's id or `null`
+  (nobody). It is accepted only when the task ends up in a shared list after
+  the same request; anywhere else, for an id that is not a Tasks user, or a
+  value that is not a positive integer or `null`, the answer is 400
+  `invalid_assignee` and nothing changes. A task that leaves a shared list
+  (moved out, unshared or deleted) loses its assignee. A `PATCH` with only
+  `assigneeId` is a valid update.
+- Concurrency: a task update locks the task and then its list (`FOR SHARE`)
+  and checks access again on the locked list, so a member who just lost
+  access cannot still change it; unsharing and deleting lock the list's tasks
+  and then the list. Adds, moves and edits racing a delete or an unshare
+  answer `invalid_list` or 404, or land in Inbox, never 500.
+
+In the web app a shared list's tab shows a two-people icon after its name,
+and its accessible name ends in "(shared)" ("Groceries (shared)"); the List
+select names it the same way. "Manage lists" offers "Share with household" or
+"Stop sharing" next to Rename and Delete for every list, says "Shared with
+household" under the user's own shared lists and "Shared by <owner>" under
+other members'. Sharing and stopping sharing one's own list send the request
+at once; stopping sharing someone else's list first asks in the row ("Stop
+sharing Groceries? It goes back to Household Two with all its tasks, and you
+will lose access to it."), with focus on Cancel and Escape to cancel; after
+the server stored it the tab and its tasks go, a status message says so, and a
+selected view switches to Inbox. The delete question for a shared list says
+"Its 3 tasks will return to the Inbox of whoever added them." Errors show
+above the managed lists, as for a failed delete.
+
+A row in a shared list, in the list's own view and in "All tasks", shows a
+muted line with "Added by <name>" when someone else added it, "Done by <name>"
+when someone else completed it, and "Assigned to you" or "Assigned to <name>".
+A member missing from `/api/members` (deleted, or the members failed to load)
+is not named. Rows in Inbox and in unshared lists look as before. When the
+edit row's List choice is a shared list, an "Assigned to" select (named
+`Assigned to, for "<title>"`, with Nobody, "Me (<name>)" and every other
+member) follows the List select; it is sent only when it changed. Choosing a
+list that is not shared removes the select and clears the choice, as the
+server does.
+
+Live refresh is polling (no websockets or server-sent events): while signed
+in, the page fetches the lists, tasks and members again when the window gains
+focus, when the page becomes visible, and every 30 seconds while it is
+visible, one refresh at a time. A refresh shows what other members added,
+changed, completed or deleted, and their list renames, shares and deletes. It
+never touches the add form, the row being edited or asking to confirm a
+delete, or focus: a refresh that overlaps a change the page is making is
+dropped and the next trigger tries again, and a focused control whose row
+moves to another group keeps focus in its new place. If the selected list is
+gone, the view switches to Inbox with a notice. A 401 returns to the
+signed-out view; any other failure is silent and retried on the next trigger.
+Saving an edit of a task another member deleted meanwhile shows the usual "no
+longer exists" notice.
 
 The signed-in page shows an add-task form (a title, an optional "Due date"
 field, a "Repeats" control and an "Add notes" toggle) and the task list, with distinct
@@ -529,7 +648,17 @@ origin check, `listId` on every task response, moves, invalid, unknown,
 deleted and foreign list ids, the composite foreign key, deletes racing adds,
 moves and completions without a 500, the next occurrence keeping its list, and
 migration `0005` applied to a database with existing rows plus the database
-constraints and the user cascade. They do not prove hosted SSO.
+constraints and the user cascade. Sharing tests
+(`packages/api/test/sharing.test.ts`) cover migration `0006` on a database
+with existing rows (the backfill, `tasks_list_fk`, and user deletes clearing
+the new columns), `/api/members` (shape, order, no email, 401), sharing and
+unsharing with and without a name and the bad bodies, what each member sees
+and the unchanged 404s for unshared lists, a first sign-in after sharing,
+every member's rights on a shared list with duplicate names checked against
+the owner's lists, ownership on moves, deleting a shared list into each
+creator's Inbox, deletes and unshares racing adds, moves and completions
+without a 500, attribution including the next occurrence, every assignment
+rule, and the task shape. They do not prove hosted SSO.
 
 Web component tests (`packages/web/src/*.test.tsx`) use Vitest, jsdom and
 Testing Library with `fetch` stubbed. They cover the signed-out view, the task
@@ -548,7 +677,12 @@ scroll region only for overflowing notes), lists (the tablist roles and
 keyboard, the view in the URL and its fallback, filtering and labels per view,
 empty states, add bodies per view, creating, renaming and deleting lists with
 their errors and focus, the List select and moves out of a view, lists deleted
-elsewhere, a lists load failure and 401s),
+elsewhere, a lists load failure and 401s), shared lists (the tab marker,
+sharing and stopping sharing from Manage lists with the question for someone
+else's list, the delete wording, row labels, the "Assigned to" select and its
+request bodies, and live refresh: focus, visibility and the 30-second timer,
+merging another member's changes, keeping drafts, the edit row, pending
+changes and focus, a vanished selected list, silent failures and a 401),
 failures, pending states, focus targets and 401 handling. Unit
 tests (`*.test.ts`) cover the date helpers, grouping and the repeat labels and
 form values. They do not run a real browser
@@ -599,7 +733,18 @@ view; move a task between lists from the edit row; rename a list and delete one
 with tasks, checking the confirmation count and the tasks in Inbox; check that
 a second user sees none of the first user's lists; check that a repeating
 task's next occurrence stays in its list; and check at 390px that the tab row
-scrolls sideways without a page scroll (with screenshots).
+scrolls sideways without a page scroll (with screenshots). Sharing scenarios
+(`packages/e2e/tests/sharing.spec.ts`) sign in Household One and Household
+Two in separate browser contexts: One shares a list and Two sees it after a
+reload and through a live refresh without one, adds a task that One sees as
+"Added by Household Two", completes One's task ("Done by Household Two") and
+sees "Assigned to you" after One assigns it; an unshared list stays invisible
+to Two; Two renames and stops sharing One's list and loses it while One keeps
+it with every task; deleting a shared list sends each task to its creator's
+Inbox; and the share toggle and the "Assigned to" select work by keyboard, with
+the shared tab fitting a 390px screen (with screenshots). The page clock is
+installed so a test can jump to the next 30-second refresh, and each scenario
+removes what it created, leaving Household Two empty for `tasks.spec.ts`.
 Because the API
 checks `today` against its own date, the test API server
 (`packages/api/test/e2e-server.ts`) has a test-only `PUT /e2e/clock` route, and
