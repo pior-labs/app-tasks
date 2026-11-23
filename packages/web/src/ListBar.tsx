@@ -3,6 +3,9 @@ import { jsonHeaders, serverError } from './http';
 import { type List, type Member, type View, listFromServer, listNameProblem, tabId, viewName } from './lists';
 
 export const TASKS_PANEL_ID = 'tasks-panel';
+// For moving focus after a background refresh (see Tasks.tsx).
+export const NEW_LIST_BUTTON_ID = 'new-list-button';
+export const MANAGE_LISTS_BUTTON_ID = 'manage-lists-button';
 
 type Props = {
   lists: List[];
@@ -422,6 +425,7 @@ export function ListBar({
         {!failed && (
           <button
             type="button"
+            id={NEW_LIST_BUTTON_ID}
             ref={newListButton}
             aria-expanded={creating !== null}
             aria-controls={creating ? 'new-list-form' : undefined}
@@ -438,6 +442,7 @@ export function ListBar({
         {!failed && lists.length > 0 && (
           <button
             type="button"
+            id={MANAGE_LISTS_BUTTON_ID}
             aria-expanded={showManage}
             aria-controls={showManage ? 'manage-lists' : undefined}
             onClick={() => setManageOpen((open) => !open)}

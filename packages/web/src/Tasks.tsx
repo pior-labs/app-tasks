@@ -10,7 +10,7 @@ import {
   msUntilNextLocalMidnight,
 } from './dueDate';
 import { jsonHeaders, serverError } from './http';
-import { ListBar, TASKS_PANEL_ID, goneListMessage } from './ListBar';
+import { ListBar, MANAGE_LISTS_BUTTON_ID, NEW_LIST_BUTTON_ID, TASKS_PANEL_ID, goneListMessage } from './ListBar';
 import {
   type List,
   type Member,
@@ -255,16 +255,20 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
   const focusOnDay = useRef<{ day: string; target: () => HTMLElement | null | undefined } | null>(null);
   // Where focus was when a background refresh was applied. A refresh can
   // replace the focused element (a row moved to another group, or removed,
-  // or a tab that went away); focus then goes to the same control in the
-  // row's new place, else the next row (or the previous one), else the
-  // new-task field, and a tab's focus to the selected tab. Focus that is
-  // still on the page is never moved.
+  // a tab or a Manage lists entry that went away); focus then goes to the
+  // same control in the row's new place, else the nearest row after it that
+  // is still shown (or before it), else the new-task field; a tab's focus to
+  // the selected tab; and a Manage lists entry's to the nearest list left
+  // there, else New list. Focus that is still on the page is never moved.
   const focusAfterRefresh = useRef<{
     element: Element;
     rowId?: number;
     action?: string;
     caret: { start: number; end: number } | null;
-    neighbourId?: number;
+    // The rows shown, and the lists, in page order when the refresh applied.
+    rowOrder?: number[];
+    listId?: number;
+    listOrder?: number[];
     tab: boolean;
   } | null>(null);
   useEffect(() => {
@@ -286,9 +290,10 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
       let next: HTMLElement | undefined;
       if (refreshed.rowId !== undefined) {
         const same = refreshed.action ? shown(control(refreshed.rowId, refreshed.action)) : undefined;
+        // Neighbours lost in the same refresh are skipped.
         next =
           same ??
-          (refreshed.neighbourId === undefined ? undefined : shown(firstControl(refreshed.neighbourId))) ??
+          nearest(refreshed.rowOrder ?? [], refreshed.rowId, (id) => shown(firstControl(id))) ??
           shown(titleInput.current);
         next?.focus();
         // The caret belongs to the control it was saved from, not to the
@@ -297,12 +302,44 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
       } else if (refreshed.tab) {
         next = shown(document.getElementById(tabId(view)));
         next?.focus();
+      } else if (refreshed.listId !== undefined || refreshed.element.id === MANAGE_LISTS_BUTTON_ID) {
+        // As after a list leaves the panel here: the next list's Rename (or
+        // its first control while it asks a question), else the previous
+        // one's, else New list (Manage lists goes away with the last list).
+        const entry = (id: number) => {
+          const item = document.querySelector(`#manage-lists [data-list-id="${id}"]`);
+          return shown(
+            item?.querySelector<HTMLElement>('[data-action="rename-list"]') ??
+              item?.querySelector<HTMLElement>('input, button'),
+          );
+        };
+        next =
+          (refreshed.listId === undefined
+            ? undefined
+            : (entry(refreshed.listId) ?? nearest(refreshed.listOrder ?? [], refreshed.listId, entry))) ??
+          shown(document.getElementById(NEW_LIST_BUTTON_ID));
+        next?.focus();
       }
     }
   });
   const control = (id: number, action: string) =>
     rows.current.get(id)?.querySelector<HTMLElement>(`[data-action="${action}"]`);
   const firstControl = (id: number) => rows.current.get(id)?.querySelector<HTMLElement>('input, button');
+  // The first item after `from` in `order` that `pick` finds, else the
+  // nearest one before it.
+  const nearest = <T,>(order: T[], from: T, pick: (item: T) => HTMLElement | undefined) => {
+    const index = order.indexOf(from);
+    if (index === -1) return undefined;
+    for (let i = index + 1; i < order.length; i++) {
+      const found = pick(order[i]);
+      if (found) return found;
+    }
+    for (let i = index - 1; i >= 0; i--) {
+      const found = pick(order[i]);
+      if (found) return found;
+    }
+    return undefined;
+  };
   // The row after the given one in page order, else the one before it.
   const visibleNeighbour = (id: number) => {
     const list = visibleRef.current;
@@ -542,6 +579,7 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
       if (active instanceof HTMLElement && active !== document.body) {
         const owner = [...rows.current].find(([, row]) => row.contains(active));
         const field = active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement ? active : null;
+        const entry = active.closest<HTMLElement>('#manage-lists [data-list-id]');
         focusAfterRefresh.current = {
           element: active,
           rowId: owner?.[0],
@@ -550,7 +588,9 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
             field && field.selectionStart !== null
               ? { start: field.selectionStart, end: field.selectionEnd ?? field.selectionStart }
               : null,
-          neighbourId: owner ? visibleNeighbour(owner[0])?.id : undefined,
+          rowOrder: owner ? visibleRef.current.map((task) => task.id) : undefined,
+          listId: entry ? Number(entry.dataset.listId) : undefined,
+          listOrder: entry ? before.lists.map((list) => list.id) : undefined,
           tab: active.getAttribute('role') === 'tab',
         };
       }

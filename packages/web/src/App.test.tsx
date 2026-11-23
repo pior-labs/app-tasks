@@ -3988,6 +3988,88 @@ describe('shared lists', () => {
     expect(screen.getByRole('status').textContent).toBe('"Sweep porch" is no longer shared with you.');
   });
 
+  test('focus on a Manage lists entry that a refresh removes moves to the nearest list left there (AC-14, R3-F1)', async () => {
+    signedIn([]);
+    withLists(errands, groceries, home);
+    render(<App />);
+    await ready();
+    await openManage();
+    const stop = button('Stop sharing "Groceries"');
+    act(() => stop.focus());
+    expect(document.activeElement).toBe(stop);
+
+    // The owner deleted Groceries: the next list's Rename takes focus.
+    refreshReplies([], [errands, home]);
+    await refreshOnFocus();
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Stop sharing "Groceries"' })).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(button('Rename "Home"')));
+    expect(button('Manage lists').getAttribute('aria-expanded')).toBe('true');
+    expect(calls.filter((call) => call.method !== 'GET')).toEqual([]);
+  });
+
+  test('focus on the last Manage lists entry goes to the previous list, and to New list when none is left (AC-14, R3-F1)', async () => {
+    signedIn([]);
+    withLists(errands, groceries);
+    render(<App />);
+    await ready();
+    await openManage();
+    act(() => button('Stop sharing "Groceries"').focus());
+
+    // Groceries was the last entry: the previous list's Rename takes focus.
+    refreshReplies([], [errands]);
+    await refreshOnFocus();
+    await waitFor(() => expect(document.activeElement).toBe(button('Rename "Errands"')));
+
+    // Errands goes too (deleted in another tab): no list is left.
+    refreshReplies([], []);
+    await refreshOnFocus();
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Manage lists' })).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(button('New list')));
+  });
+
+  test('a closed lost row whose neighbour is lost too moves focus to the nearest row that remains (AC-14, R3-F2)', async () => {
+    signedIn([
+      task(1, 'Sweep porch', 12, { createdById: 2 }),
+      task(2, 'Oil hinge', 12, { createdById: 2 }),
+      task(3, 'Mine', null),
+    ]);
+    withLists(groceries);
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(taskTitles()).toEqual(['Sweep porch', 'Oil hinge', 'Mine']));
+    await userEvent.click(button('Edit "Sweep porch"'));
+    expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'New title for "Sweep porch"' }));
+
+    // The owner unshared the list: the next row ("Oil hinge") goes as well.
+    refreshReplies([task(3, 'Mine', null)], []);
+    await refreshOnFocus();
+    await waitFor(() => expect(screen.queryByRole('textbox', { name: /^New title for/ })).toBeNull());
+    expect(screen.getByRole('status').textContent).toBe('"Sweep porch" is no longer shared with you.');
+    expect(taskTitles()).toEqual(['Mine']);
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('checkbox', { name: 'Mine' })));
+  });
+
+  test('a closed lost last row whose previous neighbour is lost too moves focus to an earlier row (AC-14, R3-F2)', async () => {
+    signedIn([
+      task(3, 'Mine', null),
+      task(2, 'Oil hinge', 12, { createdById: 2 }),
+      task(1, 'Sweep porch', 12, { createdById: 2 }),
+    ]);
+    withLists(groceries);
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(taskTitles()).toEqual(['Mine', 'Oil hinge', 'Sweep porch']));
+    await userEvent.click(button('Delete "Sweep porch"'));
+    expect(button('Confirm deleting "Sweep porch"')).toBeTruthy();
+
+    refreshReplies([task(3, 'Mine', null)], []);
+    await refreshOnFocus();
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Confirm deleting "Sweep porch"' })).toBeNull());
+    expect(taskTitles()).toEqual(['Mine']);
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('checkbox', { name: 'Mine' })));
+    expect(calls.filter((call) => call.method !== 'GET')).toEqual([]);
+  });
+
   test('a refresh that never answers is aborted and does not block the next trigger (AC-14, R1-F2)', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout'] });
     onTestFinished(() => {
