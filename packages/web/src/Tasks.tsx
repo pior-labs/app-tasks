@@ -11,7 +11,16 @@ import {
 } from './dueDate';
 import { jsonHeaders, serverError } from './http';
 import { ListBar, TASKS_PANEL_ID, goneListMessage } from './ListBar';
-import { type List, type View, tabId, viewFromSearch, viewName, writeViewToUrl } from './lists';
+import {
+  type List,
+  type Member,
+  type View,
+  listFromServer,
+  tabId,
+  viewFromSearch,
+  viewName,
+  writeViewToUrl,
+} from './lists';
 import { RepeatControl, RepeatHint } from './RepeatControl';
 import {
   NO_REPEAT,
@@ -23,7 +32,7 @@ import {
   sameRepeat,
   withoutRepeat,
 } from './repeat';
-import { type RowMode, type Task, TaskRow, submitOnModEnter } from './TaskRow';
+import { type RowMode, type ShareLabels, type Task, TaskRow, submitOnModEnter } from './TaskRow';
 import { groupTasks, visibleTasks } from './taskGroups';
 import { VISIBLE_CHARACTER, characterCount } from './text';
 
@@ -63,7 +72,7 @@ function goneMessage(task: Task) {
   return `"${task.title}" no longer exists, so it was removed from the list.`;
 }
 
-type Field = 'title' | 'dueDate' | 'repeat' | 'notes' | 'list';
+type Field = 'title' | 'dueDate' | 'repeat' | 'notes' | 'list' | 'assignee';
 const fieldOf = (code: string): Field =>
   code === 'invalid_due_date'
     ? 'dueDate'
@@ -73,7 +82,9 @@ const fieldOf = (code: string): Field =>
         ? 'notes'
         : code === 'invalid_list'
           ? 'list'
-          : 'title';
+          : code === 'invalid_assignee'
+            ? 'assignee'
+            : 'title';
 
 // A date input that holds a partly typed date reports an empty value and
 // badInput. That is not "no due date", so it is refused instead of sent.
@@ -107,28 +118,60 @@ function removedNextMessage(task: Task) {
 }
 
 // The answer to a task update. Older stubs and servers may leave out the
-// repeat, notes and list fields; missing means none (for the list, Inbox).
+// repeat, notes, list, attribution and assignee fields; missing means none
+// (for the list, Inbox).
 type UpdateReply = { task: Task; nextTask?: Task | null; removedTaskId?: number | null };
 const fromServer = (task: Task): Task => ({
   ...task,
   listId: task.listId ?? null,
   notes: task.notes ?? null,
   repeat: task.repeat ?? null,
+  createdById: task.createdById ?? null,
+  completedById: task.completedById ?? null,
+  assigneeId: task.assigneeId ?? null,
 });
+
+// Live refresh (D-8): lists, tasks and members are fetched again when the
+// window gains focus or the page becomes visible, and this often while it is
+// visible. There are no websockets or server-sent events.
+export const REFRESH_INTERVAL_MS = 30_000;
+
+// The labels of a row in a shared list (D-5): who added it and who completed
+// it, only when that is someone else, and who it is assigned to. A member
+// who is not in the members list (deleted, or the list did not load) is not
+// named. Rows elsewhere have none.
+function sharedLabels(task: Task, me: number, members: Member[]): ShareLabels {
+  const name = (id: number | null) => (id === null ? undefined : members.find((member) => member.id === id)?.name);
+  const addedBy = task.createdById !== me ? name(task.createdById) : undefined;
+  const doneBy = task.completed && task.completedById !== me ? name(task.completedById) : undefined;
+  const assignee = task.assigneeId === me ? 'you' : name(task.assigneeId);
+  return {
+    addedBy: addedBy ? `Added by ${addedBy}` : null,
+    doneBy: doneBy ? `Done by ${doneBy}` : null,
+    assigned: assignee ? `Assigned to ${assignee}` : null,
+  };
+}
 
 // Whether a task shows in a view: every task in "All tasks", tasks without a
 // list in Inbox, and a list's own tasks in that list.
 const inView = (task: Task, view: View) =>
   view === 'all' || task.listId === (view === 'inbox' ? null : view);
 const LIST_GONE_MESSAGE = 'That list no longer exists. Choose another list.';
+const leftListMessage = (list: List) => `"${list.name}" is no longer shared with you, so it was removed.`;
+const vanishedListMessage = (list: List) =>
+  `"${list.name}" was deleted or is no longer shared with you, so Inbox is shown.`;
 
-export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
+// `me` is the signed-in user's id.
+export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void }) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [listState, setListState] = useState<'loading' | 'ready' | 'failed'>('loading');
   // The user's lists (for the tab row), loaded next to the tasks. When they
   // fail to load, the built-in views still work.
   const [lists, setLists] = useState<List[]>([]);
   const [listsState, setListsState] = useState<'loading' | 'ready' | 'failed'>('loading');
+  // Every Tasks user, to name who added, completed or is assigned a task in a
+  // shared list. Without them (they failed to load) rows name nobody.
+  const [members, setMembers] = useState<Member[]>([]);
   // The view asked for (by the URL or a tab). A list id that is not one of
   // the user's lists shows "All tasks" (D-5), so no task is hidden by default.
   const [requestedView, setRequestedView] = useState<View>(() => viewFromSearch(location.search));
@@ -158,6 +201,8 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
     notes: string;
     // The List select: a list id, or null for Inbox.
     listId: number | null;
+    // The "Assigned to" select: a member id, or null for Nobody.
+    assigneeId: number | null;
     error: string;
     errorField: Field;
   } | null>(null);
@@ -198,6 +243,20 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
   // Focus to restore once the page shows a new day. React may first run the
   // effects of an earlier render, so this waits for the render with that day.
   const focusOnDay = useRef<{ day: string; target: () => HTMLElement | null | undefined } | null>(null);
+  // Where focus was when a background refresh was applied. A refresh can
+  // replace the focused element (a row moved to another group, or removed,
+  // or a tab that went away); focus then goes to the same control in the
+  // row's new place, else the next row (or the previous one), else the
+  // new-task field, and a tab's focus to the selected tab. Focus that is
+  // still on the page is never moved.
+  const focusAfterRefresh = useRef<{
+    element: Element;
+    rowId?: number;
+    action?: string;
+    caret: { start: number; end: number } | null;
+    neighbourId?: number;
+    tab: boolean;
+  } | null>(null);
   useEffect(() => {
     const target = focusAfterRender.current?.();
     focusAfterRender.current = null;
@@ -206,6 +265,27 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
       const moved = focusOnDay.current.target();
       focusOnDay.current = null;
       moved?.focus();
+    }
+    const refreshed = focusAfterRefresh.current;
+    focusAfterRefresh.current = null;
+    const active = document.activeElement;
+    if (refreshed && !refreshed.element.isConnected && (!active || active === document.body)) {
+      // A control in a collapsed (hidden) section cannot take focus.
+      const shown = (element: HTMLElement | null | undefined) =>
+        element && !element.closest('[hidden]') ? element : undefined;
+      let next: HTMLElement | undefined;
+      if (refreshed.rowId !== undefined) {
+        next =
+          (refreshed.action ? shown(control(refreshed.rowId, refreshed.action)) : undefined) ??
+          (refreshed.neighbourId === undefined ? undefined : shown(firstControl(refreshed.neighbourId))) ??
+          shown(titleInput.current);
+      } else if (refreshed.tab) {
+        next = shown(document.getElementById(tabId(view)));
+      }
+      next?.focus();
+      if (refreshed.caret && (next instanceof HTMLInputElement || next instanceof HTMLTextAreaElement)) {
+        next.setSelectionRange(refreshed.caret.start, refreshed.caret.end);
+      }
     }
   });
   const control = (id: number, action: string) =>
@@ -232,6 +312,25 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
       mounted.current = false;
     };
   }, []);
+
+  // Requests that change tasks or lists, in progress and finished. A
+  // background refresh that overlaps one of them is dropped, because its
+  // answer may predate the change; the next trigger tries again. So a refresh
+  // never undoes a pending change or one just stored.
+  const activity = useRef({ pending: 0, finished: 0 });
+  const track = useCallback(() => {
+    activity.current.pending++;
+    let ended = false;
+    return () => {
+      if (ended) return;
+      ended = true;
+      activity.current.pending--;
+      activity.current.finished++;
+    };
+  }, []);
+  // The state a refresh compares against, read when its answer arrives.
+  const latest = useRef({ lists, requestedView, editingId: null as number | null, confirmingId, listState });
+  latest.current = { lists, requestedView, editingId: editing?.id ?? null, confirmingId, listState };
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -339,13 +438,13 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
         if (!response.ok) throw new Error();
         const body: { lists: List[] } = await response.json();
         if (!isCurrent()) return;
-        applyLists(body.lists);
+        applyLists(body.lists.map((list) => listFromServer(list, me)));
         setListsState('ready');
       } catch {
         if (isCurrent()) setListsState('failed');
       }
     },
-    [onSignedOut, applyLists],
+    [onSignedOut, applyLists, me],
   );
   useEffect(() => {
     let current = true;
@@ -354,6 +453,117 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
       current = false;
     };
   }, [loadLists]);
+
+  // Members only add names to rows: when they fail to load, nothing says so
+  // and the next refresh tries again.
+  const loadMembers = useCallback(
+    async (isCurrent: () => boolean = () => true) => {
+      try {
+        const response = await fetch('/api/members');
+        if (!isCurrent()) return;
+        if (response.status === 401) return onSignedOut();
+        if (!response.ok) return;
+        const body: { members: Member[] } = await response.json();
+        if (isCurrent()) setMembers(body.members);
+      } catch {
+        // Silent, see above.
+      }
+    },
+    [onSignedOut],
+  );
+  useEffect(() => {
+    let current = true;
+    void loadMembers(() => current);
+    return () => {
+      current = false;
+    };
+  }, [loadMembers]);
+
+  // A background refresh: the lists, tasks and members the server has now,
+  // with what other members changed. It runs only once the tasks have loaded,
+  // one at a time, and is silent: a failure shows nothing and the next
+  // trigger tries again; only an ended session (401) is acted on. Its answer
+  // replaces the loaded data, except for the row being edited and the row
+  // asking to confirm a delete, which keep what the user sees (saving an edit
+  // of a task deleted meanwhile then shows the usual "no longer exists"
+  // notice). Drafts in the edit row and the add form live outside the task
+  // data, so they are kept as typed.
+  const refreshing = useRef(false);
+  const refresh = useCallback(async () => {
+    if (refreshing.current || !mounted.current || latest.current.listState !== 'ready') return;
+    refreshing.current = true;
+    const finished = activity.current.finished;
+    try {
+      const responses = await Promise.all(['/api/tasks', '/api/lists', '/api/members'].map((path) => fetch(path)));
+      if (!mounted.current) return;
+      if (responses.some((response) => response.status === 401)) return onSignedOut();
+      if (!responses.every((response) => response.ok)) return;
+      const [tasksBody, listsBody, membersBody]: [{ tasks: Task[] }, { lists: List[] }, { members: Member[] }] =
+        await Promise.all(responses.map((response) => response.json())) as never;
+      if (!mounted.current) return;
+      // Overlapped a change made here: dropped (see track).
+      if (activity.current.pending > 0 || activity.current.finished !== finished) return;
+      const before = latest.current;
+      const nextLists = listsBody.lists.map((list) => listFromServer(list, me));
+      const pinned = new Set([before.editingId, before.confirmingId].filter((id): id is number => id !== null));
+      // Remember focus, in case its element is replaced (see focusAfterRefresh).
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && active !== document.body) {
+        const owner = [...rows.current].find(([, row]) => row.contains(active));
+        const field = active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement ? active : null;
+        focusAfterRefresh.current = {
+          element: active,
+          rowId: owner?.[0],
+          action: active.dataset.action,
+          caret:
+            field && field.selectionStart !== null
+              ? { start: field.selectionStart, end: field.selectionEnd ?? field.selectionStart }
+              : null,
+          neighbourId: owner ? visibleNeighbour(owner[0])?.id : undefined,
+          tab: active.getAttribute('role') === 'tab',
+        };
+      }
+      const server = tasksBody.tasks.map(fromServer);
+      setTasks((current) => {
+        const byId = new Map(current.map((task) => [task.id, task]));
+        const merged = server.map((task) => (pinned.has(task.id) ? (byId.get(task.id) ?? task) : task));
+        const serverIds = new Set(server.map((task) => task.id));
+        current.forEach((task, index) => {
+          if (pinned.has(task.id) && !serverIds.has(task.id)) merged.splice(Math.min(index, merged.length), 0, task);
+        });
+        return merged;
+      });
+      applyLists(nextLists);
+      setListsState('ready');
+      setMembers(membersBody.members);
+      // The selected list was deleted or unshared by someone else.
+      const selected = before.requestedView;
+      const gone = typeof selected === 'number' ? before.lists.find((list) => list.id === selected) : undefined;
+      if (gone && !nextLists.some((list) => list.id === gone.id)) {
+        // Not selectView: an open edit row stays open (its task is in Inbox now).
+        setRequestedView('inbox');
+        writeViewToUrl('inbox');
+        setNotice(vanishedListMessage(gone));
+      }
+    } catch {
+      // Silent, see above.
+    } finally {
+      refreshing.current = false;
+    }
+  }, [onSignedOut, applyLists, me]);
+  useEffect(() => {
+    const trigger = () => {
+      if (document.visibilityState === 'visible') void refresh();
+    };
+    window.addEventListener('focus', trigger);
+    document.addEventListener('visibilitychange', trigger);
+    const timer = setInterval(trigger, REFRESH_INTERVAL_MS);
+    return () => {
+      window.removeEventListener('focus', trigger);
+      document.removeEventListener('visibilitychange', trigger);
+      clearInterval(timer);
+    };
+  }, [refresh]);
 
   function selectView(next: View) {
     const changed = next !== view;
@@ -364,14 +574,43 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
     if (changed && !deletingRef.current) setConfirmingId(null);
   }
 
-  // A list the server no longer has (deleted in another tab): its tab goes,
-  // its tasks show in Inbox, as the server moved them, and a view of it
-  // switches to Inbox.
-  function dropList(list: List, message: string) {
+  // Whether a task stays visible to the user once its list is deleted: the
+  // server moves a shared list's tasks to the Inbox of whoever added each one
+  // (the owner when unknown), and an unshared list's to the owner's Inbox.
+  const keptAfterDelete = (task: Task, list: List) =>
+    (list.shared ? (task.createdById ?? list.ownerId) : list.ownerId) === me;
+
+  // A list the user can no longer see: its tab goes, a view of it switches
+  // to Inbox, and its tasks leave with it (the user stopped sharing someone
+  // else's list) or move to Inbox (it was deleted).
+  function removeList(list: List, deleted: boolean, movedTaskIds: number[] = []) {
+    const moved = new Set(movedTaskIds);
+    setTasks((current) =>
+      current.flatMap((task) => {
+        if (task.listId !== list.id && !moved.has(task.id)) return [task];
+        if (!deleted || !keptAfterDelete(task, list)) return [];
+        return [{ ...task, listId: null, assigneeId: null }];
+      }),
+    );
     applyLists(lists.filter((item) => item.id !== list.id));
+    setEditing((current) => {
+      const task = current && tasks.find((item) => item.id === current.id);
+      return task && task.listId === list.id && (!deleted || !keptAfterDelete(task, list)) ? null : current;
+    });
     if (requestedView === list.id) selectView('inbox');
-    setNotice(message);
   }
+
+  // A list the server no longer has for the user (deleted in another tab, or
+  // unshared or deleted by another member): it goes as if deleted, with a
+  // notice, and a refresh then shows where its tasks really went.
+  function dropList(list: List, message: string) {
+    removeList(list, true);
+    setNotice(message);
+    if (list.shared) setTimeout(() => void refresh(), 0);
+  }
+
+  const isSharedList = (listId: number | null) =>
+    listId !== null && (lists.find((list) => list.id === listId)?.shared ?? false);
 
   async function create(event: FormEvent) {
     event.preventDefault();
@@ -393,6 +632,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
     // goes to Inbox, which is no field at all.
     const list = typeof view === 'number' ? lists.find((item) => item.id === view) : undefined;
     creatingRef.current = true;
+    const end = track();
     setCreating(true);
     setCreateError(null);
     try {
@@ -421,7 +661,10 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
       if (!response.ok) throw new Error();
       const body: { task: Task } = await response.json();
       // Only a task the server confirmed is added to the list.
-      setTasks((current) => [fromServer(body.task), ...current]);
+      const created = fromServer(body.task);
+      setTasks((current) =>
+        current.some((item) => item.id === created.id) ? current : [created, ...current],
+      );
       setTitle('');
       setDueDate('');
       setRepeat(NO_REPEAT);
@@ -437,6 +680,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
     } finally {
       creatingRef.current = false;
       setCreating(false);
+      end();
     }
   }
 
@@ -445,6 +689,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
     // A task that is being deleted is not updated as well.
     if (deletingRef.current && confirmingId === task.id) return;
     updatingRef.current.add(task.id);
+    const end = track();
     setUpdatingIds((ids) => [...ids, task.id]);
     setUpdateError('');
     setNotice('');
@@ -504,6 +749,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
     } finally {
       updatingRef.current.delete(task.id);
       setUpdatingIds((ids) => ids.filter((id) => id !== task.id));
+      end();
     }
   }
 
@@ -532,6 +778,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
       repeat: repeatForm(task.repeat),
       notes: task.notes ?? '',
       listId: task.listId,
+      assigneeId: task.assigneeId,
       error: '',
       errorField: 'title',
     });
@@ -578,6 +825,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
       dueDate?: string | null;
       repeat?: Repeat | null;
       listId?: number | null;
+      assigneeId?: number | null;
     } = {};
     if (trimmed !== task.title) changes.title = trimmed;
     const newDueDate = editing.dueDate === '' ? null : editing.dueDate;
@@ -586,17 +834,24 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
     const newNotes = storedNotes(editing.notes);
     if (newNotes !== task.notes) changes.notes = newNotes;
     if (editing.listId !== task.listId) changes.listId = editing.listId;
+    // Only a task that ends up in a shared list has an assignee; one that
+    // leaves a shared list loses it on the server without being asked (D-6).
+    if (isSharedList(editing.listId) && editing.assigneeId !== task.assigneeId) {
+      changes.assigneeId = editing.assigneeId;
+    }
     // Nothing to store: leave edit mode without a request.
     if (
       changes.title === undefined &&
       changes.dueDate === undefined &&
       changes.repeat === undefined &&
       changes.notes === undefined &&
-      changes.listId === undefined
+      changes.listId === undefined &&
+      changes.assigneeId === undefined
     ) {
       return leaveEdit(task);
     }
     savingRef.current = true;
+    const end = track();
     setSaving(true);
     setUpdateError('');
     setNotice('');
@@ -646,7 +901,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
       }
     } catch {
       // Edit mode and the typed values are kept so the user can retry.
-      const changed = (['title', 'dueDate', 'repeat', 'notes', 'listId'] as const).filter(
+      const changed = (['title', 'dueDate', 'repeat', 'notes', 'listId', 'assigneeId'] as const).filter(
         (field) => changes[field] !== undefined,
       );
       const what =
@@ -658,11 +913,14 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
               repeat: 'The new repeat',
               notes: 'The new notes',
               listId: 'The new list',
+              assigneeId: 'The new assignee',
             }[changed[0]];
-      fail(`${what} could not be saved. Please try again.`, changed[0] === 'listId' ? 'list' : changed[0]);
+      const field = changed[0] === 'listId' ? 'list' : changed[0] === 'assigneeId' ? 'assignee' : changed[0];
+      fail(`${what} could not be saved. Please try again.`, field);
     } finally {
       savingRef.current = false;
       setSaving(false);
+      end();
     }
   }
 
@@ -683,6 +941,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
   async function confirmDelete(task: Task) {
     if (deletingRef.current || confirmingId !== task.id || updatingRef.current.has(task.id)) return;
     deletingRef.current = true;
+    const end = track();
     setDeleting(true);
     setUpdateError('');
     setNotice('');
@@ -703,6 +962,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
     } finally {
       deletingRef.current = false;
       setDeleting(false);
+      end();
     }
   }
 
@@ -715,6 +975,7 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
         repeat: editing.repeat,
         notes: editing.notes,
         listId: editing.listId,
+        assigneeId: editing.assigneeId,
         error: editing.error,
         errorField: editing.errorField,
         saving,
@@ -752,6 +1013,13 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
       // Only "All tasks" mixes lists, so only there a row names its list (D-6).
       // A list that is not loaded (the lists failed to load) has no label.
       listName={view === 'all' ? (lists.find((list) => list.id === task.listId)?.name ?? null) : null}
+      // In shared lists only, in the list's view and in "All tasks" alike.
+      shareLabels={isSharedList(task.listId) ? sharedLabels(task, me, members) : null}
+      // The select follows the List choice in the edit row (D-6).
+      assignees={
+        editing?.id === task.id && isSharedList(editing.listId) && members.length > 0 ? members : null
+      }
+      me={me}
       updating={updatingIds.includes(task.id)}
       // Controls whose action is ignored right now are marked as locked.
       editLocked={saving || updatingIds.includes(task.id)}
@@ -813,7 +1081,20 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
       }
       onEditList={(listId) =>
         setEditing((current) =>
-          current?.id === task.id && !savingRef.current ? { ...current, listId, error: '' } : current,
+          current?.id === task.id && !savingRef.current
+            ? {
+                ...current,
+                listId,
+                // Moving out of a shared list clears the assignee, as the server does.
+                assigneeId: isSharedList(listId) ? current.assigneeId : null,
+                error: '',
+              }
+            : current,
+        )
+      }
+      onEditAssignee={(assigneeId) =>
+        setEditing((current) =>
+          current?.id === task.id && !savingRef.current ? { ...current, assigneeId, error: '' } : current,
         )
       }
       onSave={() => void saveEdit(task)}
@@ -833,6 +1114,8 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
     <div className="space-y-4">
       <ListBar
         lists={lists}
+        me={me}
+        members={members}
         failed={listsState === 'failed'}
         view={view}
         onSelect={selectView}
@@ -841,19 +1124,30 @@ export function Tasks({ onSignedOut }: { onSignedOut: () => void }) {
           setLists((current) => [...current, list]);
           selectView(list.id);
         }}
-        onRenamed={(list) => setLists((current) => current.map((item) => (item.id === list.id ? list : item)))}
-        onDeleted={(id, movedTaskIds) => {
-          const moved = new Set(movedTaskIds);
-          setTasks((current) =>
-            current.map((task) => (moved.has(task.id) || task.listId === id ? { ...task, listId: null } : task)),
-          );
-          setLists((current) => current.filter((list) => list.id !== id));
-          setEditing((current) => (current?.listId === id ? { ...current, listId: null } : current));
-          if (requestedView === id) selectView('inbox');
+        onUpdated={(list) => {
+          setLists((current) => current.map((item) => (item.id === list.id ? list : item)));
+          // Unsharing cleared the assignees of the list's tasks on the server.
+          if (!list.shared) {
+            setTasks((current) =>
+              current.some((task) => task.listId === list.id && task.assigneeId !== null)
+                ? current.map((task) => (task.listId === list.id ? { ...task, assigneeId: null } : task))
+                : current,
+            );
+            setEditing((current) => (current?.listId === list.id ? { ...current, assigneeId: null } : current));
+          }
+        }}
+        onLeft={(list) => {
+          removeList(list, false);
+          setNotice(leftListMessage(list));
+        }}
+        onDeleted={(list, movedTaskIds) => {
+          removeList(list, true, movedTaskIds);
+          setEditing((current) => (current?.listId === list.id ? { ...current, listId: null, assigneeId: null } : current));
         }}
         onGone={dropList}
         onSignedOut={onSignedOut}
         taskCount={(id) => tasks.filter((task) => task.listId === id).length}
+        track={track}
       />
       <div role="tabpanel" id={TASKS_PANEL_ID} aria-labelledby={tabId(view)} className="space-y-4">
         <form onSubmit={(event) => void create(event)} noValidate className="space-y-2">

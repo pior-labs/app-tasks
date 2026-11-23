@@ -9,6 +9,10 @@ type Reply = Response | Promise<Response> | (() => Response | Promise<Response>)
 type Call = { method: string; path: string; body: unknown };
 
 const signedInUser = { id: '1', name: 'Household One', email: 'one@example.test' };
+const fixtureMembers = [
+  { id: 1, name: 'Household One' },
+  { id: 2, name: 'Household Two' },
+];
 const milk = { id: 1, title: 'Buy oat milk', listId: null, notes: null, completed: false, dueDate: null, repeat: null };
 const plants = { id: 2, title: 'Water the plants', listId: null, notes: null, completed: true, dueDate: null, repeat: null };
 
@@ -20,7 +24,8 @@ function json(body: unknown, status = 200) {
 }
 
 // Stub fetch with queued replies per "METHOD path"; an unexpected request fails
-// the test. GET /api/lists answers no lists unless a test queued a reply.
+// the test. GET /api/lists answers no lists, and GET /api/members the two
+// fixture members, unless a test queued a reply.
 let replies: Map<string, Reply[]>;
 let calls: Call[];
 function reply(route: string, ...queued: Reply[]) {
@@ -76,6 +81,7 @@ beforeEach(() => {
       calls.push(call);
       const next = replies.get(`${call.method} ${call.path}`)?.shift();
       if (!next && `${call.method} ${call.path}` === 'GET /api/lists') return json({ lists: [] });
+      if (!next && `${call.method} ${call.path}` === 'GET /api/members') return json({ members: fixtureMembers });
       if (!next) throw new Error(`Unexpected request: ${call.method} ${call.path}`);
       return typeof next === 'function' ? next() : next;
     }),
@@ -1573,7 +1579,9 @@ describe('due dates', () => {
     });
     expect(rowTitles(group('Overdue'))).toEqual(['Bins out', 'Dentist']);
     expect(rowTitles(group('Today'))).toEqual(['Later']);
-    expect(callsTo('GET /api/tasks')).toHaveLength(1);
+    // The second request is the 30-second background refresh (shared lists
+    // AC-14), still unanswered: the rows above moved without it.
+    expect(callsTo('GET /api/tasks')).toHaveLength(2);
   });
 
   test('at midnight, focus stays on the same control of a row that moved group', async () => {
@@ -1659,7 +1667,9 @@ describe('due dates', () => {
     expect(rowTitles(group('Overdue'))).toEqual(['Bins out']);
     // Two days later: a date, not "yesterday".
     expect(document.getElementById('task-1-due')!.textContent).toMatch(/^Overdue \u00B7 Due \S.*20$/);
-    expect(callsTo('GET /api/tasks')).toHaveLength(1);
+    // The second request is the background refresh on becoming visible
+    // (shared lists AC-14), still unanswered: the rows above moved without it.
+    expect(callsTo('GET /api/tasks')).toHaveLength(2);
   });
 });
 
@@ -3383,5 +3393,502 @@ describe('lists', () => {
       }
       await expectSignedOut();
     }
+  });
+});
+
+// Shared lists. The criteria named below are those of the shared lists task.
+// The signed-in user is Household One (id 1); Household Two is id 2.
+describe('shared lists', () => {
+  const list = (id: number, name: string, { shared = false, ownerId = 1 } = {}) => ({
+    id,
+    name,
+    shared,
+    ownerId,
+    createdAt: '2026-11-20T12:00:00.000Z',
+    updatedAt: '2026-11-20T12:00:00.000Z',
+  });
+  const errands = list(10, 'Errands');
+  const home = list(11, 'Home', { shared: true });
+  const groceries = list(12, 'Groceries', { shared: true, ownerId: 2 });
+  const task = (id: number, title: string, listId: number | null, extra: Record<string, unknown> = {}) => ({
+    id,
+    title,
+    listId,
+    notes: null,
+    completed: false,
+    dueDate: null,
+    repeat: null,
+    createdById: 1,
+    completedById: null,
+    assigneeId: null,
+    ...extra,
+  });
+  const withLists = (...lists: unknown[]) => reply('GET /api/lists', json({ lists }));
+  const tablist = () => screen.getByRole('tablist', { name: 'Lists' });
+  const tab = (name: string) => within(tablist()).getByRole('tab', { name });
+  const tabNames = () => within(tablist()).getAllByRole('tab').map((item) => item.textContent);
+  const selectedTab = () =>
+    within(tablist())
+      .getAllByRole('tab')
+      .filter((item) => item.getAttribute('aria-selected') === 'true')
+      .map((item) => item.textContent);
+  const manageRow = (name: string) =>
+    within(screen.getByRole('list', { name: 'Your lists' }))
+      .getAllByRole('listitem')
+      .find((item) => item.querySelector('[data-list-name]')?.textContent === name)!;
+  const rowOf = (title: string) => screen.getByRole('checkbox', { name: title }).closest('li')!;
+  const shareLabels = (title: string) => rowOf(title).querySelector('[data-share-labels]')?.textContent ?? null;
+  const assigneeField = (title: string) =>
+    screen.queryByRole('combobox', { name: `Assigned to, for "${title}"` }) as HTMLSelectElement | null;
+  const optionTexts = (select: HTMLSelectElement) => [...select.options].map((option) => option.textContent);
+  async function ready() {
+    await screen.findByRole('tablist', { name: 'Lists' });
+    await screen.findByLabelText('New task');
+  }
+  async function openManage() {
+    await userEvent.click(button('Manage lists'));
+    expect(button('Manage lists').getAttribute('aria-expanded')).toBe('true');
+  }
+  // Triggers a background refresh by focusing the window, and waits until its
+  // three requests went out.
+  async function refreshOnFocus() {
+    const before = callsTo('GET /api/members').length;
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+    await waitFor(() => expect(callsTo('GET /api/members')).toHaveLength(before + 1));
+    expect(callsTo('GET /api/tasks').length).toBeGreaterThan(1);
+  }
+  // Queues the answers of one refresh.
+  function refreshReplies(tasks: unknown[], lists: unknown[], members: unknown[] = fixtureMembers) {
+    reply('GET /api/tasks', json({ tasks }));
+    reply('GET /api/lists', json({ lists }));
+    reply('GET /api/members', json({ members }));
+  }
+
+  test('shared lists, own and others\', are tabs in creation order with a shared marker (AC-11)', async () => {
+    signedIn([]);
+    withLists(errands, home, groceries);
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Errands', 'Home (shared)', 'Groceries (shared)']));
+    // The accessible name says "shared"; the visible marker is an icon.
+    for (const name of ['Home (shared)', 'Groceries (shared)']) {
+      expect(tab(name).querySelector('svg[aria-hidden="true"]')).toBeTruthy();
+      expect(tab(name).querySelector('.sr-only')!.textContent).toBe('(shared)');
+    }
+    expect(tab('Errands').querySelector('svg')).toBeNull();
+    await userEvent.click(tab('Groceries (shared)'));
+    expect(location.search).toBe('?list=12');
+    expect(screen.getByText('No tasks in Groceries yet.')).toBeTruthy();
+  });
+
+  test('Manage lists shares and stops sharing the user\'s own lists and names other owners (AC-11)', async () => {
+    signedIn([task(1, 'Mow', 11, { assigneeId: 2 })]);
+    withLists(errands, home, groceries);
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(tabNames()).toContain('Groceries (shared)'));
+    expect(shareLabels('Mow')).toBe('Assigned to Household Two');
+    await openManage();
+    expect(manageRow('Errands').querySelector('[data-list-sharing]')).toBeNull();
+    expect(manageRow('Home').querySelector('[data-list-sharing]')!.textContent).toBe(' Shared with household');
+    expect(manageRow('Groceries').querySelector('[data-list-sharing]')!.textContent).toBe(' Shared by Household Two');
+    expect(within(manageRow('Errands')).getAllByRole('button').map((item) => item.textContent)).toEqual([
+      'Rename',
+      'Share with household',
+      'Delete',
+    ]);
+    expect(within(manageRow('Groceries')).getAllByRole('button').map((item) => item.textContent)).toEqual([
+      'Rename',
+      'Stop sharing',
+      'Delete',
+    ]);
+
+    // Share: one request, no question; the button and tab follow once stored.
+    let finish!: (response: Response) => void;
+    reply('PATCH /api/lists/10', new Promise<Response>((resolve) => (finish = resolve)));
+    await userEvent.click(button('Share "Errands" with household'));
+    expect(callsTo('PATCH /api/lists/10')[0].body).toEqual({ shared: true });
+    const pending = button('Share "Errands" with household');
+    expect(pending.textContent).toBe('Sharing...');
+    expect(pending.getAttribute('aria-disabled')).toBe('true');
+    // A pending request ignores more clicks.
+    await userEvent.click(pending);
+    expect(callsTo('PATCH /api/lists/10')).toHaveLength(1);
+    finish(json({ list: { ...errands, shared: true } }));
+    await waitFor(() => expect(tabNames()).toContain('Errands (shared)'));
+    expect(document.activeElement).toBe(button('Stop sharing "Errands"'));
+
+    // Stop sharing an own list: no question either; assignees go, as on the server.
+    reply('PATCH /api/lists/11', json({ list: { ...home, shared: false } }));
+    await userEvent.click(button('Stop sharing "Home"'));
+    expect(callsTo('PATCH /api/lists/11')[0].body).toEqual({ shared: false });
+    await waitFor(() => expect(tabNames()).toContain('Home'));
+    expect(manageRow('Home').querySelector('[data-list-sharing]')).toBeNull();
+    expect(shareLabels('Mow')).toBeNull();
+
+    // A failure shows an error and changes nothing.
+    reply('PATCH /api/lists/10', json({ error: 'internal_error' }, 500));
+    await userEvent.click(button('Stop sharing "Errands"'));
+    expect((await screen.findByRole('alert')).textContent).toBe('Sharing "Errands" could not be stopped. Please try again.');
+    expect(tabNames()).toContain('Errands (shared)');
+  });
+
+  test('stopping sharing someone else\'s list asks first, then the list and its tasks go (AC-11, D-2)', async () => {
+    history.replaceState(null, '', '/?list=12');
+    signedIn([task(1, 'Their milk', 12, { createdById: 2 }), task(2, 'My eggs', 12), task(3, 'Inbox task', null)]);
+    withLists(errands, groceries);
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(selectedTab()).toEqual(['Groceries (shared)']));
+    expect(taskTitles()).toEqual(['Their milk', 'My eggs']);
+    await openManage();
+
+    await userEvent.click(button('Stop sharing "Groceries"'));
+    const question = screen.getByRole('group', { name: 'Stop sharing "Groceries"?' });
+    expect(question.textContent).toContain(
+      'Stop sharing Groceries? It goes back to Household Two with all its tasks, and you will lose access to it.',
+    );
+    expect(document.activeElement).toBe(button('Cancel stopping sharing "Groceries"'));
+    expect(callsTo('PATCH /api/lists/12')).toHaveLength(0);
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByRole('group', { name: 'Stop sharing "Groceries"?' })).toBeNull();
+    expect(document.activeElement).toBe(button('Stop sharing "Groceries"'));
+
+    // A failed request keeps the question for a retry.
+    reply('PATCH /api/lists/12', json({ error: 'internal_error' }, 500), json({ list: { ...groceries, shared: false } }));
+    await userEvent.click(button('Stop sharing "Groceries"'));
+    await userEvent.click(button('Confirm stopping sharing "Groceries"'));
+    expect((await screen.findByRole('alert')).textContent).toBe('Sharing "Groceries" could not be stopped. Please try again.');
+    expect(screen.getByRole('group', { name: 'Stop sharing "Groceries"?' })).toBeTruthy();
+    await userEvent.click(button('Confirm stopping sharing "Groceries"'));
+    expect(callsTo('PATCH /api/lists/12').map((call) => call.body)).toEqual([{ shared: false }, { shared: false }]);
+    // The tab goes, the view switches to Inbox, and the list's tasks are gone.
+    await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Errands']));
+    expect(selectedTab()).toEqual(['Inbox']);
+    expect(location.search).toBe('?list=inbox');
+    expect(screen.getByRole('status').textContent).toBe('"Groceries" is no longer shared with you, so it was removed.');
+    // Focus moved to the previous list's Rename.
+    await waitFor(() => expect(document.activeElement).toBe(button('Rename "Errands"')));
+    await userEvent.click(button('Manage lists'));
+    await userEvent.click(tab('All tasks'));
+    expect(taskTitles()).toEqual(['Inbox task']);
+  });
+
+  test('deleting a shared list says where the tasks go, and the other member\'s leave (AC-11, D-4)', async () => {
+    signedIn([task(1, 'Their milk', 12, { createdById: 2, assigneeId: 1 }), task(2, 'My eggs', 12, { assigneeId: 2 })]);
+    withLists(errands, groceries);
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(tabNames()).toContain('Groceries (shared)'));
+    await openManage();
+    await userEvent.click(button('Delete list "Groceries"'));
+    expect(screen.getByRole('group', { name: 'Delete list "Groceries"?' }).textContent).toContain(
+      'Delete Groceries? Its 2 tasks will return to the Inbox of whoever added them.',
+    );
+    await userEvent.click(button('Cancel deleting list "Groceries"'));
+    await userEvent.click(button('Delete list "Errands"'));
+    expect(screen.getByRole('group', { name: 'Delete list "Errands"?' }).textContent).toContain(
+      'Delete Errands? It has no tasks.',
+    );
+    await userEvent.click(button('Cancel deleting list "Errands"'));
+
+    reply('DELETE /api/lists/12', json({ movedTaskIds: [1, 2] }));
+    await userEvent.click(button('Delete list "Groceries"'));
+    await userEvent.click(button('Confirm deleting list "Groceries"'));
+    await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Errands']));
+    // My task is in my Inbox now, unassigned; Household Two's went to theirs.
+    await userEvent.click(button('Manage lists'));
+    await userEvent.click(tab('Inbox'));
+    expect(taskTitles()).toEqual(['My eggs']);
+    expect(rowOf('My eggs').querySelector('[data-share-labels]')).toBeNull();
+  });
+
+  test('rows in shared lists say who added, completed and is assigned; other rows look as before (AC-12, D-5)', async () => {
+    signedIn([
+      task(1, 'Added by two', 12, { createdById: 2, assigneeId: 1 }),
+      task(2, 'Done by two', 12, { completed: true, completedById: 2 }),
+      task(3, 'Mine, assigned', 11, { assigneeId: 2 }),
+      task(4, 'Unknown member', 12, { createdById: 3, assigneeId: 3 }),
+      task(5, 'Done by me', 12, { createdById: 2, completed: true, completedById: 1 }),
+      task(6, 'Inbox, by two', null, { createdById: 2 }),
+      task(7, 'Unshared list', 10, { createdById: 2, assigneeId: 2 }),
+      task(8, 'Unknown completer', 11, { completed: true, completedById: null }),
+    ]);
+    withLists(errands, home, groceries);
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(tabNames()).toContain('Groceries (shared)'));
+    await expandCompleted();
+    // In "All tasks".
+    const expected: Record<string, string | null> = {
+      'Added by two': 'Added by Household Two · Assigned to you',
+      'Done by two': 'Done by Household Two',
+      'Mine, assigned': 'Assigned to Household Two',
+      'Unknown member': null,
+      'Done by me': 'Added by Household Two',
+      'Inbox, by two': null,
+      'Unshared list': null,
+      'Unknown completer': null,
+    };
+    for (const [title, labels] of Object.entries(expected)) expect(shareLabels(title), title).toBe(labels);
+    // The same in the list's own view.
+    await userEvent.click(tab('Groceries (shared)'));
+    expect(shareLabels('Added by two')).toBe('Added by Household Two · Assigned to you');
+    expect(shareLabels('Done by two')).toBe('Done by Household Two');
+    // Rows outside shared lists have exactly their usual parts.
+    await userEvent.click(tab('Inbox'));
+    expect(rowOf('Inbox, by two').querySelectorAll('p')).toHaveLength(0);
+  });
+
+  test('the edit row of a task in a shared list has an "Assigned to" select; others do not (AC-13, D-6)', async () => {
+    signedIn([task(1, 'Shared task', 12, { assigneeId: 1 }), task(2, 'Inbox task', null), task(3, 'Errand', 10)]);
+    withLists(errands, groceries);
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(tabNames()).toContain('Groceries (shared)'));
+
+    // Outside shared lists there is no select, and edit bodies are unchanged.
+    for (const title of ['Inbox task', 'Errand']) {
+      await userEvent.click(button(`Edit "${title}"`));
+      expect(assigneeField(title)).toBeNull();
+      await userEvent.click(button('Cancel'));
+    }
+
+    await userEvent.click(button('Edit "Shared task"'));
+    const field = assigneeField('Shared task')!;
+    expect(optionTexts(field)).toEqual(['Nobody', 'Me (Household One)', 'Household Two']);
+    expect(field.value).toBe('1');
+    // In Tab order after the List select and before the notes.
+    act(() => screen.getByRole('combobox', { name: 'List for "Shared task"' }).focus());
+    await userEvent.tab();
+    expect(document.activeElement).toBe(field);
+    await userEvent.tab();
+    expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Notes for "Shared task"' }));
+    // Saving with no change sends nothing.
+    await userEvent.click(button('Save'));
+    expect(calls.filter((call) => call.method !== 'GET')).toEqual([]);
+
+    // Only a changed assignee is sent.
+    reply('PATCH /api/tasks/1', json({ task: task(1, 'Shared task', 12, { assigneeId: 2 }) }));
+    await userEvent.click(button('Edit "Shared task"'));
+    await userEvent.selectOptions(assigneeField('Shared task')!, 'Household Two');
+    await userEvent.click(button('Save'));
+    await waitFor(() => expect(shareLabels('Shared task')).toBe('Assigned to Household Two'));
+    expect(callsTo('PATCH /api/tasks/1')[0].body).toEqual({ assigneeId: 2 });
+    reply('PATCH /api/tasks/1', json({ task: task(1, 'Renamed', 12, { assigneeId: 2 }) }));
+    await userEvent.click(button('Edit "Shared task"'));
+    await userEvent.clear(screen.getByRole('textbox', { name: 'New title for "Shared task"' }));
+    await userEvent.type(screen.getByRole('textbox', { name: 'New title for "Shared task"' }), 'Renamed{Enter}');
+    await waitFor(() => expect(taskTitles()).toContain('Renamed'));
+    expect(callsTo('PATCH /api/tasks/1')[1].body).toEqual({ title: 'Renamed' });
+
+    // Moving out of the shared list hides the select and clears the assignee
+    // locally; only the move is sent, as the server clears it.
+    reply('PATCH /api/tasks/1', json({ task: task(1, 'Renamed', null) }));
+    await userEvent.click(button('Edit "Renamed"'));
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'List for "Renamed"' }), 'Inbox');
+    expect(assigneeField('Renamed')).toBeNull();
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'List for "Renamed"' }), 'Groceries (shared)');
+    expect(assigneeField('Renamed')!.value).toBe('');
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'List for "Renamed"' }), 'Inbox');
+    await userEvent.click(button('Save'));
+    await waitFor(() => expect(callsTo('PATCH /api/tasks/1')).toHaveLength(3));
+    expect(callsTo('PATCH /api/tasks/1')[2].body).toEqual({ listId: null });
+
+    // Moving into a shared list offers the select in the same edit.
+    reply('PATCH /api/tasks/2', json({ task: task(2, 'Inbox task', 12, { assigneeId: 1 }) }));
+    await userEvent.click(button('Edit "Inbox task"'));
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'List for "Inbox task"' }), 'Groceries (shared)');
+    await userEvent.selectOptions(assigneeField('Inbox task')!, 'Me (Household One)');
+    await userEvent.click(button('Save'));
+    await waitFor(() => expect(callsTo('PATCH /api/tasks/2')).toHaveLength(1));
+    expect(callsTo('PATCH /api/tasks/2')[0].body).toEqual({ listId: 12, assigneeId: 1 });
+
+    // An assignee the server refuses is reported on the select.
+    reply('PATCH /api/tasks/2', json({ error: 'invalid_assignee', message: 'Not a member.' }, 400));
+    await userEvent.click(tab('Groceries (shared)'));
+    await userEvent.click(button('Edit "Inbox task"'));
+    await userEvent.selectOptions(assigneeField('Inbox task')!, 'Household Two');
+    await userEvent.click(button('Save'));
+    expect((await screen.findByRole('alert')).textContent).toBe('Not a member.');
+    expect(assigneeField('Inbox task')!.getAttribute('aria-invalid')).toBe('true');
+  });
+
+  test('a refresh on focus shows what another member added, changed, completed and deleted (AC-14)', async () => {
+    signedIn([task(1, 'Milk', 12), task(2, 'Bread', 12)]);
+    withLists(groceries);
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(taskTitles()).toEqual(['Milk', 'Bread']));
+    expect(callsTo('GET /api/tasks')).toHaveLength(1);
+
+    refreshReplies(
+      [
+        task(3, 'Eggs', 12, { createdById: 2 }),
+        task(1, 'Oat milk', 12, { completed: true, completedById: 2 }),
+      ],
+      [{ ...groceries, name: 'Food' }, list(13, 'Garden', { shared: true, ownerId: 2 })],
+    );
+    await refreshOnFocus();
+    await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Food (shared)', 'Garden (shared)']));
+    expect(taskTitles()).toEqual(['Eggs']);
+    expect(shareLabels('Eggs')).toBe('Added by Household Two');
+    await expandCompleted();
+    expect(shareLabels('Oat milk')).toBe('Done by Household Two');
+    expect(screen.queryByText('Bread')).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+
+    // A list share is taken back and another deleted.
+    refreshReplies([task(3, 'Eggs', 12, { createdById: 2 })], [{ ...groceries, name: 'Food', shared: false, ownerId: 1 }]);
+    await refreshOnFocus();
+    await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Food']));
+    expect(shareLabels('Eggs')).toBeNull();
+    expect(calls.filter((call) => call.method !== 'GET')).toEqual([]);
+  });
+
+  test('a refresh keeps drafts, the edit row and focus, and a deleted task\'s save shows "not found" (AC-14)', async () => {
+    signedIn([task(1, 'Milk', 12), task(2, 'Bread', 12, { dueDate: '2099-01-01' })]);
+    withLists(groceries);
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(taskTitles()).toEqual(['Bread', 'Milk']));
+    await userEvent.type(screen.getByLabelText('New task'), 'Half typed');
+    await userEvent.click(button('Edit "Milk"'));
+    const field = screen.getByRole('textbox', { name: 'New title for "Milk"' }) as HTMLInputElement;
+    await userEvent.type(field, ' draft');
+    field.setSelectionRange(2, 4);
+
+    // Another member renamed Milk, deleted it even, and moved Bread to another
+    // group: the edit row and its draft stay, and focus stays in the field.
+    refreshReplies([task(2, 'Bread', 12, { dueDate: null }), task(4, 'Butter', 12, { createdById: 2 })], [groceries]);
+    await refreshOnFocus();
+    await waitFor(() => expect(screen.getByText('Butter')).toBeTruthy());
+    expect((screen.getByLabelText('New task') as HTMLInputElement).value).toBe('Half typed');
+    expect(field.value).toBe('Milk draft');
+    expect(document.activeElement).toBe(field);
+    expect([field.selectionStart, field.selectionEnd]).toEqual([2, 4]);
+    // The edited row keeps its place.
+    expect(taskTitles()).toEqual(['editing: Milk draft', 'Bread', 'Butter']);
+
+    // Saving the deleted task gets the usual "no longer exists" handling.
+    reply('PATCH /api/tasks/1', json({ error: 'task_not_found' }, 404));
+    await userEvent.click(button('Save'));
+    await waitFor(() => expect(screen.getByRole('status').textContent).toBe('"Milk" no longer exists, so it was removed from the list.'));
+    expect(taskTitles()).toEqual(['Bread', 'Butter']);
+    expect(callsTo('PATCH /api/tasks/1')[0].body).toEqual({ title: 'Milk draft' });
+  });
+
+  test('a refresh moves focus with a row that changes group, and never during a pending change (AC-14)', async () => {
+    signedIn([task(1, 'Milk', 12), task(2, 'Bread', 12, { dueDate: '2099-01-01' })]);
+    withLists(groceries);
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(taskTitles()).toEqual(['Bread', 'Milk']));
+    const edit = button('Edit "Bread"');
+    act(() => edit.focus());
+    refreshReplies([task(2, 'Bread', 12), task(1, 'Milk', 12)], [groceries]);
+    await refreshOnFocus();
+    await waitFor(() => expect(taskTitles()).toEqual(['Bread', 'Milk']));
+    // Bread moved from Upcoming to No date: a new row, focus on the same control.
+    expect(screen.queryByRole('list', { name: 'Upcoming' })).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(button('Edit "Bread"')));
+    expect(button('Edit "Bread"')).not.toBe(edit);
+
+    // While a completion is pending, a refresh answer (which may predate it)
+    // is dropped; the next one applies.
+    let finish!: (response: Response) => void;
+    reply('PATCH /api/tasks/1', new Promise<Response>((resolve) => (finish = resolve)));
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Milk' }));
+    refreshReplies([task(2, 'Bread', 12), task(1, 'Milk', 12), task(5, 'Stale', 12)], [groceries]);
+    await refreshOnFocus();
+    finish(json({ task: task(1, 'Milk', 12, { completed: true, completedById: 1 }) }));
+    await waitFor(() => expect(screen.getByRole('status').textContent).toBe('"Milk" was moved to Completed.'));
+    expect(screen.queryByText('Stale')).toBeNull();
+    refreshReplies([task(1, 'Milk', 12, { completed: true, completedById: 1 }), task(2, 'Bread', 12), task(6, 'Fresh', 12)], [groceries]);
+    await refreshOnFocus();
+    await waitFor(() => expect(taskTitles()).toEqual(['Bread', 'Fresh']));
+    expect(screen.getByRole('button', { name: 'Completed (1)' })).toBeTruthy();
+  });
+
+  test('a refresh that finds the selected list gone switches to Inbox with a notice (AC-14)', async () => {
+    history.replaceState(null, '', '/?list=12');
+    signedIn([task(1, 'Milk', 12, { createdById: 2 }), task(2, 'Mine', null)]);
+    withLists(groceries);
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(selectedTab()).toEqual(['Groceries (shared)']));
+    act(() => tab('Groceries (shared)').focus());
+    refreshReplies([task(2, 'Mine', null)], []);
+    await refreshOnFocus();
+    await waitFor(() => expect(selectedTab()).toEqual(['Inbox']));
+    expect(location.search).toBe('?list=inbox');
+    expect(screen.getByRole('status').textContent).toBe(
+      '"Groceries" was deleted or is no longer shared with you, so Inbox is shown.',
+    );
+    expect(taskTitles()).toEqual(['Mine']);
+    await waitFor(() => expect(document.activeElement).toBe(tab('Inbox')));
+  });
+
+  test('a 401 on refresh signs out; other failures are silent and retried (AC-14)', async () => {
+    signedIn([task(1, 'Milk', null)]);
+    render(<App />);
+    await ready();
+    // A server error and a network error: nothing is shown.
+    reply('GET /api/tasks', json({ error: 'internal_error' }, 500));
+    await refreshOnFocus();
+    reply('GET /api/tasks', () => Promise.reject(new TypeError('network down')));
+    await refreshOnFocus();
+    await waitFor(() => expect(callsTo('GET /api/tasks')).toHaveLength(3));
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(taskTitles()).toEqual(['Milk']);
+    // The next trigger tries again and applies.
+    refreshReplies([task(2, 'Bread', null), task(1, 'Milk', null)], []);
+    await refreshOnFocus();
+    await waitFor(() => expect(taskTitles()).toEqual(['Bread', 'Milk']));
+    // An ended session returns to the signed-out view.
+    reply('GET /api/tasks', json({ error: 'unauthorized' }, 401));
+    await refreshOnFocus();
+    expect(await screen.findByRole('button', { name: 'Sign in with Pior Labs' })).toBeTruthy();
+    expect(screen.getByRole('alert').textContent).toBe('Your session has ended. Please sign in again.');
+  });
+
+  test('a refresh runs every 30 seconds while the page is visible, and on becoming visible (AC-14, D-8)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setInterval', 'clearInterval'] });
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
+    let state: DocumentVisibilityState = 'visible';
+    vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => state);
+    signedIn([task(1, 'Milk', null)]);
+    render(<App />);
+    await ready();
+    expect(callsTo('GET /api/tasks')).toHaveLength(1);
+    act(() => {
+      vi.advanceTimersByTime(29_000);
+    });
+    expect(callsTo('GET /api/tasks')).toHaveLength(1);
+    refreshReplies([task(2, 'Bread', null), task(1, 'Milk', null)], []);
+    act(() => {
+      vi.advanceTimersByTime(1_000);
+    });
+    expect(callsTo('GET /api/tasks')).toHaveLength(2);
+    await waitFor(() => expect(taskTitles()).toEqual(['Bread', 'Milk']));
+    // Hidden: no refresh, however long.
+    state = 'hidden';
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+      vi.advanceTimersByTime(5 * 60_000);
+    });
+    expect(callsTo('GET /api/tasks')).toHaveLength(2);
+    // Visible again: at once.
+    refreshReplies([task(3, 'Eggs', null), task(2, 'Bread', null), task(1, 'Milk', null)], []);
+    state = 'visible';
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    expect(callsTo('GET /api/tasks')).toHaveLength(3);
+    await waitFor(() => expect(taskTitles()).toEqual(['Eggs', 'Bread', 'Milk']));
   });
 });
