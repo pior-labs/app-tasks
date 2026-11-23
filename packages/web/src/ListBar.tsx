@@ -103,6 +103,11 @@ export function ListBar({
 }: Props) {
   const [creating, setCreating] = useState<{ name: string; error: string; saving: boolean } | null>(null);
   const [manageOpen, setManageOpen] = useState(false);
+  // A refresh can remove the last list too: Manage lists closes then, as when
+  // the last list is deleted here, so it does not reopen with the next list.
+  useEffect(() => {
+    if (lists.length === 0) setManageOpen(false);
+  }, [lists.length]);
   const [renaming, setRenaming] = useState<{ id: number; text: string; error: string; saving: boolean } | null>(null);
   const [confirming, setConfirming] = useState<{ id: number; deleting: boolean } | null>(null);
   // Sharing or unsharing a list: the request in progress, or the question

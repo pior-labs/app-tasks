@@ -4027,6 +4027,65 @@ describe('shared lists', () => {
     await waitFor(() => expect(document.activeElement).toBe(button('New list')));
   });
 
+  test('a refresh that removes the last list closes Manage lists, so a new list does not reopen it (AC-14, R4-F1)', async () => {
+    signedIn([]);
+    withLists(groceries);
+    reply('POST /api/lists', json({ list: list(13, 'Later') }, 201));
+    render(<App />);
+    await ready();
+    await openManage();
+    act(() => button('Stop sharing "Groceries"').focus());
+
+    // The owner deleted Groceries, the only list.
+    refreshReplies([], []);
+    await refreshOnFocus();
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Manage lists' })).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(button('New list')));
+
+    // As after deleting the last list here, Manage lists comes back closed.
+    await userEvent.click(button('New list'));
+    await userEvent.type(screen.getByRole('textbox', { name: 'List name' }), 'Later{Enter}');
+    await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Later']));
+    expect(button('Manage lists').getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByRole('list', { name: 'Your lists' })).toBeNull();
+  });
+
+  test('focus from a removed Manage lists entry goes to the Cancel of a neighbour\'s delete question, not its Confirm (AC-14, R4-F2)', async () => {
+    signedIn([]);
+    withLists(errands, groceries, home);
+    render(<App />);
+    await ready();
+    await openManage();
+    await userEvent.click(button('Delete list "Home"'));
+    act(() => button('Stop sharing "Groceries"').focus());
+
+    // The owner deleted Groceries: Home, the next list, is asking a question.
+    refreshReplies([], [errands, home]);
+    await refreshOnFocus();
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Stop sharing "Groceries"' })).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(button('Cancel deleting list "Home"')));
+    expect(calls.filter((call) => call.method !== 'GET')).toEqual([]);
+  });
+
+  test('focus from a removed Manage lists entry goes to the Cancel of a neighbour\'s stop-sharing question, not its Confirm (AC-14, R4-F2)', async () => {
+    const garden = list(13, 'Garden', { shared: true, ownerId: 2 });
+    signedIn([]);
+    withLists(errands, groceries, garden);
+    render(<App />);
+    await ready();
+    await openManage();
+    await userEvent.click(button('Stop sharing "Garden"'));
+    expect(screen.getByRole('group', { name: 'Stop sharing "Garden"?' })).toBeTruthy();
+    act(() => button('Stop sharing "Groceries"').focus());
+
+    // The owner deleted Groceries: Garden, the next list, is asking a question.
+    refreshReplies([], [errands, garden]);
+    await refreshOnFocus();
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Stop sharing "Groceries"' })).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(button('Cancel stopping sharing "Garden"')));
+    expect(calls.filter((call) => call.method !== 'GET')).toEqual([]);
+  });
+
   test('a closed lost row whose neighbour is lost too moves focus to the nearest row that remains (AC-14, R3-F2)', async () => {
     signedIn([
       task(1, 'Sweep porch', 12, { createdById: 2 }),

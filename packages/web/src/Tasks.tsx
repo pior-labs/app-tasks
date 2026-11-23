@@ -304,13 +304,15 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
         next?.focus();
       } else if (refreshed.listId !== undefined || refreshed.element.id === MANAGE_LISTS_BUTTON_ID) {
         // As after a list leaves the panel here: the next list's Rename (or
-        // its first control while it asks a question), else the previous
-        // one's, else New list (Manage lists goes away with the last list).
+        // the Cancel of the question it asks, never its Confirm, else its
+        // rename field), else the previous one's, else New list (Manage
+        // lists goes away with the last list).
         const entry = (id: number) => {
           const item = document.querySelector(`#manage-lists [data-list-id="${id}"]`);
           return shown(
-            item?.querySelector<HTMLElement>('[data-action="rename-list"]') ??
-              item?.querySelector<HTMLElement>('input, button'),
+            item?.querySelector<HTMLElement>(
+              '[data-action="rename-list"], [data-action="cancel-delete-list"], [data-action="cancel-unshare-list"]',
+            ) ?? item?.querySelector<HTMLElement>('input'),
           );
         };
         next =
