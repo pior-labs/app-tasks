@@ -1,19 +1,16 @@
-import { type APIRequestContext, type Browser, expect, type Page, test, type TestInfo } from '@playwright/test';
+import type { Browser, Page, TestInfo } from '@playwright/test';
+import { expect, test } from './fixtures';
 
 // Shared lists in a real browser, with Household One and Household Two signed
 // in side by side in separate browser contexts, against the Vite dev server
 // and the real API on a disposable database. The criteria named below are
 // those of the shared lists task.
 //
-// All tests share one database for the run. This file runs after
-// lists.spec.ts and before tasks.spec.ts, which expects Household Two to start
-// without tasks or lists, and Household One's rows to be its own. So every
-// test here uses names starting with "Shared:", and leaves no shared list,
-// nothing of Household Two's and none of its own rows behind (cleanUp).
+// Every test starts with no lists or tasks for either member and the real
+// clock (./fixtures.ts), so a test needs no clean-up beyond closing the two
+// browser contexts it opened.
 
 type FixtureUser = 'Household One' | 'Household Two';
-
-const webOrigin = `http://localhost:${process.env.E2E_WEB_PORT ?? 5273}`;
 
 async function signIn(page: Page, user: FixtureUser) {
   await page.goto('/');
@@ -86,31 +83,7 @@ async function screenshot(page: Page, testInfo: TestInfo, name: string) {
   await testInfo.attach(name, { path, contentType: 'image/png' });
 }
 
-// Through the API with the member's session (the context's cookies): first
-// every shared list stops being shared (any member may), then Household Two's
-// tasks and lists, and every "Shared:" row of Household One, are deleted.
-async function cleanUp(one: Page, two: Page) {
-  const headers = { Origin: webOrigin };
-  const call = async (request: APIRequestContext, method: 'get' | 'patch' | 'delete', path: string, data?: unknown) => {
-    const response = await request[method](path, { headers, ...(data === undefined ? {} : { data }) });
-    expect(response.ok(), `${method} ${path}`).toBe(true);
-    return method === 'delete' ? null : response.json();
-  };
-  const oneRequest = one.context().request;
-  const twoRequest = two.context().request;
-  for (const list of (await call(twoRequest, 'get', '/api/lists')).lists) {
-    if (list.shared) await call(twoRequest, 'patch', `/api/lists/${list.id}`, { shared: false });
-  }
-  for (const task of (await call(twoRequest, 'get', '/api/tasks')).tasks) await call(twoRequest, 'delete', `/api/tasks/${task.id}`);
-  for (const list of (await call(twoRequest, 'get', '/api/lists')).lists) await call(twoRequest, 'delete', `/api/lists/${list.id}`);
-  for (const task of (await call(oneRequest, 'get', '/api/tasks')).tasks) {
-    if (task.title.startsWith('Shared:')) await call(oneRequest, 'delete', `/api/tasks/${task.id}`);
-  }
-  for (const list of (await call(oneRequest, 'get', '/api/lists')).lists) {
-    if (list.name.startsWith('Shared:')) await call(oneRequest, 'delete', `/api/lists/${list.id}`);
-  }
-  expect((await call(twoRequest, 'get', '/api/tasks')).tasks).toEqual([]);
-  expect((await call(twoRequest, 'get', '/api/lists')).lists).toEqual([]);
+async function closeContexts(one: Page, two: Page) {
   await one.context().close();
   await two.context().close();
 }
@@ -171,7 +144,7 @@ test('One shares a list; Two sees it, adds, completes and is assigned; an unshar
     await expectNoReload(two);
     await screenshot(two, testInfo, 'sharing-assigned-to-you');
   } finally {
-    await cleanUp(one, two);
+    await closeContexts(one, two);
   }
 });
 
@@ -216,7 +189,7 @@ test('Two renames and stops sharing One\'s list: Two loses it, One keeps it with
     await expect(checkbox(one, 'Shared: dust')).toBeVisible();
     await expect(labels(one, 'Shared: dust')).toHaveCount(0);
   } finally {
-    await cleanUp(one, two);
+    await closeContexts(one, two);
   }
 });
 
@@ -251,7 +224,7 @@ test('deleting a shared list sends each task to the Inbox of whoever added it (A
     await expect(checkbox(one, 'Shared: balloons')).toBeVisible();
     await expect(one.getByText('Shared: cake')).toHaveCount(0);
   } finally {
-    await cleanUp(one, two);
+    await closeContexts(one, two);
   }
 });
 
@@ -331,6 +304,6 @@ test('the share toggle and the Assigned to select work by keyboard; the tab row 
     await sharedTab(two, 'Shared: kitchen and pantry restock').click();
     await expect(labels(two, 'Shared: flour')).toHaveText('Added by Household One \u00B7 Assigned to you');
   } finally {
-    await cleanUp(one, two);
+    await closeContexts(one, two);
   }
 });

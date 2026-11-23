@@ -1,24 +1,15 @@
-import { type APIRequestContext, expect, type Page, type Request, test, type TestInfo } from '@playwright/test';
+import type { Page, Request, TestInfo } from '@playwright/test';
+import { expect, setServerClock, test } from './fixtures';
 
 // Task lists in a real browser against the Vite dev server and the real API
 // on a disposable database, signed in through the fixture SSO provider. The
 // criteria named below are those of the lists task.
 //
-// All tests share one database for the run, and this file runs before
-// tasks.spec.ts. Household One keeps the lists and tasks each test leaves
-// behind, so every test uses its own names and only looks at those. Household
-// Two must be left without tasks: tasks.spec.ts expects it to start empty.
+// Every test starts with no lists or tasks and the real clock on both sides
+// (./fixtures.ts).
 
 type FixtureUser = 'Household One' | 'Household Two';
 
-const apiOrigin = `http://localhost:${process.env.E2E_API_PORT ?? 3173}`;
-async function setServerClock(request: APIRequestContext, time: Date | null) {
-  const response = await request.put(`${apiOrigin}/e2e/clock`, { data: { time: time?.toISOString() ?? null } });
-  expect(response.ok()).toBe(true);
-}
-test.beforeEach(async ({ request }) => {
-  await setServerClock(request, null);
-});
 
 async function signIn(page: Page, user: FixtureUser, path = '/') {
   await page.goto(path);

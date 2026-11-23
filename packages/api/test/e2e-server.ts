@@ -27,6 +27,19 @@ testServer.put('/e2e/clock', async (c) => {
   fixture.setNow(time === null ? null : new Date(time));
   return c.json({ now: fixture.now().toISOString() });
 });
+// Every browser test starts from an empty task domain (packages/e2e/tests/
+// fixtures.ts calls this before each test), so no test sees another's lists or
+// tasks and the order of the spec files does not matter. Users and sessions
+// stay: they come from signing in, which every test does itself. Tasks go
+// first, because tasks_list_fk refuses to delete a list that tasks still use.
+// Like the clock, this route exists only in this test server.
+testServer.post('/e2e/reset', async (c) => {
+  await fixture.client.begin(async (sql) => {
+    await sql`delete from tasks`;
+    await sql`delete from lists`;
+  });
+  return c.json({ ok: true });
+});
 testServer.all('*', (c) => fixture.app.fetch(c.req.raw));
 const server = serve({ fetch: testServer.fetch, port, hostname: 'localhost' }, () => {
   console.log(`End-to-end API for ${webOrigin} listening on http://localhost:${port}`);
