@@ -4656,6 +4656,16 @@ describe('assigned to me', () => {
     expect(shown('Alpha')).toBe(true);
     expect(status()).toBe('"Work" is no longer shared with you, so it was removed. "Charlie" is no longer shared with you.');
     expect(inManage()).toBe(true);
+
+    // The lists are shared with the user again and the tasks come back by
+    // refresh. A question left hidden on Charlie would show again.
+    refreshReplies(
+      [task(1, 'Alpha', 11, mine), task(2, 'Bravo', 12, mine), task(3, 'Charlie', 13, mine)],
+      [errands, home, groceries, work],
+    );
+    await refreshOnFocus();
+    await waitFor(() => expect(shown('Charlie')).toBe(true));
+    expect(screen.queryByRole('button', { name: 'Confirm deleting "Charlie"' })).toBeNull();
   });
 
   test('a Manage lists change that finds an own shared list gone closes an open edit row or delete question of its task with a notice (tasks-assigned-to-me R1-F1)', async () => {
