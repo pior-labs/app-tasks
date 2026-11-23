@@ -6,7 +6,8 @@ due date and optional plain-text notes, make a task with a due date repeat,
 sort tasks into lists they name (with a built-in Inbox), share a list with
 the household, and delete a task. In a shared list every member can do
 everything, rows say who added and completed a task, and a task can be
-assigned to a member. Open tasks are grouped by when they are due.
+assigned to a member; an "Assigned to me" view gathers the tasks assigned to
+the user from every shared list. Open tasks are grouped by when they are due.
 Deletion is permanent: there is no archive or undo. Priorities are not
 implemented.
 
@@ -264,8 +265,10 @@ zero width space, joiners, direction marks or a soft hyphen) dropped, NFKC
 again (so an invisible character between a letter and its accent does not make
 a second "Café"), then trimmed and lowercased. Letters from other scripts that
 only look Latin (a Cyrillic "І", say) are not folded. A name whose fold is
-"inbox" or "all tasks" is reserved, so a list can never look like a built-in
-view; names that only contain the words, such as "Inbox zero", are allowed.
+"inbox", "all tasks" or "assigned to me" is reserved, so a list can never look
+like a built-in view; names that only contain the words, such as "Inbox zero"
+or "Assigned to me later", are allowed. A list stored with a name before it was
+reserved keeps it, loads and shows as before, and can be renamed away.
 Anything else is 400 `invalid_list_name` and nothing changes. A name with the
 same fold as another of the owner's lists is 409 `duplicate_list_name` (also
 when another member renames a shared list: the owner's lists count, not
@@ -302,28 +305,37 @@ PostgreSQL ends as a deadlock victim (a list delete racing a task update) is
 retried, up to three attempts. Lists are not filtered on the server:
 `GET /api/tasks` returns every task with its `listId` and the browser filters.
 
-The signed-in page shows a tab row above the add form: "All tasks", "Inbox"
-and the user's lists in creation order, then a "New list" button and, when
+The signed-in page shows a tab row above the add form: "All tasks", "Inbox",
+"Assigned to me" (always, also without shared lists) and the user's lists in
+creation order, then a "New list" button and, when
 there are lists, a "Manage lists" button. The tab row is a tablist named
 "Lists" with automatic activation: arrow keys (wrapping at the ends), Home and
 End move to a tab and select it, and only the selected tab is in the Tab
 order. The add form and the task list are the selected tab's tabpanel. The
-selected view is kept in the URL as `?list=all`, `?list=inbox` or
-`?list=<id>`, so a reload keeps it; with no parameter, or an id that is not one
+selected view is kept in the URL as `?list=all`, `?list=inbox`,
+`?list=assigned` or `?list=<id>`, so a reload keeps it; with no parameter, or an id that is not one
 of the user's lists, the view is "All tasks", which keeps every task in view by
 default. On a narrow screen the tabs get a row of their own that scrolls
 sideways inside itself, without scrolling the page.
 
-"Inbox" shows the tasks with no list, a list's tab shows its tasks, and "All
-tasks" shows every task. Each view keeps the grouping, the Completed section
-and the ordering described below, and has its own empty state ("No tasks in
-Errands yet."; "All tasks" keeps "No tasks yet. Add your first one above.").
-In "All tasks", a row in a named list shows the list's name as a muted label
-under the due date line (read as "List: Errands"); Inbox rows show none, and
-the label is not part of the checkbox's description. A task added while a
-named list is selected is created in it (`listId` is sent); in "All tasks"
-and Inbox the add request sends no `listId`. The title field's placeholder
-names the destination ("Add to Errands", "Add to Inbox").
+"Inbox" shows the tasks with no list, a list's tab shows its tasks, "All
+tasks" shows every task, and "Assigned to me" shows the tasks whose assignee is
+the user, from every shared list they can see (their own and other members'),
+open and completed. It is a filter in the browser over `GET /api/tasks`; tasks
+in Inbox or in a list that is not shared never show there, since only a task
+in a shared list has an assignee. Each view keeps the grouping, the Completed
+section and the ordering described below, and has its own empty state ("No
+tasks in Errands yet."; "All tasks" keeps "No tasks yet. Add your first one
+above."; "Assigned to me" says "No tasks are assigned to you yet: tasks
+assigned to you in shared lists show here.").
+In "All tasks" and "Assigned to me", a row in a named list shows the list's
+name as a muted label under the due date line (read as "List: Errands"); Inbox
+rows show none, and the label is not part of the checkbox's description. A
+task added while a named list is selected is created in it (`listId` is sent);
+in "All tasks", Inbox and "Assigned to me" the add request sends no
+`listId`. The title field's placeholder names the destination ("Add to
+Errands", "Add to Inbox"). A task added from "Assigned to me" is in Inbox, so
+it does not show there, and a status message says `Added "Milk" to Inbox.`
 
 "New list" reveals a "List name" field with "Create list" and Cancel. Enter
 creates the list, adds its tab, selects it and focuses it; Escape or Cancel
@@ -345,7 +357,12 @@ The edit row has a "List" select (named `List for "<title>"`, with Inbox and
 every list) after the date and repeat controls and before the notes, so title
 to date is still one Tab. It is sent only when it changed. A task moved out of
 the selected list or Inbox leaves the view: a status message says where it
-went (`Moved "Milk" to Errands.`) and focus moves as after a delete. If the
+went (`Moved "Milk" to Errands.`) and focus moves as after a delete. In
+"Assigned to me" a save that leaves the task assigned to someone else or to
+nobody, or moves it out of its shared list, removes it the same way, and the
+message says what happened (`"Milk" is now assigned to Household Two.`,
+`"Milk" is no longer assigned to you.`, `Moved "Milk" to Inbox, so it is no
+longer assigned to you.`); a move to another shared list keeps it. If the
 server answers `invalid_list` (the list was deleted meanwhile), the error shows
 on the select and the lists are loaded again, so the select no longer offers
 the missing list. If a list was deleted in another tab, an add to it, or a
@@ -454,7 +471,17 @@ never touches the add form, the row being edited or asking to confirm a
 delete, or focus: a refresh that overlaps a change the page is making is
 dropped and the next trigger tries again, and a focused control whose row
 moves to another group keeps focus in its new place. If the selected list is
-gone, the view switches to Inbox with a notice. A 401 returns to the
+gone, the view switches to Inbox with a notice. In "Assigned to me" a refresh
+adds a task another member assigned to the user and removes one they
+unassigned, moved out of its shared list, unshared or deleted (with its list),
+with the same focus rules; the view itself never switches away. An open edit
+row or delete question there stays, as in other views, unless its list was
+deleted or stopped being shared: then it closes with a notice (`"Milk" is no
+longer assigned to you, because its list was deleted or is no longer
+shared.`). The same happens when the user stops sharing or deletes their own
+list in Manage lists, and when they stop sharing someone else's list (`"Milk"
+is no longer shared with you.` after the list's notice); focus stays in
+Manage lists. A 401 returns to the
 signed-out view; any other failure is silent and retried on the next trigger.
 Saving an edit of a task another member deleted meanwhile shows the usual "no
 longer exists" notice.

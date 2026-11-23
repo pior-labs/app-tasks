@@ -127,6 +127,7 @@ const keptNames: [sent: string, stored: string][] = [
   // Only the reserved names themselves are refused, not names containing them.
   ['Inbox zero', 'Inbox zero'],
   ['All tasks today', 'All tasks today'],
+  ['Assigned to me later', 'Assigned to me later'],
 ];
 const invalidNames: unknown[] = [
   '',
@@ -149,6 +150,9 @@ const invalidNames: unknown[] = [
   'All tasks',
   'all tasks',
   'ALL TASKS',
+  'Assigned to me',
+  'assigned to me',
+  ' ASSIGNED TO ME ',
   null,
   42,
   true,
@@ -238,11 +242,29 @@ const reservedLookalikes = [
   'All\u3000TASKS', // ideographic space
   'All\u202ftasks', // narrow no-break space
   'All\u200b tasks\u200b',
+  'Assigned\u00a0to me', // no-break space
+  'Assigned  to  me',
+  'Assigned to\u200b me',
+  'Assi\u00adgned to me',
+  '\u200eAssigned to me\u200f',
+  'Assigned\u2003to\u3000ME',
 ];
 // Names that only contain or resemble the words stay allowed.
-const notReserved = ['Inbox later', 'In box', 'Inboxes', 'Alltasks', 'All tasks 2', 'All my tasks', 'Inbox\u200bzero'];
+const notReserved = [
+  'Inbox later',
+  'In box',
+  'Inboxes',
+  'Alltasks',
+  'All tasks 2',
+  'All my tasks',
+  'Inbox\u200bzero',
+  'Assigned to me later',
+  'Assignedtome',
+  'Assigned to you',
+  'My assigned to me',
+];
 
-test('names that only look like "Inbox" or "All tasks" are reserved too (AC-1, D-3)', async () => {
+test('names that only look like "Inbox", "All tasks" or "Assigned to me" are reserved too (AC-1, D-3; assigned-to-me AC-7)', async () => {
   const list = await createList(one, 'Keep me');
   const before = await storedLists();
   for (const name of reservedLookalikes) {
@@ -268,11 +290,13 @@ const reservedByFold = [
   '\u{1d408}\u{1d427}\u{1d41b}\u{1d428}\u{1d431}', // mathematical bold "Inbox"
   '\u24be\u24dd\u24d1\u24de\u24e7', // circled "Inbox"
   'In\uff42ox', // one fullwidth letter
+  '\uff21\uff53\uff53\uff49\uff47\uff4e\uff45\uff44\u3000\uff54\uff4f\u3000\uff4d\uff45', // fullwidth "Assigned to me"
+  'Assigned to \uff4d\uff45', // two fullwidth letters
 ];
 // Letters from other scripts that only look Latin are not folded (D-3).
-const homoglyphs = ['\u0406nbox', '\u0410ll tasks', 'Inb\u043ex'];
+const homoglyphs = ['\u0406nbox', '\u0410ll tasks', 'Inb\u043ex', 'Assigned to m\u0435'];
 
-test('names whose fold is "inbox" or "all tasks" are reserved, fullwidth forms too (cleanup AC-1, D-3)', async () => {
+test('names whose fold is "inbox", "all tasks" or "assigned to me" are reserved, fullwidth forms too (cleanup AC-1, D-3; assigned-to-me AC-7)', async () => {
   const list = await createList(one, 'Keep me');
   const before = await storedLists();
   for (const name of reservedByFold) {
@@ -280,7 +304,7 @@ test('names whose fold is "inbox" or "all tasks" are reserved, fullwidth forms t
     assert.equal(created.status, 400, `POST ${JSON.stringify(name)}`);
     assert.deepEqual(await created.json(), {
       error: 'invalid_list_name',
-      message: '"Inbox" and "All tasks" are built in. Choose another name.',
+      message: '"Inbox", "All tasks" and "Assigned to me" are built in. Choose another name.',
     });
     const renamed = await send(one, 'PATCH', `/api/lists/${list.id}`, { name });
     assert.equal(renamed.status, 400, `PATCH ${JSON.stringify(name)}`);
@@ -449,6 +473,28 @@ test('lists stored before the fold check that share a fold both stay and can kee
   const home = rows.find((row) => row.name === 'Home')!;
   await assertError(await send(one, 'PATCH', `/api/lists/${home.id}`, { name: 'Weekly shop' }), 409, 'duplicate_list_name');
   assert.equal((await send(one, 'PATCH', `/api/lists/${home.id}`, { name: 'House' })).status, 200);
+});
+
+test('a list stored as "Assigned to me" before it was reserved still loads, can be shared and renamed away (assigned-to-me AC-7)', async () => {
+  const [me] = await fixture.client`select id from users where email = 'one@example.test'`;
+  // Possible only for data written before the name was reserved.
+  const [old] = await fixture.client`insert into lists (user_id, name) values (${me.id}, 'Assigned to me') returning id`;
+  assert.deepEqual(
+    (await getLists(one)).map((list) => [list.id, list.name]),
+    [[old.id, 'Assigned to me']],
+  );
+  // Sharing it does not touch the name.
+  const shared = await send(one, 'PATCH', `/api/lists/${old.id}`, { shared: true });
+  assert.equal(shared.status, 200);
+  assert.equal((await shared.json()).list.name, 'Assigned to me');
+  // A new list with that name is still refused, and so is renaming another to it.
+  const other = await createList(one, 'Other');
+  await assertError(await send(one, 'POST', '/api/lists', { name: 'Assigned to me' }), 400, 'invalid_list_name');
+  await assertError(await send(one, 'PATCH', `/api/lists/${other.id}`, { name: 'assigned to me' }), 400, 'invalid_list_name');
+  // It can be renamed away.
+  const renamed = await send(one, 'PATCH', `/api/lists/${old.id}`, { name: 'Mine' });
+  assert.equal(renamed.status, 200);
+  assert.equal((await renamed.json()).list.name, 'Mine');
 });
 
 test('lists are listed oldest first with their fields; create answers 201 and rename 200 (AC-2)', async () => {

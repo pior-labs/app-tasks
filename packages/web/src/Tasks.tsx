@@ -154,9 +154,41 @@ function sharedLabels(task: Task, me: number, members: Member[]): ShareLabels {
 }
 
 // Whether a task shows in a view: every task in "All tasks", tasks without a
-// list in Inbox, and a list's own tasks in that list.
-const inView = (task: Task, view: View) =>
-  view === 'all' || task.listId === (view === 'inbox' ? null : view);
+// list in Inbox, a list's own tasks in that list, and in "Assigned to me" the
+// tasks assigned to the user (`me`) in any list they can see. Only a task in a
+// shared list has an assignee (the server clears it when a task leaves one or
+// the list stops being shared), so a task in Inbox or in a list that `lists`
+// says is not shared is never the user's assignment, whatever an older answer
+// says. A list that is not loaded (the lists failed to load) is trusted.
+const inView = (task: Task, view: View, me: number, lists: List[]) => {
+  if (view === 'all') return true;
+  if (view === 'assigned') {
+    return (
+      task.assigneeId === me &&
+      task.listId !== null &&
+      lists.find((list) => list.id === task.listId)?.shared !== false
+    );
+  }
+  return task.listId === (view === 'inbox' ? null : view);
+};
+// Why a task the user saved left "Assigned to me" (`before` is the task as it
+// was): it went to someone else, to nobody, or out of the shared list (which
+// clears the assignee).
+function leftAssignedMessage(task: Task, before: Task, me: number, lists: List[], members: Member[]) {
+  const assignee =
+    task.assigneeId === null || task.assigneeId === me
+      ? undefined
+      : (members.find((member) => member.id === task.assigneeId)?.name ?? 'someone else');
+  if (task.listId !== before.listId) {
+    const to = viewName(task.listId ?? 'inbox', lists);
+    return assignee
+      ? `Moved "${task.title}" to ${to}; it is now assigned to ${assignee}.`
+      : `Moved "${task.title}" to ${to}, so it is no longer assigned to you.`;
+  }
+  return assignee ? `"${task.title}" is now assigned to ${assignee}.` : `"${task.title}" is no longer assigned to you.`;
+}
+const unassignedByListMessage = (task: Task) =>
+  `"${task.title}" is no longer assigned to you, because its list was deleted or is no longer shared.`;
 // Puts a saved caret back, on a control that has one: only text fields do,
 // and setSelectionRange throws on others, such as a checkbox or date input.
 const restoreCaret = (element: Element | null | undefined, caret: { start: number; end: number } | null) => {
@@ -187,7 +219,7 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
   const [requestedView, setRequestedView] = useState<View>(() => viewFromSearch(location.search));
   const view: View =
     typeof requestedView === 'number' && !lists.some((list) => list.id === requestedView) ? 'all' : requestedView;
-  const shownTasks = view === 'all' ? tasks : tasks.filter((task) => inView(task, view));
+  const shownTasks = view === 'all' ? tasks : tasks.filter((task) => inView(task, view, me, lists));
   const [title, setTitle] = useState('');
   const [dueDate, setDueDate] = useState('');
   const [repeat, setRepeat] = useState<RepeatForm>(NO_REPEAT);
@@ -575,7 +607,25 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
           !nextLists.some((list) => list.id === task.listId),
       );
       const lostIds = new Set(lostTasks.map((task) => task.id));
-      const pinned = new Set(openIds.filter((id) => !lostIds.has(id)));
+      // In "Assigned to me" the task of an open row can also leave the view
+      // while it is kept as the user sees it: its list was deleted (the task
+      // is in Inbox now, see applyLists) or stopped being shared, which
+      // clears every assignee in it. Nothing would show the row, so it closes
+      // with a notice too, and the task takes the server's version.
+      const placed = (task: Task) =>
+        task.listId === null || nextLists.some((list) => list.id === task.listId) ? task : { ...task, listId: null };
+      const leftTasks =
+        before.requestedView === 'assigned'
+          ? before.tasks.filter(
+              (task) =>
+                openIds.includes(task.id) &&
+                !lostIds.has(task.id) &&
+                inView(task, 'assigned', me, before.lists) &&
+                !inView(placed(task), 'assigned', me, nextLists),
+            )
+          : [];
+      const closedIds = new Set([...lostIds, ...leftTasks.map((task) => task.id)]);
+      const pinned = new Set(openIds.filter((id) => !closedIds.has(id)));
       // Remember focus, in case its element is replaced (see focusAfterRefresh).
       const active = document.activeElement;
       if (active instanceof HTMLElement && active !== document.body) {
@@ -607,9 +657,9 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
       applyLists(nextLists);
       setListsState('ready');
       setMembers(membersBody.members);
-      if (lostTasks.length > 0) {
-        setEditing((current) => (current && lostIds.has(current.id) ? null : current));
-        setConfirmingId((current) => (current !== null && lostIds.has(current) ? null : current));
+      if (closedIds.size > 0) {
+        setEditing((current) => (current && closedIds.has(current.id) ? null : current));
+        setConfirmingId((current) => (current !== null && closedIds.has(current) ? null : current));
       }
       // The selected list was deleted or unshared by someone else.
       const selected = before.requestedView;
@@ -627,6 +677,7 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
       const messages = [
         ...(gone ? [vanishedListMessage(gone)] : []),
         ...lostTasks.map(lostTaskMessage),
+        ...leftTasks.map(unassignedByListMessage),
       ];
       if (messages.length > 0) setNotice(messages.join(' '));
     } catch {
@@ -665,10 +716,37 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
   const keptAfterDelete = (task: Task, list: List) =>
     (list.shared ? (task.createdById ?? list.ownerId) : list.ownerId) === me;
 
+  // In "Assigned to me", a change made in Manage lists takes every task of
+  // the list (and `movedTaskIds`) out of the view without a save: stopping
+  // sharing a list clears its assignees, deleting it moves its tasks to an
+  // Inbox, and stopping sharing someone else's list takes them away. An open
+  // edit row or delete question on such a task would be left on a row
+  // nothing shows, so it closes, as a refresh closes it for the same change
+  // made by someone else. Returns the tasks whose rows closed, for the
+  // caller's notice. Other views are unchanged. It reads the latest state,
+  // since Manage lists calls back after its request.
+  function closeRowsLeavingAssigned(list: List, movedTaskIds: number[] = []) {
+    const { tasks: current, lists: known, requestedView: shownView, editingId, confirmingId: questionId } = latest.current;
+    if (shownView !== 'assigned') return [];
+    const left = current.filter(
+      (task) =>
+        (task.id === editingId || task.id === questionId) &&
+        (task.listId === list.id || movedTaskIds.includes(task.id)) &&
+        inView(task, 'assigned', me, known),
+    );
+    if (left.length === 0) return [];
+    const ids = new Set(left.map((task) => task.id));
+    setEditing((open) => (open && ids.has(open.id) ? null : open));
+    setConfirmingId((open) => (open !== null && ids.has(open) ? null : open));
+    return left;
+  }
+
   // A list the user can no longer see: its tab goes, a view of it switches
   // to Inbox, and its tasks leave with it (the user stopped sharing someone
-  // else's list) or move to Inbox (it was deleted).
+  // else's list) or move to Inbox (it was deleted). Returns the tasks whose
+  // open rows closed in "Assigned to me" (see closeRowsLeavingAssigned).
   function removeList(list: List, deleted: boolean, movedTaskIds: number[] = []) {
+    const left = closeRowsLeavingAssigned(list, movedTaskIds);
     const moved = new Set(movedTaskIds);
     setTasks((current) =>
       current.flatMap((task) => {
@@ -683,14 +761,15 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
       return task && task.listId === list.id && (!deleted || !keptAfterDelete(task, list)) ? null : current;
     });
     if (requestedView === list.id) selectView('inbox');
+    return left;
   }
 
   // A list the server no longer has for the user (deleted in another tab, or
   // unshared or deleted by another member): it goes as if deleted, with a
   // notice, and a refresh then shows where its tasks really went.
   function dropList(list: List, message: string) {
-    removeList(list, true);
-    setNotice(message);
+    const left = removeList(list, true);
+    setNotice([message, ...left.map(unassignedByListMessage)].join(' '));
     if (list.shared) setTimeout(() => void refresh(), 0);
   }
 
@@ -713,8 +792,8 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
     const newNotes = notesSent ? storedNotes(notes) : null;
     const notesError = notesOpen ? notesProblem(notes.trim()) : '';
     if (notesError) return setCreateError({ message: notesError, field: 'notes' });
-    // A task added in a named list goes there; in "All tasks" and Inbox it
-    // goes to Inbox, which is no field at all.
+    // A task added in a named list goes there; in "All tasks", Inbox and
+    // "Assigned to me" it goes to Inbox, which is no field at all.
     const list = typeof view === 'number' ? lists.find((item) => item.id === view) : undefined;
     creatingRef.current = true;
     const end = track();
@@ -750,6 +829,11 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
       setTasks((current) =>
         current.some((item) => item.id === created.id) ? current : [created, ...current],
       );
+      // From "Assigned to me" the task goes to Inbox, which this view does not
+      // show, so a notice says where it went.
+      if (!inView(created, view, me, lists)) {
+        setNotice(`Added "${created.title}" to ${viewName(created.listId ?? 'inbox', lists)}.`);
+      }
       setTitle('');
       setDueDate('');
       setRepeat(NO_REPEAT);
@@ -968,10 +1052,11 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
       if (!response.ok) throw new Error();
       const body: UpdateReply = await response.json();
       const updated = fromServer(body.task);
-      // A task moved out of the selected list (or Inbox) leaves the view: like
-      // after a delete, focus moves to the next row, else the previous one,
-      // else the new-task field, and a notice says where the task went.
-      const leavesView = !inView(updated, view);
+      // A task moved out of the selected list (or Inbox), or in "Assigned to
+      // me" no longer assigned to the user, leaves the view: like after a
+      // delete, focus moves to the next row, else the previous one, else the
+      // new-task field, and a notice says where the task went or who has it.
+      const leavesView = !inView(updated, view, me, lists);
       const neighbour = leavesView ? visibleNeighbour(task.id) : undefined;
       // The row shows the new title, date and repeat, and moves to its new
       // group, only once the server has stored them. Focus follows it to Edit.
@@ -982,7 +1067,11 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
           focusAfterRender.current = () => (neighbour ? firstControl(neighbour.id) : titleInput.current);
         }
         setConfirmingId((current) => (current === task.id ? null : current));
-        setNotice(`Moved "${updated.title}" to ${viewName(updated.listId ?? 'inbox', lists)}.`);
+        setNotice(
+          view === 'assigned'
+            ? leftAssignedMessage(updated, task, me, lists, members)
+            : `Moved "${updated.title}" to ${viewName(updated.listId ?? 'inbox', lists)}.`,
+        );
       }
     } catch {
       // Edit mode and the typed values are kept so the user can retry.
@@ -1088,6 +1177,7 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
       </div>
     );
   }
+  const mixesLists = view === 'all' || view === 'assigned';
   const renderRow = (task: Task) => (
     <TaskRow
       key={task.id}
@@ -1095,9 +1185,10 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
       mode={rowMode(task)}
       today={today}
       lists={lists}
-      // Only "All tasks" mixes lists, so only there a row names its list (D-6).
-      // A list that is not loaded (the lists failed to load) has no label.
-      listName={view === 'all' ? (lists.find((list) => list.id === task.listId)?.name ?? null) : null}
+      // Only "All tasks" and "Assigned to me" mix lists, so only there a row
+      // names its list (D-6). A list that is not loaded (the lists failed to
+      // load) has no label.
+      listName={mixesLists ? (lists.find((list) => list.id === task.listId)?.name ?? null) : null}
       // In shared lists only, in the list's view and in "All tasks" alike.
       shareLabels={isSharedList(task.listId) ? sharedLabels(task, me, members) : null}
       // The select follows the List choice in the edit row (D-6).
@@ -1194,7 +1285,11 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
   // Where an added task goes: the selected list, else Inbox.
   const destination = typeof view === 'number' ? viewName(view, lists) : 'Inbox';
   const emptyMessage =
-    view === 'all' ? 'No tasks yet. Add your first one above.' : `No tasks in ${viewName(view, lists)} yet.`;
+    view === 'all'
+      ? 'No tasks yet. Add your first one above.'
+      : view === 'assigned'
+        ? 'No tasks are assigned to you yet: tasks assigned to you in shared lists show here.'
+        : `No tasks in ${viewName(view, lists)} yet.`;
   return (
     <div className="space-y-4">
       <ListBar
@@ -1213,6 +1308,8 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
           setLists((current) => current.map((item) => (item.id === list.id ? list : item)));
           // Unsharing cleared the assignees of the list's tasks on the server.
           if (!list.shared) {
+            const left = closeRowsLeavingAssigned(list);
+            if (left.length > 0) setNotice(left.map(unassignedByListMessage).join(' '));
             setTasks((current) =>
               current.some((task) => task.listId === list.id && task.assigneeId !== null)
                 ? current.map((task) => (task.listId === list.id ? { ...task, assigneeId: null } : task))
@@ -1222,11 +1319,12 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
           }
         }}
         onLeft={(list) => {
-          removeList(list, false);
-          setNotice(leftListMessage(list));
+          const left = removeList(list, false);
+          setNotice([leftListMessage(list), ...left.map(lostTaskMessage)].join(' '));
         }}
         onDeleted={(list, movedTaskIds) => {
-          removeList(list, true, movedTaskIds);
+          const left = removeList(list, true, movedTaskIds);
+          if (left.length > 0) setNotice(left.map(unassignedByListMessage).join(' '));
           setEditing((current) => (current?.listId === list.id ? { ...current, listId: null, assigneeId: null } : current));
         }}
         onGone={dropList}

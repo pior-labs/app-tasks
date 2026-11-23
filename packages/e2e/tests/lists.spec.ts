@@ -96,7 +96,7 @@ test('creates lists and switches between them with the keyboard only (AC-8, AC-1
   await page.keyboard.press('Enter');
   await page.keyboard.type('\uff29\uff4e\uff42\uff4f\uff58');
   await page.keyboard.press('Enter');
-  await expect(page.getByRole('alert')).toHaveText('"Inbox" and "All tasks" are built in. Choose another name.');
+  await expect(page.getByRole('alert')).toHaveText('"Inbox", "All tasks" and "Assigned to me" are built in. Choose another name.');
   await expect(page.getByRole('textbox', { name: 'List name' })).toHaveAttribute('aria-invalid', 'true');
   await page.keyboard.press('Escape');
   await expect(button(page, 'New list')).toBeFocused();
@@ -266,7 +266,7 @@ test('a second user sees none of the first user\'s lists (AC-4, AC-15)', async (
   const other = await otherContext.newPage();
   await signIn(other, 'Household Two', `/?list=${id}`);
   await expect(tab(other, 'All tasks')).toHaveAttribute('aria-selected', 'true');
-  await expect(tablist(other).getByRole('tab')).toHaveText(['All tasks', 'Inbox']);
+  await expect(tablist(other).getByRole('tab')).toHaveText(['All tasks', 'Inbox', 'Assigned to me']);
   await expect(other.getByText('Private: one only')).toHaveCount(0);
   await expect(button(other, 'Manage lists')).toHaveCount(0);
 
@@ -278,7 +278,7 @@ test('a second user sees none of the first user\'s lists (AC-4, AC-15)', async (
   await openManage(other);
   await button(other, 'Delete list "Private: one only"').click();
   await button(other, 'Confirm deleting list "Private: one only"').click();
-  await expect(tablist(other).getByRole('tab')).toHaveText(['All tasks', 'Inbox']);
+  await expect(tablist(other).getByRole('tab')).toHaveText(['All tasks', 'Inbox', 'Assigned to me']);
   await otherContext.close();
 });
 
