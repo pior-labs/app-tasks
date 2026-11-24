@@ -4614,6 +4614,31 @@ describe('shared lists', () => {
       expect(question('My nails')).toBeNull();
       expect(status()).toBe('"My nails" is no longer shared with you.');
     });
+
+    test('a task a gone list kept in Inbox becomes an ordinary task once a refresh returns it (tasks-hidden-delete-question R2-F1)', async () => {
+      signedIn([task(4, 'My nails', 13), task(6, 'My screws', 13)]);
+      withLists(errands, work);
+      render(<App />);
+      await ready();
+      await waitFor(() => expect(tabNames()).toContain('Work (shared)'));
+      await openManage();
+      reply('DELETE /api/lists/13', json({ error: 'list_not_found', message: 'That list could not be found.' }, 404));
+      refreshReplies([task(4, 'My nails', null), task(6, 'My screws', null)], [errands]);
+      await userEvent.click(button('Delete list "Work"'));
+      await userEvent.click(button('Confirm deleting list "Work"'));
+      await waitFor(() => expect(tabNames()).not.toContain('Work (shared)'));
+      await waitFor(() => expect(callsTo('GET /api/members')).toHaveLength(2));
+      await act(async () => {});
+      await userEvent.click(button('Edit "My screws"'));
+      await userEvent.type(editField('My screws')!, ' draft');
+      // "My screws" is deleted in another tab.
+      refreshReplies([task(4, 'My nails', null)], [errands]);
+      await refreshOnFocus();
+      await waitFor(() => expect(callsTo('GET /api/members')).toHaveLength(3));
+      await act(async () => {});
+      expect((editField('My screws') as HTMLInputElement).value).toBe('My screws draft');
+      expect(status()).toBe('"Work" no longer exists, so it was removed.');
+    });
   });
 });
 

@@ -779,7 +779,9 @@ reload and through a live refresh without one, adds a task that One sees as
 sees "Assigned to you" after One assigns it; an unshared list stays invisible
 to Two; Two renames and stops sharing One's list and loses it while One keeps
 it with every task; Two stops sharing One's list with a delete question open in
-All tasks, and when One shares it again the task is back without the question;
+All tasks, and when One shares it again the task is back without the question; Two
+acts on One's list after One stopped sharing it or deleted it, and Two's own
+task with a delete question leaves or stays and deletes accordingly;
 deleting a shared list sends each task to its creator's Inbox; and the share toggle and the "Assigned to" select work by keyboard, with
 the shared tab fitting a 390px screen (with screenshots). The page clock is
 installed so a test can jump to the next 30-second refresh. Because the API
