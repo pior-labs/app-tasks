@@ -193,6 +193,123 @@ test('Two renames and stops sharing One\'s list: Two loses it, One keeps it with
   }
 });
 
+test('Two stops sharing One\'s list with a delete question open in All tasks; when One shares it again the task is back without the question (hidden-delete-question AC-1, AC-6)', async ({
+  browser,
+}, testInfo) => {
+  const one = await member(browser, 'Household One');
+  const two = await member(browser, 'Household Two');
+  try {
+    await createList(one, 'Shared: garage');
+    await addTask(one, 'Shared: oil change');
+    await addTask(one, 'Shared: tyres');
+    await share(one, 'Shared: garage');
+    await two.reload();
+    await expect(tab(two, 'All tasks')).toHaveAttribute('aria-selected', 'true');
+    await expect(checkbox(two, 'Shared: oil change')).toBeVisible();
+
+    await button(two, 'Delete "Shared: oil change"').click();
+    await expect(button(two, 'Confirm deleting "Shared: oil change"')).toBeVisible();
+    await openManage(two);
+    await button(two, 'Stop sharing "Shared: garage"').click();
+    await button(two, 'Confirm stopping sharing "Shared: garage"').click();
+    await expect(tablist(two).getByRole('tab', { name: /Shared: garage/ })).toHaveCount(0);
+    await expect(two.getByRole('status')).toHaveText(
+      '"Shared: garage" is no longer shared with you, so it was removed. "Shared: oil change" is no longer shared with you.',
+    );
+    await expect(checkbox(two, 'Shared: oil change')).toHaveCount(0);
+    await expect(two.getByRole('group', { name: 'Delete "Shared: oil change"?' })).toHaveCount(0);
+    await screenshot(two, testInfo, 'hidden-question-after-leave');
+
+    // One shares the list again (stopping sharing it gave it back unshared).
+    await nextRefresh(one);
+    await expect(tab(one, 'Shared: garage')).toBeVisible();
+    await share(one, 'Shared: garage');
+    // Two's next refresh brings the list and its tasks back, with no question.
+    await nextRefresh(two);
+    await expect(sharedTab(two, 'Shared: garage')).toBeVisible();
+    await expect(checkbox(two, 'Shared: oil change')).toBeVisible();
+    await expect(checkbox(two, 'Shared: tyres')).toBeVisible();
+    await expectNoReload(two);
+    await expect(two.getByRole('group', { name: 'Delete "Shared: oil change"?' })).toHaveCount(0);
+    await expect(button(two, 'Confirm deleting "Shared: oil change"')).toHaveCount(0);
+    await expect(button(two, 'Delete "Shared: oil change"')).toBeVisible();
+    await screenshot(two, testInfo, 'hidden-question-after-reshare');
+  } finally {
+    await closeContexts(one, two);
+  }
+});
+
+test('Two acts on One\'s list after One stopped sharing it or deleted it: Two\'s own task with a delete question leaves when it is not Two\'s, and stays and deletes when it is (hidden-delete-question AC-8)', async ({
+  browser,
+}, testInfo) => {
+  const one = await member(browser, 'Household One');
+  const two = await member(browser, 'Household Two');
+  try {
+    await createList(one, 'Shared: workshop');
+    await share(one, 'Shared: workshop');
+    await createList(one, 'Shared: shed');
+    await share(one, 'Shared: shed');
+    await two.reload();
+    await sharedTab(two, 'Shared: workshop').click();
+    await addTask(two, 'Shared: drill');
+    await sharedTab(two, 'Shared: shed').click();
+    await addTask(two, 'Shared: rake');
+    await tab(two, 'All tasks').click();
+
+    // One stops sharing the workshop; Two has not refreshed yet.
+    await openManage(one);
+    await button(one, 'Stop sharing "Shared: workshop"').click();
+    await expect(tab(one, 'Shared: workshop')).toBeVisible();
+    await button(two, 'Delete "Shared: drill"').click();
+    await expect(button(two, 'Confirm deleting "Shared: drill"')).toBeVisible();
+    await openManage(two);
+    await button(two, 'Stop sharing "Shared: workshop"').click();
+    await button(two, 'Confirm stopping sharing "Shared: workshop"').click();
+    await expect(tablist(two).getByRole('tab', { name: /Shared: workshop/ })).toHaveCount(0);
+    // The refresh the drop starts shows the task is not Two's: it leaves,
+    // with its question, and no ghost row stays.
+    await expect(two.getByRole('status')).toHaveText('"Shared: drill" is no longer shared with you.');
+    await expect(checkbox(two, 'Shared: drill')).toHaveCount(0);
+    await expect(two.getByRole('group', { name: 'Delete "Shared: drill"?' })).toHaveCount(0);
+    await screenshot(two, testInfo, 'kept-task-unshared-after-refresh');
+    await nextRefresh(two);
+    await expectNoReload(two);
+    await expect(checkbox(two, 'Shared: rake')).toBeVisible();
+    await expect(checkbox(two, 'Shared: drill')).toHaveCount(0);
+    await expect(button(two, 'Confirm deleting "Shared: drill"')).toHaveCount(0);
+    // One keeps it in the workshop.
+    await nextRefresh(one);
+    await tab(one, 'Shared: workshop').click();
+    await expect(checkbox(one, 'Shared: drill')).toBeVisible();
+
+    // One deletes the shed; Two's task goes to Two's Inbox. Two renames the
+    // shed before a refresh, with a question open on that task.
+    await button(one, 'Delete list "Shared: shed"').click();
+    await button(one, 'Confirm deleting list "Shared: shed"').click();
+    await expect(tablist(one).getByRole('tab', { name: /Shared: shed/ })).toHaveCount(0);
+    await button(two, 'Delete "Shared: rake"').click();
+    await expect(button(two, 'Confirm deleting "Shared: rake"')).toBeVisible();
+    await button(two, 'Rename "Shared: shed"').click();
+    await two.getByRole('textbox', { name: 'New name for "Shared: shed"' }).fill('Shared: garden shed');
+    await two.keyboard.press('Enter');
+    await expect(tablist(two).getByRole('tab', { name: /Shared: shed/ })).toHaveCount(0);
+    await expect(two.getByRole('status')).toHaveText('"Shared: shed" no longer exists, so it was removed.');
+    await nextRefresh(two);
+    await expectNoReload(two);
+    await expect(checkbox(two, 'Shared: rake')).toBeVisible();
+    await expect(button(two, 'Confirm deleting "Shared: rake"')).toBeVisible();
+    await expect(two.getByRole('status')).toHaveText('"Shared: shed" no longer exists, so it was removed.');
+    await screenshot(two, testInfo, 'kept-task-deleted-after-refresh');
+    await button(two, 'Confirm deleting "Shared: rake"').click();
+    await expect(checkbox(two, 'Shared: rake')).toHaveCount(0);
+    await two.reload();
+    await expect(checkbox(two, 'Shared: rake')).toHaveCount(0);
+    await expect(checkbox(two, 'Shared: drill')).toHaveCount(0);
+  } finally {
+    await closeContexts(one, two);
+  }
+});
+
 test('deleting a shared list sends each task to the Inbox of whoever added it (AC-15, D-4)', async ({ browser }) => {
   const one = await member(browser, 'Household One');
   const two = await member(browser, 'Household Two');

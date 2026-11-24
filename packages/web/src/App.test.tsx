@@ -4173,6 +4173,473 @@ describe('shared lists', () => {
     expect(callsTo('GET /api/tasks')).toHaveLength(3);
     await waitFor(() => expect(taskTitles()).toEqual(['Bread', 'Milk']));
   });
+
+  // A Manage lists change that takes a task away from the user closes an open
+  // delete question on it in every view, as it closes an open edit row, so the
+  // question is not left hidden and shown again when the task comes back. The
+  // criteria named below are those of the hidden-delete-question task.
+  describe('open rows on tasks a Manage lists change takes away', () => {
+    const work = list(13, 'Work', { shared: true, ownerId: 2 });
+    const status = () => screen.queryByRole('status')?.textContent ?? null;
+    const shown = (title: string) => screen.queryByRole('checkbox', { name: title }) !== null;
+    const question = (title: string) => screen.queryByRole('button', { name: `Confirm deleting "${title}"` });
+    const editField = (title: string) => screen.queryByRole('textbox', { name: `New title for "${title}"` });
+    const inManage = () => document.getElementById('manage-lists')?.contains(document.activeElement) ?? false;
+
+    test('stopping sharing someone else\'s list closes an open delete question or edit row on its tasks, naming them; the question does not come back with the task (hidden-delete-question AC-1, AC-4, AC-5)', async () => {
+      signedIn([
+        task(1, 'Their milk', 12, { createdById: 2 }),
+        task(2, 'Their bread', 12, { createdById: 2 }),
+        task(3, 'Their hammer', 13, { createdById: 2 }),
+        task(4, 'Inbox task', null),
+      ]);
+      withLists(errands, groceries, work);
+      render(<App />);
+      await ready();
+      await waitFor(() => expect(tabNames()).toContain('Work (shared)'));
+      expect(selectedTab()).toEqual(['All tasks']);
+
+      // A delete question in All tasks.
+      await userEvent.click(button('Delete "Their milk"'));
+      expect(question('Their milk')).toBeTruthy();
+      await openManage();
+      reply('PATCH /api/lists/12', json({ list: { ...groceries, shared: false } }));
+      await userEvent.click(button('Stop sharing "Groceries"'));
+      await userEvent.click(button('Confirm stopping sharing "Groceries"'));
+      await waitFor(() => expect(tabNames()).not.toContain('Groceries (shared)'));
+      expect(question('Their milk')).toBeNull();
+      expect(shown('Their milk')).toBe(false);
+      expect(shown('Their bread')).toBe(false);
+      expect(selectedTab()).toEqual(['All tasks']);
+      expect(inManage()).toBe(true);
+
+      // The owner shares the list again and the tasks come back by refresh. A
+      // question left hidden on "Their milk" would show again.
+      refreshReplies(
+        [
+          task(1, 'Their milk', 12, { createdById: 2 }),
+          task(2, 'Their bread', 12, { createdById: 2 }),
+          task(3, 'Their hammer', 13, { createdById: 2 }),
+          task(4, 'Inbox task', null),
+        ],
+        [errands, groceries, work],
+      );
+      await refreshOnFocus();
+      await waitFor(() => expect(shown('Their milk')).toBe(true));
+      expect(question('Their milk')).toBeNull();
+      expect(button('Delete "Their milk"')).toBeTruthy();
+      // The refresh named nothing new, so the notice of the change stays.
+      expect(status()).toBe(
+        '"Groceries" is no longer shared with you, so it was removed. "Their milk" is no longer shared with you.',
+      );
+
+      // An edit row closes as before, and the notice names its task too.
+      await userEvent.click(button('Edit "Their hammer"'));
+      await userEvent.type(editField('Their hammer')!, ' draft');
+      reply('PATCH /api/lists/13', json({ list: { ...work, shared: false } }));
+      await userEvent.click(button('Stop sharing "Work"'));
+      await userEvent.click(button('Confirm stopping sharing "Work"'));
+      await waitFor(() => expect(tabNames()).not.toContain('Work (shared)'));
+      expect(editField('Their hammer')).toBeNull();
+      expect(shown('Their hammer')).toBe(false);
+      expect(status()).toBe('"Work" is no longer shared with you, so it was removed. "Their hammer" is no longer shared with you.');
+      expect(inManage()).toBe(true);
+      expect(calls.filter((call) => call.method !== 'GET' && call.method !== 'PATCH')).toEqual([]);
+    });
+
+    test('in the list\'s own view, stopping sharing it names the task of an open delete question (hidden-delete-question AC-1, AC-5)', async () => {
+      history.replaceState(null, '', '/?list=12');
+      signedIn([task(1, 'Their milk', 12, { createdById: 2 }), task(4, 'Inbox task', null)]);
+      withLists(errands, groceries);
+      render(<App />);
+      await ready();
+      await waitFor(() => expect(selectedTab()).toEqual(['Groceries (shared)']));
+      await userEvent.click(button('Delete "Their milk"'));
+      await openManage();
+      reply('PATCH /api/lists/12', json({ list: { ...groceries, shared: false } }));
+      await userEvent.click(button('Stop sharing "Groceries"'));
+      await userEvent.click(button('Confirm stopping sharing "Groceries"'));
+      await waitFor(() => expect(tabNames()).not.toContain('Groceries (shared)'));
+      expect(selectedTab()).toEqual(['Inbox']);
+      expect(status()).toBe(
+        '"Groceries" is no longer shared with you, so it was removed. "Their milk" is no longer shared with you.',
+      );
+
+      refreshReplies([task(1, 'Their milk', 12, { createdById: 2 }), task(4, 'Inbox task', null)], [errands, groceries]);
+      await refreshOnFocus();
+      await userEvent.click(button('Manage lists'));
+      await userEvent.click(tab('Groceries (shared)'));
+      await waitFor(() => expect(shown('Their milk')).toBe(true));
+      expect(question('Their milk')).toBeNull();
+    });
+
+    test('deleting a shared list closes an open delete question or edit row on a task that goes to someone else\'s Inbox, naming it; one on a task kept in the user\'s Inbox stays and works (hidden-delete-question AC-2, AC-4, AC-5)', async () => {
+      signedIn([
+        task(1, 'Their milk', 12, { createdById: 2 }),
+        task(2, 'My eggs', 12),
+        task(3, 'Their hammer', 13, { createdById: 2 }),
+        task(4, 'My nails', 13),
+        task(5, 'My screws', 13),
+      ]);
+      withLists(errands, groceries, work);
+      render(<App />);
+      await ready();
+      await waitFor(() => expect(tabNames()).toContain('Work (shared)'));
+      expect(selectedTab()).toEqual(['All tasks']);
+
+      // A question on a task that goes to Household Two's Inbox, and an edit
+      // row on one that stays the user's.
+      await userEvent.click(button('Edit "My eggs"'));
+      await userEvent.type(editField('My eggs')!, ' draft');
+      await userEvent.click(button('Delete "Their milk"'));
+      await openManage();
+      reply('DELETE /api/lists/12', json({ movedTaskIds: [1, 2] }));
+      await userEvent.click(button('Delete list "Groceries"'));
+      await userEvent.click(button('Confirm deleting list "Groceries"'));
+      await waitFor(() => expect(tabNames()).not.toContain('Groceries (shared)'));
+      expect(question('Their milk')).toBeNull();
+      expect(shown('Their milk')).toBe(false);
+      expect((editField('My eggs') as HTMLInputElement).value).toBe('My eggs draft');
+      expect(inManage()).toBe(true);
+
+      // Household Two moves the task into a list shared with the user; it
+      // comes back by refresh without the question.
+      refreshReplies(
+        [
+          task(1, 'Their milk', 13, { createdById: 2 }),
+          task(2, 'My eggs', null),
+          task(3, 'Their hammer', 13, { createdById: 2 }),
+          task(4, 'My nails', 13),
+          task(5, 'My screws', 13),
+        ],
+        [errands, work],
+      );
+      await refreshOnFocus();
+      await waitFor(() => expect(shown('Their milk')).toBe(true));
+      expect(question('Their milk')).toBeNull();
+      expect((editField('My eggs') as HTMLInputElement).value).toBe('My eggs draft');
+      expect(status()).toBe('"Their milk" is no longer shared with you.');
+      await userEvent.click(button('Cancel'));
+
+      // A question on a task the user keeps stays open, and Cancel closes it.
+      await userEvent.click(button('Delete "My nails"'));
+      await userEvent.click(button('Edit "Their hammer"'));
+      reply('DELETE /api/lists/13', json({ movedTaskIds: [1, 3, 4, 5] }));
+      await userEvent.click(button('Delete list "Work"'));
+      await userEvent.click(button('Confirm deleting list "Work"'));
+      await waitFor(() => expect(tabNames()).not.toContain('Work (shared)'));
+      expect(question('My nails')).toBeTruthy();
+      expect(editField('Their hammer')).toBeNull();
+      expect(shown('Their hammer')).toBe(false);
+      expect(shown('Their milk')).toBe(false);
+      // Only the edit row on a task taken away closed.
+      expect(status()).toBe('"Their hammer" is no longer shared with you.');
+      await userEvent.click(button('Cancel deleting "My nails"'));
+      expect(question('My nails')).toBeNull();
+      expect(shown('My nails')).toBe(true);
+
+      // And Confirm deletes a kept task.
+      await userEvent.click(button('Delete "My screws"'));
+      reply('DELETE /api/tasks/5', noContent());
+      await userEvent.click(button('Confirm deleting "My screws"'));
+      await waitFor(() => expect(shown('My screws')).toBe(false));
+      expect(callsTo('DELETE /api/tasks/5')).toHaveLength(1);
+    });
+
+    test('deleting a list with no open row on a task it takes away leaves the notice as it was (hidden-delete-question AC-5)', async () => {
+      signedIn([task(1, 'Their milk', 12, { createdById: 2 }), task(2, 'My eggs', null)]);
+      withLists(errands, groceries);
+      render(<App />);
+      await ready();
+      await waitFor(() => expect(tabNames()).toContain('Groceries (shared)'));
+      await userEvent.click(button('Delete "My eggs"'));
+      await openManage();
+      reply('DELETE /api/lists/12', json({ movedTaskIds: [1] }));
+      await userEvent.click(button('Delete list "Groceries"'));
+      await userEvent.click(button('Confirm deleting list "Groceries"'));
+      await waitFor(() => expect(tabNames()).not.toContain('Groceries (shared)'));
+      expect(shown('Their milk')).toBe(false);
+      expect(question('My eggs')).toBeTruthy();
+      expect(status()).toBeNull();
+    });
+
+    test('a Manage lists change that finds the list gone closes an open delete question on a task it takes away; one on a kept task stays (hidden-delete-question AC-3, AC-4, AC-5)', async () => {
+      signedIn([
+        task(1, 'Their milk', 12, { createdById: 2 }),
+        task(2, 'My eggs', 12),
+        task(3, 'Their hammer', 13, { createdById: 2 }),
+        task(4, 'My nails', 13),
+      ]);
+      withLists(errands, groceries, work);
+      render(<App />);
+      await ready();
+      await waitFor(() => expect(tabNames()).toContain('Work (shared)'));
+
+      // The list was deleted meanwhile: it goes as if deleted, and a refresh
+      // then shows where its tasks went.
+      await userEvent.click(button('Edit "My eggs"'));
+      await userEvent.type(editField('My eggs')!, ' draft');
+      await userEvent.click(button('Delete "Their milk"'));
+      await openManage();
+      reply('PATCH /api/lists/12', json({ error: 'list_not_found', message: 'That list could not be found.' }, 404));
+      refreshReplies(
+        [task(2, 'My eggs', null), task(3, 'Their hammer', 13, { createdById: 2 }), task(4, 'My nails', 13)],
+        [errands, work],
+      );
+      await userEvent.click(button('Stop sharing "Groceries"'));
+      await userEvent.click(button('Confirm stopping sharing "Groceries"'));
+      await waitFor(() => expect(tabNames()).not.toContain('Groceries (shared)'));
+      expect(question('Their milk')).toBeNull();
+      expect(shown('Their milk')).toBe(false);
+      expect((editField('My eggs') as HTMLInputElement).value).toBe('My eggs draft');
+      expect(inManage()).toBe(true);
+      await waitFor(() => expect(callsTo('GET /api/tasks')).toHaveLength(2));
+
+      // Household Two moves the task into a list shared with the user.
+      refreshReplies(
+        [
+          task(1, 'Their milk', 13, { createdById: 2 }),
+          task(2, 'My eggs', null),
+          task(3, 'Their hammer', 13, { createdById: 2 }),
+          task(4, 'My nails', 13),
+        ],
+        [errands, work],
+      );
+      await refreshOnFocus();
+      await waitFor(() => expect(shown('Their milk')).toBe(true));
+      expect(question('Their milk')).toBeNull();
+      expect(status()).toBe('"Groceries" no longer exists, so it was removed. "Their milk" is no longer shared with you.');
+      await userEvent.click(button('Cancel'));
+
+      // A question on a kept task stays; an edit row on a task taken away
+      // closes and is named.
+      await userEvent.click(button('Delete "My nails"'));
+      await userEvent.click(button('Edit "Their hammer"'));
+      reply('DELETE /api/lists/13', json({ error: 'list_not_found', message: 'That list could not be found.' }, 404));
+      refreshReplies([task(2, 'My eggs', null), task(4, 'My nails', null)], [errands]);
+      await userEvent.click(button('Delete list "Work"'));
+      await userEvent.click(button('Confirm deleting list "Work"'));
+      await waitFor(() => expect(tabNames()).not.toContain('Work (shared)'));
+      expect(question('My nails')).toBeTruthy();
+      expect(editField('Their hammer')).toBeNull();
+      expect(status()).toBe('"Work" no longer exists, so it was removed. "Their hammer" is no longer shared with you.');
+      await waitFor(() => expect(callsTo('GET /api/tasks')).toHaveLength(4));
+      expect(question('My nails')).toBeTruthy();
+    });
+
+    test('an edit row on a task the client shows in another list but the server moved with the deleted list closes, and does not come back with the task (hidden-delete-question R1-F1)', async () => {
+      // The client still shows "Their hammer" in Work, while the server moved
+      // it into Groceries before deleting that list: it is in movedTaskIds.
+      signedIn([task(1, 'Their milk', 12, { createdById: 2 }), task(3, 'Their hammer', 13, { createdById: 2 })]);
+      withLists(errands, groceries, work);
+      render(<App />);
+      await ready();
+      await waitFor(() => expect(tabNames()).toContain('Work (shared)'));
+      await userEvent.click(button('Edit "Their hammer"'));
+      await userEvent.type(editField('Their hammer')!, ' draft');
+      await openManage();
+      reply('DELETE /api/lists/12', json({ movedTaskIds: [1, 3] }));
+      await userEvent.click(button('Delete list "Groceries"'));
+      await userEvent.click(button('Confirm deleting list "Groceries"'));
+      await waitFor(() => expect(tabNames()).not.toContain('Groceries (shared)'));
+      expect(shown('Their hammer')).toBe(false);
+      expect(status()).toBe('"Their hammer" is no longer shared with you.');
+
+      // Household Two moves it back into Work.
+      refreshReplies([task(3, 'Their hammer', 13, { createdById: 2 })], [errands, work]);
+      await refreshOnFocus();
+      await waitFor(() => expect(shown('Their hammer')).toBe(true));
+      expect(editField('Their hammer')).toBeNull();
+    });
+
+    // A Manage lists change that finds someone else's list gone cannot tell
+    // whether it was deleted (the user's own tasks are in their Inbox now) or
+    // stopped being shared by its owner (they are not the user's any more), so
+    // it keeps them in Inbox until the refresh it starts settles them.
+    test('a task kept in Inbox after stopping sharing finds the list gone, and missing from the next refresh, closes its delete question with a notice and leaves; an ordinary Inbox task\'s edit row stays pinned (hidden-delete-question AC-8)', async () => {
+      signedIn([task(3, 'Their hammer', 13, { createdById: 2 }), task(4, 'My nails', 13), task(5, 'Inbox task', null)]);
+      withLists(errands, groceries, work);
+      render(<App />);
+      await ready();
+      await waitFor(() => expect(tabNames()).toContain('Work (shared)'));
+      await userEvent.click(button('Delete "My nails"'));
+      await userEvent.click(button('Edit "Inbox task"'));
+      await userEvent.type(editField('Inbox task')!, ' draft');
+      await openManage();
+
+      // Household Two stopped sharing Work, and "Inbox task" was deleted in
+      // another tab. The refresh answers once the drop is seen.
+      reply('PATCH /api/lists/13', json({ error: 'list_not_found', message: 'That list could not be found.' }, 404));
+      let answer!: (response: Response) => void;
+      reply('GET /api/tasks', new Promise<Response>((resolve) => (answer = resolve)));
+      reply('GET /api/lists', json({ lists: [errands, groceries] }));
+      await userEvent.click(button('Stop sharing "Work"'));
+      await userEvent.click(button('Confirm stopping sharing "Work"'));
+      await waitFor(() => expect(tabNames()).not.toContain('Work (shared)'));
+      expect(status()).toBe('"Work" no longer exists, so it was removed.');
+      expect(shown('My nails')).toBe(true);
+      expect(question('My nails')).toBeTruthy();
+      expect(shown('Their hammer')).toBe(false);
+      await waitFor(() => expect(callsTo('GET /api/tasks')).toHaveLength(2));
+      answer(json({ tasks: [] }));
+      await waitFor(() => expect(shown('My nails')).toBe(false));
+      expect(question('My nails')).toBeNull();
+      expect(status()).toBe('"My nails" is no longer shared with you.');
+      expect(inManage()).toBe(true);
+      // The ordinary Inbox task is pinned by its edit row, as before.
+      expect((editField('Inbox task') as HTMLInputElement).value).toBe('Inbox task draft');
+
+      // A later refresh does not bring it back.
+      refreshReplies([], [errands, groceries]);
+      await refreshOnFocus();
+      await waitFor(() => expect(callsTo('GET /api/tasks')).toHaveLength(3));
+      await act(async () => {});
+      expect(shown('My nails')).toBe(false);
+      expect((editField('Inbox task') as HTMLInputElement).value).toBe('Inbox task draft');
+
+      // Saving the deleted Inbox task gets the usual "no longer exists" handling.
+      reply('PATCH /api/tasks/5', json({ error: 'task_not_found' }, 404));
+      await userEvent.click(button('Save'));
+      await waitFor(() => expect(status()).toBe('"Inbox task" no longer exists, so it was removed from the list.'));
+      expect(shown('Inbox task')).toBe(false);
+    });
+
+    test('a rename that finds the list gone keeps the user\'s tasks in Inbox until the refresh; an edit row there, and a question opened after the drop, close with a notice when the refresh does not return them (hidden-delete-question AC-8)', async () => {
+      signedIn([task(4, 'My nails', 13), task(6, 'My screws', 13)]);
+      withLists(errands, work);
+      render(<App />);
+      await ready();
+      await waitFor(() => expect(tabNames()).toContain('Work (shared)'));
+      await userEvent.click(button('Edit "My nails"'));
+      await userEvent.type(editField('My nails')!, ' draft');
+      await openManage();
+
+      reply('PATCH /api/lists/13', json({ error: 'list_not_found', message: 'That list could not be found.' }, 404));
+      let answer!: (response: Response) => void;
+      reply('GET /api/tasks', new Promise<Response>((resolve) => (answer = resolve)));
+      reply('GET /api/lists', json({ lists: [errands] }));
+      await userEvent.click(button('Rename "Work"'));
+      await userEvent.type(screen.getByRole('textbox', { name: 'New name for "Work"' }), ' bench{Enter}');
+      await waitFor(() => expect(tabNames()).not.toContain('Work (shared)'));
+      expect((editField('My nails') as HTMLInputElement).value).toBe('My nails draft');
+      await userEvent.click(button('Delete "My screws"'));
+      expect(question('My screws')).toBeTruthy();
+      await waitFor(() => expect(callsTo('GET /api/tasks')).toHaveLength(2));
+      answer(json({ tasks: [] }));
+      await waitFor(() => expect(shown('My screws')).toBe(false));
+      expect(editField('My nails')).toBeNull();
+      expect(question('My screws')).toBeNull();
+      expect(shown('My nails')).toBe(false);
+      expect(status()).toBe('"My nails" is no longer shared with you. "My screws" is no longer shared with you.');
+    });
+
+    test('a delete that finds the list gone, when it was in fact deleted, keeps the user\'s tasks and their open rows after the refresh returns them, and they still work (hidden-delete-question AC-8)', async () => {
+      signedIn([task(3, 'Their hammer', 13, { createdById: 2 }), task(4, 'My nails', 13), task(6, 'My screws', 13)]);
+      withLists(errands, work);
+      render(<App />);
+      await ready();
+      await waitFor(() => expect(tabNames()).toContain('Work (shared)'));
+      await userEvent.click(button('Delete "My nails"'));
+      await userEvent.click(button('Edit "My screws"'));
+      await userEvent.type(editField('My screws')!, ' draft');
+      await openManage();
+
+      // Household Two deleted Work: the user's tasks are in their Inbox.
+      reply('DELETE /api/lists/13', json({ error: 'list_not_found', message: 'That list could not be found.' }, 404));
+      refreshReplies([task(4, 'My nails', null), task(6, 'My screws', null)], [errands]);
+      await userEvent.click(button('Delete list "Work"'));
+      await userEvent.click(button('Confirm deleting list "Work"'));
+      await waitFor(() => expect(tabNames()).not.toContain('Work (shared)'));
+      await waitFor(() => expect(callsTo('GET /api/members')).toHaveLength(2));
+      await act(async () => {});
+      expect(question('My nails')).toBeTruthy();
+      expect((editField('My screws') as HTMLInputElement).value).toBe('My screws draft');
+      expect(status()).toBe('"Work" no longer exists, so it was removed.');
+
+      // A later refresh keeps them as ordinary Inbox tasks.
+      refreshReplies([task(4, 'My nails', null), task(6, 'My screws', null)], [errands]);
+      await refreshOnFocus();
+      await waitFor(() => expect(callsTo('GET /api/members')).toHaveLength(3));
+      await act(async () => {});
+      expect(question('My nails')).toBeTruthy();
+      expect((editField('My screws') as HTMLInputElement).value).toBe('My screws draft');
+      expect(status()).toBe('"Work" no longer exists, so it was removed.');
+
+      reply('DELETE /api/tasks/4', noContent());
+      await userEvent.click(button('Confirm deleting "My nails"'));
+      await waitFor(() => expect(shown('My nails')).toBe(false));
+      expect(callsTo('DELETE /api/tasks/4')).toHaveLength(1);
+      reply('PATCH /api/tasks/6', json({ task: task(6, 'My screws draft', null) }));
+      await userEvent.click(button('Save'));
+      await waitFor(() => expect(shown('My screws draft')).toBe(true));
+      expect(editField('My screws')).toBeNull();
+      expect(callsTo('PATCH /api/tasks/6')[0].body).toEqual({ title: 'My screws draft' });
+    });
+
+    test('a task dropList kept stays provisional through a refresh that fails or overlaps a change, and the next one that applies settles it (hidden-delete-question AC-8)', async () => {
+      signedIn([task(4, 'My nails', 13), task(5, 'Inbox task', null)]);
+      withLists(errands, work);
+      render(<App />);
+      await ready();
+      await waitFor(() => expect(tabNames()).toContain('Work (shared)'));
+      await userEvent.click(button('Delete "My nails"'));
+      await openManage();
+
+      // The refresh the drop starts fails.
+      reply('DELETE /api/lists/13', json({ error: 'list_not_found', message: 'That list could not be found.' }, 404));
+      reply('GET /api/tasks', json({ error: 'oops' }, 500));
+      await userEvent.click(button('Delete list "Work"'));
+      await userEvent.click(button('Confirm deleting list "Work"'));
+      await waitFor(() => expect(tabNames()).not.toContain('Work (shared)'));
+      await waitFor(() => expect(callsTo('GET /api/tasks')).toHaveLength(2));
+      await act(async () => {});
+      expect(question('My nails')).toBeTruthy();
+
+      // The next one overlaps a completion, so its answer is dropped.
+      let finish!: (response: Response) => void;
+      reply('PATCH /api/tasks/5', new Promise<Response>((resolve) => (finish = resolve)));
+      await userEvent.click(screen.getByRole('checkbox', { name: 'Inbox task' }));
+      refreshReplies([], [errands]);
+      await refreshOnFocus();
+      finish(json({ task: task(5, 'Inbox task', null, { completed: true, completedById: 1 }) }));
+      await waitFor(() => expect(callsTo('PATCH /api/tasks/5')).toHaveLength(1));
+      await act(async () => {});
+      expect(shown('My nails')).toBe(true);
+      expect(question('My nails')).toBeTruthy();
+
+      // The next one applies: the task is not the user's.
+      refreshReplies([task(5, 'Inbox task', null, { completed: true, completedById: 1 })], [errands]);
+      await refreshOnFocus();
+      await waitFor(() => expect(shown('My nails')).toBe(false));
+      expect(question('My nails')).toBeNull();
+      expect(status()).toBe('"My nails" is no longer shared with you.');
+    });
+
+    test('a task a gone list kept in Inbox becomes an ordinary task once a refresh returns it (tasks-hidden-delete-question R2-F1)', async () => {
+      signedIn([task(4, 'My nails', 13), task(6, 'My screws', 13)]);
+      withLists(errands, work);
+      render(<App />);
+      await ready();
+      await waitFor(() => expect(tabNames()).toContain('Work (shared)'));
+      await openManage();
+      reply('DELETE /api/lists/13', json({ error: 'list_not_found', message: 'That list could not be found.' }, 404));
+      refreshReplies([task(4, 'My nails', null), task(6, 'My screws', null)], [errands]);
+      await userEvent.click(button('Delete list "Work"'));
+      await userEvent.click(button('Confirm deleting list "Work"'));
+      await waitFor(() => expect(tabNames()).not.toContain('Work (shared)'));
+      await waitFor(() => expect(callsTo('GET /api/members')).toHaveLength(2));
+      await act(async () => {});
+      await userEvent.click(button('Edit "My screws"'));
+      await userEvent.type(editField('My screws')!, ' draft');
+      // "My screws" is deleted in another tab.
+      refreshReplies([task(4, 'My nails', null)], [errands]);
+      await refreshOnFocus();
+      await waitFor(() => expect(callsTo('GET /api/members')).toHaveLength(3));
+      await act(async () => {});
+      expect((editField('My screws') as HTMLInputElement).value).toBe('My screws draft');
+      expect(status()).toBe('"Work" no longer exists, so it was removed.');
+    });
+  });
 });
 
 // The "Assigned to me" view. The criteria named below are those of the

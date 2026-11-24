@@ -481,7 +481,18 @@ longer assigned to you, because its list was deleted or is no longer
 shared.`). The same happens when the user stops sharing or deletes their own
 list in Manage lists, and when they stop sharing someone else's list (`"Milk"
 is no longer shared with you.` after the list's notice); focus stays in
-Manage lists. A 401 returns to the
+Manage lists. In every other view, stopping sharing someone else's list,
+deleting a list, or a Manage lists change that finds the list gone closes an
+open edit row or delete question on a task that is no longer the user's, so it
+does not show again if the task comes back. The notice names the task
+(`"Milk" is no longer shared with you.`), after the list's notice when there is
+one; a successful delete has no list notice, so it is only that sentence. One
+on a task that moves to the user's Inbox stays open. A change that finds
+someone else's list gone cannot tell whether it was deleted or stopped being
+shared, so it keeps the user's own tasks from it in Inbox until the refresh it
+starts: a task that refresh (or the next one that applies) does not return
+leaves, and an open edit row or delete question on it closes with the same
+notice. A 401 returns to the
 signed-out view; any other failure is silent and retried on the next trigger.
 Saving an edit of a task another member deleted meanwhile shows the usual "no
 longer exists" notice.
@@ -767,8 +778,11 @@ reload and through a live refresh without one, adds a task that One sees as
 "Added by Household Two", completes One's task ("Done by Household Two") and
 sees "Assigned to you" after One assigns it; an unshared list stays invisible
 to Two; Two renames and stops sharing One's list and loses it while One keeps
-it with every task; deleting a shared list sends each task to its creator's
-Inbox; and the share toggle and the "Assigned to" select work by keyboard, with
+it with every task; Two stops sharing One's list with a delete question open in
+All tasks, and when One shares it again the task is back without the question; Two
+acts on One's list after One stopped sharing it or deleted it, and Two's own
+task with a delete question leaves or stays and deletes accordingly;
+deleting a shared list sends each task to its creator's Inbox; and the share toggle and the "Assigned to" select work by keyboard, with
 the shared tab fitting a 390px screen (with screenshots). The page clock is
 installed so a test can jump to the next 30-second refresh. Because the API
 checks `today` against its own date, the test API server
