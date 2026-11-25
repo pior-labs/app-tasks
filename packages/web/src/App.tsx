@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
+import { ThemeProvider } from '@pior-labs/design-system';
+import { SignIn } from './SignIn';
 import { Tasks } from './Tasks';
 
 type User = { id: string | number; name: string; email: string };
@@ -37,17 +39,17 @@ export function App() {
     } catch { setError('Something went wrong. Please try again.'); }
     finally { setBusy(false); }
   }
-  return <main className="mx-auto flex min-h-screen max-w-3xl items-center px-6 py-16">
-    <section className="w-full min-w-0 space-y-6">
-      <p className="text-sm font-medium uppercase tracking-[0.2em] opacity-60">Pior Labs</p>
-      <h1 className="text-5xl font-semibold tracking-tight">Tasks</h1>
-      {loading ? <p role="status">Loading your session...</p> : <>
-        <p className="text-lg opacity-75">{user ? `Welcome, ${user.name}.` : 'A little space for what comes next.'}</p>
-        {user && <div className="rounded-lg border p-5"><p className="font-medium">Signed in as {user.name}</p><p className="mt-1 opacity-65">{user.email}</p></div>}
-        {user && <Tasks me={Number(user.id)} onSignedOut={handleSignedOut} />}
-        <button disabled={busy} onClick={() => void authenticate()} className="rounded-md bg-primary px-5 py-3 font-medium text-primary-foreground disabled:opacity-50">{busy ? 'Please wait...' : user ? 'Sign out' : 'Sign in with Pior Labs'}</button>
-      </>}
-      {error && <p role="alert">{error}</p>}
-    </section>
-  </main>;
+  // The theme is chosen on the sign-in screen and in the account menu alike.
+  return <ThemeProvider>{loading || !user ? (
+    <SignIn loading={loading} busy={busy} error={error} onSignIn={() => void authenticate()} />
+  ) : (
+    <Tasks
+      me={Number(user.id)}
+      account={{ name: user.name, email: user.email }}
+      signingOut={busy}
+      accountError={error}
+      onSignOut={() => void authenticate()}
+      onSignedOut={handleSignedOut}
+    />
+  )}</ThemeProvider>;
 }

@@ -17,7 +17,7 @@ async function signIn(page: Page, user: FixtureUser) {
   await page.getByRole('button', { name: 'Sign in with Pior Labs' }).click();
   await expect(page.getByRole('heading', { name: 'Fixture central SSO' })).toBeVisible();
   await page.getByRole('link', { name: user }).click();
-  await expect(page.getByText(`Signed in as ${user}`)).toBeVisible();
+  await expect(page.getByRole('button', { name: `${user}, account` })).toBeVisible();
   await expect(page.getByLabel('New task')).toBeVisible();
 }
 // A member in their own browser context. The page clock is installed (it
@@ -387,7 +387,7 @@ test('the share toggle and the Assigned to select work by keyboard; the tab row 
       .locator('[data-list-name]')
       .evaluate((element) => element.getBoundingClientRect().width);
     expect(nameWidth).toBeGreaterThanOrEqual(160);
-    await expect(sharedTab(one, 'Shared: kitchen and pantry restock').locator('svg')).toBeVisible();
+    await expect(sharedTab(one, 'Shared: kitchen and pantry restock').locator('svg.lucide-users')).toBeVisible();
     // Reached by keyboard (Shift+Tab back to the tab row), the tab scrolls into
     // view within the row; the page still does not scroll sideways.
     await sharedTab(one, 'Shared: kitchen and pantry restock').focus();

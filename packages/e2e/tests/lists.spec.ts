@@ -16,7 +16,7 @@ async function signIn(page: Page, user: FixtureUser, path = '/') {
   await page.getByRole('button', { name: 'Sign in with Pior Labs' }).click();
   await expect(page.getByRole('heading', { name: 'Fixture central SSO' })).toBeVisible();
   await page.getByRole('link', { name: user }).click();
-  await expect(page.getByText(`Signed in as ${user}`)).toBeVisible();
+  await expect(page.getByRole('button', { name: `${user}, account` })).toBeVisible();
   await expect(page.getByLabel('New task')).toBeVisible();
 }
 
@@ -75,8 +75,11 @@ test('creates lists and switches between them with the keyboard only (AC-8, AC-1
   await signIn(page, 'Household One');
   const writes = recordListWrites(page);
 
-  // From the top of the page, the first Tab stop is the selected tab.
+  // From the top of the page, the first Tab stop is the skip link, and the
+  // next one is the selected tab.
   await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('link', { name: 'Skip to tasks' })).toBeFocused();
   await page.keyboard.press('Tab');
   await expect(tab(page, 'All tasks')).toBeFocused();
   await expect(tab(page, 'All tasks')).toHaveAttribute('aria-selected', 'true');

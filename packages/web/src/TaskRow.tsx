@@ -11,6 +11,16 @@ import { MAX_DUE_DATE, MIN_DUE_DATE, dueLabel, dueStatus, holdsNoDate } from './
 import { RepeatControl, RepeatHint } from './RepeatControl';
 import type { List, Member } from './lists';
 import { type Repeat, type RepeatForm, repeatLabel } from './repeat';
+import { CalendarDays, Pencil, Repeat as RepeatIcon, Trash2, UserRound, Users } from 'lucide-react';
+import { cn } from './cn';
+import {
+  FieldError,
+  buttonClass,
+  iconButtonClass,
+  selectClass,
+  smallControlClass,
+  textareaClass,
+} from './ui';
 
 // dueDate is a calendar day, "YYYY-MM-DD", or null for no due date. repeat is
 // null for a task that does not repeat; only a task with a due date repeats.
@@ -154,9 +164,10 @@ function TaskNotes({ title, notes, completed }: { title: string; notes: string; 
       }}
       {...(more ? { 'data-notes-more': '' } : {})}
       {...(overflowing ? { tabIndex: 0, role: 'region', 'aria-label': `Notes for "${title}"` } : {})}
-      // Indented like the due date line, to line up with the title.
-      className={`ml-8 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-sm text-sm ${
-        completed ? 'text-muted-foreground' : ''
+      // Indented like the due date line, to line up with the title: the
+      // checkbox (1.375rem) plus the gap (0.75rem).
+      className={`ml-[2.125rem] max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-sm text-[14px] leading-relaxed ${
+        completed ? 'text-muted-foreground' : 'text-ink-2'
       }`}
     >
       {notes}
@@ -164,8 +175,6 @@ function TaskNotes({ title, notes, completed }: { title: string; notes: string; 
   );
 }
 
-const rowButton =
-  'shrink-0 rounded-md border border-border px-3 py-1.5 text-sm font-medium aria-disabled:opacity-50';
 
 // Pending controls are locked with readOnly and aria-disabled instead of
 // disabled, because a disabled control loses keyboard focus. (Without a due
@@ -209,8 +218,6 @@ export function TaskRow({
     const notesError = mode.error !== '' && mode.errorField === 'notes';
     const listError = mode.error !== '' && mode.errorField === 'list';
     const assigneeError = mode.error !== '' && mode.errorField === 'assignee';
-    const fieldClass =
-      'rounded-md border border-border bg-card px-3 py-1.5 text-card-foreground';
     const checkEmptied = (event: SyntheticEvent<HTMLInputElement>) => {
       if (holdsNoDate(event.currentTarget)) onDueDateEmptied();
     };
@@ -218,14 +225,13 @@ export function TaskRow({
       event.preventDefault();
       onSave();
     };
+    // A select is as wide as its longest option, so it is capped at the row's
+    // width: a long list name is cut short inside the control instead of
+    // pushing it off a phone screen.
+    const selectField = cn(smallControlClass, selectClass, 'min-w-0 max-w-full aria-disabled:opacity-60');
     return (
-      <li ref={rowRef} className="px-5 py-3">
-        <form
-          onSubmit={submit}
-          onKeyDown={escapeTo(onCancelEdit)}
-          noValidate
-          className="flex flex-wrap items-center justify-end gap-2"
-        >
+      <li ref={rowRef} className="bg-[var(--tk-editing-bg)] px-4 py-4 sm:px-5">
+        <form onSubmit={submit} onKeyDown={escapeTo(onCancelEdit)} noValidate className="flex flex-wrap items-center gap-2">
           <input
             data-action="edit-title"
             aria-label={`New title for "${task.title}"`}
@@ -235,7 +241,7 @@ export function TaskRow({
             autoComplete="off"
             aria-invalid={titleError || undefined}
             aria-describedby={titleError ? errorId : undefined}
-            className="min-w-48 flex-1 rounded-md border border-border bg-card px-3 py-1.5 text-card-foreground read-only:opacity-60"
+            className={cn(smallControlClass, 'min-w-48 basis-full font-medium')}
           />
           <input
             type="date"
@@ -250,7 +256,7 @@ export function TaskRow({
             readOnly={mode.saving}
             aria-invalid={dueDateError || undefined}
             aria-describedby={dueDateError ? errorId : undefined}
-            className="rounded-md border border-border bg-card px-3 py-1.5 text-card-foreground read-only:opacity-60"
+            className={smallControlClass}
           />
           {mode.dueDate !== '' && (
             <button
@@ -259,7 +265,7 @@ export function TaskRow({
               aria-label={`Remove due date for "${task.title}"`}
               aria-disabled={mode.saving || undefined}
               onClick={onRemoveDueDate}
-              className={rowButton}
+              className={buttonClass('quiet', 'small')}
             >
               Remove due date
             </button>
@@ -277,13 +283,11 @@ export function TaskRow({
             locked={mode.saving}
             invalid={repeatError}
             errorId={errorId}
-            className={fieldClass}
+            className={smallControlClass}
             onChange={onEditRepeat}
           />
-          {mode.dueDate === '' && <RepeatHint idBase={`task-${task.id}`} className="basis-full text-right" />}
-          {/* After the date and repeat and before the notes, so title to date stays one Tab (D-7).
-              A select is as wide as its longest option, so it is capped at the row's width: a
-              long list name is cut short inside the control instead of pushing it off a phone screen. */}
+          {mode.dueDate === '' && <RepeatHint idBase={`task-${task.id}`} className="basis-full px-1" />}
+          {/* After the date and repeat and before the notes, so title to date stays one Tab (D-7). */}
           <select
             data-action="edit-list"
             aria-label={`List for "${task.title}"`}
@@ -296,7 +300,7 @@ export function TaskRow({
             aria-disabled={mode.saving || undefined}
             aria-invalid={listError || undefined}
             aria-describedby={listError ? errorId : undefined}
-            className={`${fieldClass} min-w-0 max-w-full text-ellipsis aria-disabled:opacity-60`}
+            className={selectField}
           >
             <option value="">Inbox</option>
             {lists.map((list) => (
@@ -318,7 +322,7 @@ export function TaskRow({
               aria-disabled={mode.saving || undefined}
               aria-invalid={assigneeError || undefined}
               aria-describedby={assigneeError ? errorId : undefined}
-              className={`${fieldClass} min-w-0 max-w-full text-ellipsis aria-disabled:opacity-60`}
+              className={selectField}
             >
               <option value="">Nobody</option>
               {assignees.map((member) => (
@@ -340,30 +344,32 @@ export function TaskRow({
             rows={3}
             aria-invalid={notesError || undefined}
             aria-describedby={notesError ? errorId : undefined}
-            className={`${fieldClass} basis-full read-only:opacity-60`}
+            className={cn(smallControlClass, textareaClass, 'basis-full')}
           />
-          <button
-            type="submit"
-            data-action="save"
-            aria-disabled={mode.saving || undefined}
-            className={`${rowButton} border-primary bg-primary text-primary-foreground`}
-          >
-            {mode.saving ? 'Saving...' : 'Save'}
-          </button>
-          <button
-            type="button"
-            data-action="cancel-edit"
-            onClick={onCancelEdit}
-            aria-disabled={mode.saving || undefined}
-            className={rowButton}
-          >
-            Cancel
-          </button>
           {mode.error && (
-            <p id={errorId} role="alert" className="basis-full text-sm text-destructive">
+            <FieldError id={errorId} className="basis-full px-1">
               {mode.error}
-            </p>
+            </FieldError>
           )}
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              type="submit"
+              data-action="save"
+              aria-disabled={mode.saving || undefined}
+              className={buttonClass('primary', 'small')}
+            >
+              {mode.saving ? 'Saving...' : 'Save'}
+            </button>
+            <button
+              type="button"
+              data-action="cancel-edit"
+              onClick={onCancelEdit}
+              aria-disabled={mode.saving || undefined}
+              className={buttonClass('quiet', 'small')}
+            >
+              Cancel
+            </button>
+          </div>
         </form>
       </li>
     );
@@ -373,10 +379,20 @@ export function TaskRow({
   const dueId = `task-${task.id}-due`;
   // A completed task shows its due date but is never marked overdue.
   const overdue = task.dueDate !== null && !task.completed && dueStatus(task.dueDate, today) === 'overdue';
+  const shareLine = shareLabels
+    ? [shareLabels.addedBy, shareLabels.doneBy, shareLabels.assigned].filter((label): label is string => label !== null)
+    : [];
+  const meta = 'flex min-w-0 flex-wrap items-center gap-x-1.5 pl-[2.125rem] text-[13px] leading-snug';
   return (
-    <li ref={rowRef} className="flex flex-wrap items-center justify-end gap-x-2 gap-y-2 px-5 py-3">
-      <div className="flex min-w-48 flex-1 flex-col gap-0.5">
-        <label className="flex cursor-pointer items-center gap-3">
+    <li
+      ref={rowRef}
+      className={cn(
+        'group flex flex-wrap items-start gap-x-2 gap-y-2 px-4 py-3 transition-colors sm:px-5',
+        mode.kind === 'confirm-delete' ? 'bg-[var(--tk-danger-surface)]' : 'hover:bg-ink/[0.025]',
+      )}
+    >
+      <div className="flex min-w-48 flex-1 flex-col gap-1 py-0.5">
+        <label className="flex cursor-pointer items-start gap-3">
           <input
             type="checkbox"
             data-action="toggle"
@@ -384,20 +400,19 @@ export function TaskRow({
             aria-disabled={updating || deleting || undefined}
             aria-describedby={task.dueDate === null ? undefined : dueId}
             onChange={(event) => onToggle(event.target.checked)}
-            className="size-5 shrink-0 accent-primary aria-disabled:opacity-50"
+            className="tk-check mt-px aria-disabled:opacity-50"
           />
           <span
-            className={`min-w-0 break-words ${task.completed ? 'text-muted-foreground line-through' : ''}`}
+            className={`min-w-0 break-words text-[15px] leading-[1.45] ${
+              task.completed ? 'text-muted-foreground line-through decoration-ink/30' : 'text-ink'
+            }`}
           >
             {task.title}
           </span>
         </label>
         {task.dueDate !== null && (
-          // Indented to line up with the title: the checkbox (1.25rem) plus the gap (0.75rem).
-          <p
-            id={dueId}
-            className={`pl-8 text-sm ${overdue ? 'text-destructive' : 'text-muted-foreground'}`}
-          >
+          <p id={dueId} className={cn('m-0', meta, overdue ? 'text-destructive' : 'text-muted-foreground')}>
+            <CalendarDays aria-hidden="true" className="size-3.5 shrink-0" strokeWidth={2} />
             {/* Overdue is said in words, not only by the colour. */}
             {overdue && (
               <>
@@ -406,52 +421,56 @@ export function TaskRow({
               </>
             )}
             <span>{dueLabel(task.dueDate, today)}</span>
+            {/* Each separator stays with the words after it, so a wrapped
+                line never starts with a stray dot. */}
             {task.repeat && (
-              <>
+              <span className="inline-flex items-center gap-1 whitespace-nowrap">
                 {' \u00B7 '}
-                <span className="whitespace-nowrap">{repeatLabel(task.repeat)}</span>
-              </>
+                <RepeatIcon aria-hidden="true" className="size-3 shrink-0" strokeWidth={2.2} />
+                {repeatLabel(task.repeat)}
+              </span>
             )}
           </p>
         )}
         {listName !== null && (
           // A muted label after the due date line, outside the checkbox's description.
-          <p data-list-label className="break-words pl-8 text-sm text-muted-foreground">
+          <p data-list-label className={cn('m-0 break-words', meta, 'text-muted-foreground')}>
             <span className="sr-only">List: </span>
-            {listName}
+            <span className="rounded-full bg-ink/[0.05] px-2 py-px text-[12px] font-medium text-ink-2">{listName}</span>
           </p>
         )}
-        {shareLabels && (shareLabels.addedBy || shareLabels.doneBy || shareLabels.assigned) && (
-          <p data-share-labels className="break-words pl-8 text-sm text-muted-foreground">
-            {[shareLabels.addedBy, shareLabels.doneBy, shareLabels.assigned]
-              .filter((label): label is string => label !== null)
-              .map((label, index) => (
-                <span key={label}>
-                  {index > 0 && ' \u00B7 '}
-                  <span className="whitespace-nowrap">{label}</span>
-                </span>
-              ))}
+        {shareLine.length > 0 && (
+          <p data-share-labels className={cn('m-0 break-words', meta, 'text-muted-foreground')}>
+            {shareLabels?.assigned ? (
+              <UserRound aria-hidden="true" className="size-3.5 shrink-0" strokeWidth={2} />
+            ) : (
+              <Users aria-hidden="true" className="size-3.5 shrink-0" strokeWidth={2} />
+            )}
+            {shareLine.map((label, index) => (
+              <span key={label} className="whitespace-nowrap">
+                {index > 0 && ' \u00B7 '}
+                {label}
+              </span>
+            ))}
           </p>
         )}
-        {task.notes !== null && (
-          <TaskNotes title={task.title} notes={task.notes} completed={task.completed} />
-        )}
+        {task.notes !== null && <TaskNotes title={task.title} notes={task.notes} completed={task.completed} />}
       </div>
       {mode.kind === 'confirm-delete' ? (
         <div
           role="group"
           aria-label={`Delete "${task.title}"?`}
           onKeyDown={escapeTo(onCancelDelete)}
-          className="flex items-center gap-2"
+          className="ml-auto flex flex-wrap items-center gap-2"
         >
-          <span className="text-sm">Delete this task?</span>
+          <span className="text-[13px] font-medium text-[var(--tk-danger-ink-strong)]">Delete this task?</span>
           <button
             type="button"
             data-action="confirm-delete"
             aria-label={`Confirm deleting "${task.title}"`}
             aria-disabled={deleting || updating || undefined}
             onClick={onConfirmDelete}
-            className={`${rowButton} border-destructive text-destructive`}
+            className={buttonClass('danger', 'small')}
           >
             {deleting ? 'Deleting...' : 'Confirm'}
           </button>
@@ -461,34 +480,36 @@ export function TaskRow({
             aria-label={`Cancel deleting "${task.title}"`}
             aria-disabled={deleting || undefined}
             onClick={onCancelDelete}
-            className={rowButton}
+            className={buttonClass('ghost', 'small')}
           >
             Cancel
           </button>
         </div>
       ) : (
-        <>
+        <div className="ml-auto flex items-center gap-0.5">
           <button
             type="button"
             data-action="edit"
             aria-label={`Edit "${task.title}"`}
+            title="Edit"
             aria-disabled={editLocked || undefined}
             onClick={onStartEdit}
-            className={rowButton}
+            className={iconButtonClass()}
           >
-            Edit
+            <Pencil aria-hidden="true" className="size-4" strokeWidth={2} />
           </button>
           <button
             type="button"
             data-action="delete"
             aria-label={`Delete "${task.title}"`}
+            title="Delete"
             aria-disabled={deleteLocked || undefined}
             onClick={onStartDelete}
-            className={rowButton}
+            className={iconButtonClass('danger')}
           >
-            Delete
+            <Trash2 aria-hidden="true" className="size-4" strokeWidth={2} />
           </button>
-        </>
+        </div>
       )}
     </li>
   );
