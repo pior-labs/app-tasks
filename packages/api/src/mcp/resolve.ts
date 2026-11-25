@@ -17,7 +17,8 @@ export function listLabel(list: List, user: ActingUser, members: Map<number, str
 }
 
 // A list reference: an id, a name, "Inbox" or null (both meaning no list).
-// A string of digits that is not a list name is read as an id.
+// A string of digits is both: the list with that id and the lists with that
+// name all count, and two different lists are an error, never a guess.
 export function resolveList(
   reference: string | number | null,
   lists: List[],
@@ -33,16 +34,21 @@ export function resolveList(
   const folded = foldListName(reference);
   if (folded === 'inbox') return { ok: true, value: null };
   const matches = lists.filter((list) => foldListName(list.name) === folded);
+  if (isDigits(reference)) {
+    const id = Number(reference);
+    const withId = lists.find((list) => list.id === id);
+    if (withId && !matches.includes(withId)) matches.push(withId);
+    if (matches.length === 0) return byId(id);
+  }
   if (matches.length === 1) return { ok: true, value: matches[0].id };
   if (matches.length > 1) {
     return {
       ok: false,
-      message: `More than one list is named "${reference.trim()}": ${matches
+      message: `More than one list ${isDigits(reference) ? 'fits' : 'is named'} "${reference.trim()}": ${matches
         .map((list) => listLabel(list, user, members))
-        .join(', ')}. Give the list's id instead.`,
+        .join(', ')}. Give the list's id as a number instead.`,
     };
   }
-  if (isDigits(reference)) return byId(Number(reference));
   const names = lists.map((list) => `"${list.name}"`);
   return {
     ok: false,
@@ -53,7 +59,8 @@ export function resolveList(
 }
 
 // An assignee reference: "me", a member's display name or id, or null for
-// nobody. A string of digits that is not a member's name is read as an id.
+// nobody. A string of digits is both: the member with that id and the members
+// with that name all count, and two different members are an error.
 export function resolveMember(
   reference: string | number | null,
   members: Member[],
@@ -68,16 +75,21 @@ export function resolveMember(
   const folded = foldListName(reference);
   if (folded === 'me') return { ok: true, value: user.id };
   const matches = members.filter((member) => foldListName(member.name) === folded);
+  if (isDigits(reference)) {
+    const id = Number(reference);
+    const withId = members.find((member) => member.id === id);
+    if (withId && !matches.includes(withId)) matches.push(withId);
+    if (matches.length === 0) return byId(id);
+  }
   if (matches.length === 1) return { ok: true, value: matches[0].id };
   if (matches.length > 1) {
     return {
       ok: false,
-      message: `More than one household member is named "${reference.trim()}": ${matches
+      message: `More than one household member ${isDigits(reference) ? 'fits' : 'is named'} "${reference.trim()}": ${matches
         .map((member) => `${member.name} (id ${member.id})`)
-        .join(', ')}. Give the member's id instead.`,
+        .join(', ')}. Give the member's id as a number instead.`,
     };
   }
-  if (isDigits(reference)) return byId(Number(reference));
   return {
     ok: false,
     message: `No household member is named "${reference.trim()}". The members are ${members

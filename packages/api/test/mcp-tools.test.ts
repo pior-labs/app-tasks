@@ -479,3 +479,90 @@ test('an assignee is a member\'s display name, id or "me"; unknown and ambiguous
     await fixture.client`delete from users where id = ${twin.id}`;
   }
 });
+
+// A reference made only of digits can be a list's id or a list's name. Both
+// readings count; two different lists are an error that names each (R1-F1).
+test('a digit string that is one list\'s name and another list\'s id is ambiguous in every tool (AC-7)', async () => {
+  const other = await createList(one, 'Other');
+  const named = await createList(one, String(other));
+  const home = await createList(one, 'Shared home', true);
+  const task = await ok(mcpOne, 'add_task', { title: 'Stay put', list: home });
+  const count = async () => Number((await fixture.client`select count(*)::int as n from tasks`)[0].n);
+  const before = await count();
+  const reference = String(other);
+  const checks = [
+    await refused(mcpOne, 'add_task', { title: 'x', list: reference }),
+    await refused(mcpOne, 'update_task', { task_id: task.task.id, list: reference, title: 'Moved' }),
+    await refused(mcpOne, 'list_tasks', { list: reference }),
+  ];
+  for (const message of checks) {
+    assert.match(message, new RegExp(`More than one list fits "${other}"`));
+    assert.ok(message.includes(`"Other" (id ${other}, yours)`), message);
+    assert.ok(message.includes(`"${other}" (id ${named}, yours)`), message);
+  }
+  assert.equal(await count(), before);
+  const stored = (await row(task.task.id))!;
+  assert.equal(stored.title, 'Stay put');
+  assert.equal(stored.list_id, home);
+  // A number is always the id, and the other list's id settles the name.
+  assert.equal((await ok(mcpOne, 'add_task', { title: 'By id', list: other })).task.list_id, other);
+  assert.equal((await ok(mcpOne, 'add_task', { title: 'By other id', list: named })).task.list_id, named);
+});
+
+test('a digit string that is only a list id, only a list name, or both of one list resolves (AC-7)', async () => {
+  const plain = await createList(one, 'Plain');
+  assert.equal((await ok(mcpOne, 'add_task', { title: 'Id only', list: String(plain) })).task.list_id, plain);
+  const nameOnly = await createList(one, '2000000000');
+  assert.equal((await ok(mcpOne, 'add_task', { title: 'Name only', list: '2000000000' })).task.list_id, nameOnly);
+  // A list whose own name is its own id is a single distinct match.
+  const [{ nextval }] = await fixture.client`select nextval(pg_get_serial_sequence('lists', 'id')) as nextval`;
+  const [self] = await fixture.client`
+    insert into lists (id, name, user_id) values (${Number(nextval) + 1}, ${String(Number(nextval) + 1)}, ${oneId})
+    returning id`;
+  assert.equal((await ok(mcpOne, 'add_task', { title: 'Self', list: String(self.id) })).task.list_id, self.id);
+  assert.match(await refused(mcpOne, 'add_task', { title: 'x', list: '999999' }), /No list with id 999999/);
+});
+
+test('a digit string that is one member\'s name and another member\'s id is ambiguous for every assignee (AC-7)', async () => {
+  const home = await createList(one, 'Shared home', true);
+  const task = await ok(mcpOne, 'add_task', { title: 'Stay put', list: home });
+  const [twin] = await fixture.client`
+    insert into users (name, email) values (${String(twoId)}, 'digits@example.test') returning id`;
+  try {
+    const count = async () => Number((await fixture.client`select count(*)::int as n from tasks`)[0].n);
+    const before = await count();
+    for (const message of [
+      await refused(mcpOne, 'add_task', { title: 'x', list: home, assignee: String(twoId) }),
+      await refused(mcpOne, 'update_task', { task_id: task.task.id, assignee: String(twoId), title: 'Changed' }),
+    ]) {
+      assert.match(message, new RegExp(`More than one household member fits "${twoId}"`));
+      assert.ok(message.includes(`Household Two (id ${twoId})`), message);
+      assert.ok(message.includes(`${twoId} (id ${twin.id})`), message);
+    }
+    assert.equal(await count(), before);
+    assert.equal((await row(task.task.id))!.title, 'Stay put');
+    assert.equal((await row(task.task.id))!.assignee_id, null);
+    // The number settles it, and the other id reaches the other member.
+    assert.equal((await ok(mcpOne, 'update_task', { task_id: task.task.id, assignee: twoId })).task.assignee_id, twoId);
+  } finally {
+    await fixture.client`update tasks set assignee_id = null where assignee_id = ${twin.id}`;
+    await fixture.client`delete from users where id = ${twin.id}`;
+  }
+});
+
+test('a digit string that is only a member id or only a member name resolves, as does a member named by their own id (AC-7)', async () => {
+  const home = await createList(one, 'Shared home', true);
+  assert.equal((await ok(mcpOne, 'add_task', { title: 'Id', list: home, assignee: String(twoId) })).task.assignee_id, twoId);
+  const [named] = await fixture.client`
+    insert into users (name, email) values ('2000000001', 'named@example.test') returning id`;
+  const [selfNamed] = await fixture.client`
+    insert into users (name, email) values (${'x'}, 'selfnamed@example.test') returning id`;
+  await fixture.client`update users set name = ${String(selfNamed.id)} where id = ${selfNamed.id}`;
+  try {
+    assert.equal((await ok(mcpOne, 'add_task', { title: 'Name', list: home, assignee: '2000000001' })).task.assignee_id, named.id);
+    assert.equal((await ok(mcpOne, 'add_task', { title: 'Self', list: home, assignee: String(selfNamed.id) })).task.assignee_id, selfNamed.id);
+  } finally {
+    await fixture.client`update tasks set assignee_id = null where assignee_id in (${named.id}, ${selfNamed.id})`;
+    await fixture.client`delete from users where id in (${named.id}, ${selfNamed.id})`;
+  }
+});
