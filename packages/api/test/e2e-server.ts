@@ -1,6 +1,7 @@
 import type { Server } from 'node:http';
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
+import { mcpEnvironment } from '../src/mcp/config.js';
 import { createFixture } from './fixture.js';
 
 // The API server for the browser end-to-end suite (packages/e2e). It serves the
@@ -17,7 +18,10 @@ const webOrigin = required('E2E_WEB_ORIGIN');
 const port = Number(required('E2E_API_PORT'));
 if (!Number.isInteger(port) || port <= 0) throw new Error('E2E_API_PORT must be a port number');
 
-const fixture = await createFixture(webOrigin);
+// The MCP endpoint reads TASKS_MCP_TOKENS and TASKS_TIMEZONE like the real
+// API, so it can be tried by hand with tokens for the fixture users. Without
+// them it accepts no token.
+const fixture = await createFixture(webOrigin, { mcp: mcpEnvironment() });
 // The browser tests fix the browser clock, and the API checks the browser's
 // "today" against its own date, so the tests set the API clock to match. This
 // route exists only in this test server, never in the application.

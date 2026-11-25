@@ -39,6 +39,7 @@ Set these `PRODUCTION` environment secrets:
 | `COMPOSE_PROJECT_NAME` | `tasks` for the first deployment; preserve the existing identity afterward |
 | `CENTRAL_AUTH_CLIENT_SECRET` | The same private value registered as Auth's `TASKS_CLIENT_SECRET` |
 | `BETTER_AUTH_SECRET` | A separate, stable application session secret, at least 32 characters |
+| `TASKS_MCP_TOKENS` | Optional. MCP member token hashes, see [MCP member tokens](#mcp-member-tokens). Unset: the MCP endpoint answers 401 |
 
 Set the `PRODUCTION` environment variable `DEPLOY_DIR` to `/opt/docker/app-tasks`.
 It is required. The following `PRODUCTION` environment variables are optional
@@ -55,6 +56,7 @@ deliberate temporary override:
 | `CENTRAL_AUTH_ISSUER` | `https://auth.szarans.ca/api/auth` |
 | `CENTRAL_AUTH_CLIENT_ID` | `tasks` |
 | `PLATFORM_DATABASE_URL_FILE` | `/opt/docker/pior-labs/secrets/app-tasks/database-url` |
+| `TASKS_TIMEZONE` | `America/Toronto` (the household's IANA timezone, which decides "today" for MCP tools) |
 
 Only this explicit allowlist is written to the private runtime `.env`. Missing,
 placeholder or short session secrets fail before staging or Docker operations.
@@ -94,6 +96,40 @@ Value-specific notes:
 - To copy a current value from the host, use the newest
   `$DEPLOY_DIR/releases/*/.env`: strip the surrounding double quotes, turn `$$`
   back into `$` and JSON escapes such as `\\` back into their characters.
+
+## MCP member tokens
+
+The MCP endpoint `https://tasks.szarans.ca/api/mcp` (README, "MCP") accepts
+member bearer tokens. `TASKS_MCP_TOKENS` holds only their SHA-256 hashes, as
+comma-separated `<member email>:<sha256 hex>` entries, for example
+`one@example.com:<64 hex>,two@example.com:<64 hex>`. The rationale is in
+[decision 0001](decisions/0001-mcp-member-tokens.md).
+
+1. On a trusted computer with this repository, run
+   `pnpm --filter @tasks/api mcp:token <member email>`. It prints the token
+   once and the entry. Give the token to the member's MCP client; it cannot be
+   shown again.
+2. Set the whole list as the secret: `gh secret set TASKS_MCP_TOKENS --env PRODUCTION`
+   (it prompts; paste every entry, comma-separated). The value replaces the
+   previous one, so include the entries that should keep working.
+3. Redeploy the live release (see "Changing or rotating one setting" above).
+   The member must have signed in to Tasks once; until then their token
+   answers 401.
+
+To rotate, add the new entry beside the old one (an email may have several),
+redeploy, switch the client, then remove the old entry and redeploy. To revoke,
+remove the entry and redeploy; with the secret unset or empty, every MCP request
+answers 401. Deploy rejects a malformed value before staging, naming only the
+setting; the API also refuses to start with one, and with an unknown
+`TASKS_TIMEZONE`. The hashes are not credentials, but keep the secret private
+anyway: it names the members' emails.
+
+`TASKS_TIMEZONE` changes what "today" and "tomorrow" mean for agents. Leave the
+default unless the household moves; it has no effect on the web app, which
+uses the browser's date.
+
+No platform-deploy change is needed: platform Caddy already routes `/api/*` to
+the API container, and the endpoint stays as private as the rest of Tasks.
 
 ## Release and deployment
 

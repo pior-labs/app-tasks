@@ -10,10 +10,12 @@
     "typecheck": "tsc --noEmit -p tsconfig.check.json",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",
+    "mcp:token": "tsx scripts/mcp-token.ts",
     "test": "tsx --test test/*.test.ts"
   },
   "dependencies": {
     "@hono/node-server": "^2.0.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "better-auth": "1.7.25",
     "dotenv": "^16.4.7",
     "drizzle-orm": "^0.45.2",

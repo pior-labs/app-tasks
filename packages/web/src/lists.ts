@@ -6,7 +6,7 @@ import { VISIBLE_CHARACTER, characterCount } from './text';
 // and can do everything with it that the owner can.
 export type List = { id: number; name: string; shared: boolean; ownerId: number };
 
-// A Tasks user: everyone who has signed in to Tasks (packages/api/src/members.ts).
+// A Tasks user: everyone who has signed in to Tasks (packages/api/src/services/members.ts).
 export type Member = { id: number; name: string };
 
 // The answer of an older server or stub may leave out shared and ownerId:
@@ -27,7 +27,7 @@ export const BUILT_IN_VIEWS: View[] = ['all', 'inbox', 'assigned'];
 export const MAX_LIST_NAME_LENGTH = 50;
 // When two list names count as the same, and whether a name is a built-in
 // view's. The same fold as the server (foldListName in
-// packages/api/src/lists.ts): Unicode NFKC (fullwidth and other compatibility
+// packages/api/src/services/lists.ts): Unicode NFKC (fullwidth and other compatibility
 // forms become their plain letters), any run of white space counts as one
 // space, invisible code points (default ignorables such as a zero width space,
 // joiners, direction marks and the soft hyphen, and control characters) are
@@ -47,7 +47,7 @@ const foldListName = (name: string) =>
 const RESERVED_LIST_NAMES = ['inbox', 'all tasks', 'assigned to me'];
 
 // The client-side list name check for a new list and a rename, on the trimmed
-// name. It mirrors the server (packages/api/src/lists.ts): at least one visible
+// name. It mirrors the server (packages/api/src/services/lists.ts): at least one visible
 // character, no U+0000, at most 50 code points, not a built-in view's name,
 // and not another of the owner's lists by fold (`exceptId` is the list being
 // renamed, which may keep its own fold). `lists` are the lists of the owner

@@ -175,6 +175,68 @@ class DeploymentTests(unittest.TestCase):
         self.assertIn('CENTRAL_AUTH_CLIENT_ID="tasks"', value)
         self.assertNotIn('UNRELATED', value)
 
+    def test_mcp_settings_default_and_pass_through(self):
+        value = deploy.production_environment('tasks')
+        self.assertIn('TASKS_TIMEZONE="America/Toronto"\n', value)
+        # Unset, the optional token secret is written empty: MCP answers 401.
+        self.assertIn('TASKS_MCP_TOKENS=""\n', value)
+        entries = 'one@example.test:' + 'a' * 64 + ',two@example.test:' + 'B' * 64
+        with patch.dict(os.environ, {'TASKS_MCP_TOKENS': f' {entries} ', 'TASKS_TIMEZONE': 'Europe/Warsaw'}):
+            value = deploy.production_environment('tasks')
+        self.assertIn(f'TASKS_MCP_TOKENS="{entries}"\n', value)
+        self.assertIn('TASKS_TIMEZONE="Europe/Warsaw"\n', value)
+        self.assertEqual(value.count('TASKS_MCP_TOKENS='), 1)
+
+    def test_malformed_mcp_tokens_fail_before_staging_without_the_value(self):
+        hex64 = 'c' * 64
+        for value in ('one@example.test', 'one@example.test:' + hex64[1:], 'not-an-email:' + hex64,
+                      'one@example.test:' + hex64 + ',', 'one@example.test:plain-token-value',
+                      'one@example.test:' + hex64 + '\nINJECTED=value'):
+            with self.subTest(value=value), patch.dict(os.environ, {'TASKS_MCP_TOKENS': value}), \
+                    patch.object(deploy, 'command') as command, self.assertRaises(ValueError) as error:
+                deploy.deploy()
+            self.assertIn('TASKS_MCP_TOKENS', str(error.exception))
+            self.assertNotIn('example.test', str(error.exception))
+            self.assertNotIn('plain-token-value', str(error.exception))
+            command.assert_not_called()
+        self.assertFalse((self.root / 'releases').exists())
+
+    def test_raw_mcp_inputs_are_removed_from_the_compose_environment(self):
+        entries = 'one@example.test:' + 'd' * 64
+        with patch.dict(os.environ, {'TASKS_MCP_TOKENS': entries, 'TASKS_TIMEZONE': ''}), \
+                patch.object(deploy, 'command', side_effect=self.run_command) as command:
+            deploy.deploy()
+        configs = [call for call in command.call_args_list if 'config' in call.args]
+        self.assertEqual(len(configs), 1)
+        self.assertNotIn('TASKS_MCP_TOKENS', configs[0].kwargs['env'])
+        self.assertNotIn('TASKS_TIMEZONE', configs[0].kwargs['env'])
+        runtime = (self.root / 'current').resolve()
+        written = (runtime / '.env').read_text()
+        self.assertIn(f'TASKS_MCP_TOKENS="{entries}"\n', written)
+        self.assertIn('TASKS_TIMEZONE="America/Toronto"\n', written)
+
+    @unittest.skipUnless(shutil.which("docker"), "Docker Compose CLI is required for rendering")
+    def test_real_compose_gives_mcp_settings_to_the_api_only(self):
+        for name in CONFIG["compose_files"]:
+            shutil.copyfile(SOURCE_ROOT / name, Path("candidate") / name)
+        entries = 'one@example.test:' + 'e' * 64 + ',two@example.test:' + 'f' * 64
+        real_command = deploy.command
+        def render_only(*args, **kwargs):
+            if "config" in args:
+                return real_command(*args, **kwargs)
+            return self.run_command(*args, **kwargs)
+        with patch.dict(os.environ, {**dict.fromkeys(deploy.PRODUCTION_DEFAULTS, ""), "TASKS_MCP_TOKENS": entries}), \
+                patch.object(deploy, "command", side_effect=render_only):
+            deploy.deploy()
+        runtime = (self.root / "current").resolve()
+        config = json.loads((runtime / "compose.json").read_text())
+        api = config['services']['api']['environment']
+        self.assertEqual(api['TASKS_MCP_TOKENS'], entries)
+        self.assertEqual(api['TASKS_TIMEZONE'], 'America/Toronto')
+        web = config['services']['web'].get('environment', {})
+        self.assertNotIn('TASKS_MCP_TOKENS', web)
+        self.assertNotIn('TASKS_TIMEZONE', web)
+
     def test_rejects_broad_directory_before_writing(self):
         with patch.dict(os.environ, {"DEPLOY_DIR": "/opt/docker"}), self.assertRaises(ValueError):
             deploy.deploy()

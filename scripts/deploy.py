@@ -32,7 +32,17 @@ PRODUCTION_DEFAULTS = {
     'CENTRAL_AUTH_ISSUER': 'https://auth.szarans.ca/api/auth',
     'CENTRAL_AUTH_CLIENT_ID': 'tasks',
     'PLATFORM_DATABASE_URL_FILE': '/opt/docker/pior-labs/secrets/app-tasks/database-url',
+    # The household's timezone, which decides "today" for the MCP tools.
+    'TASKS_TIMEZONE': 'America/Toronto',
 }
+
+# Optional PRODUCTION secrets. Unset, they are written empty: an empty
+# TASKS_MCP_TOKENS turns the MCP endpoint's member tokens off (it answers 401).
+OPTIONAL_SECRETS = ('TASKS_MCP_TOKENS',)
+# TASKS_MCP_TOKENS holds `<member email>:<sha256 hex>` entries separated by
+# commas (packages/api/src/mcp/config.ts checks the same at startup). Checking
+# here fails before staging instead of after migrations.
+MCP_TOKEN_ENTRY = re.compile(r'[^\s@:,]+@[^\s@:,]+:[0-9a-fA-F]{64}')
 
 
 def production_environment(project):
@@ -45,6 +55,11 @@ def production_environment(project):
         values[key] = value
     if len(values['BETTER_AUTH_SECRET']) < 32:
         raise ValueError('BETTER_AUTH_SECRET must contain at least 32 characters')
+    for key in OPTIONAL_SECRETS:
+        values[key] = os.environ.get(key, '').strip()
+    tokens = values['TASKS_MCP_TOKENS']
+    if tokens and not all(MCP_TOKEN_ENTRY.fullmatch(entry.strip()) for entry in tokens.split(',')):
+        raise ValueError('TASKS_MCP_TOKENS must be comma-separated <member email>:<SHA-256 hex> entries')
     values['COMPOSE_PROJECT_NAME'] = project
     # These application settings are single-line strings. Reject dotenv injection
     # before creating files; errors name the setting and never include its value.
@@ -106,7 +121,7 @@ def deploy():
         # gives the process environment precedence over --env-file, so remove
         # these raw inputs after writing their normalized values to .env.
         compose_environment = {key: value for key, value in os.environ.items()
-                               if key not in PRODUCTION_DEFAULTS}
+                               if key not in PRODUCTION_DEFAULTS and key not in OPTIONAL_SECRETS}
         try:
             result = command(*base, 'config', '--format', 'json', capture_output=True,
                              env=compose_environment)
