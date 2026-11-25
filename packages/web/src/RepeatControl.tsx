@@ -11,6 +11,7 @@ import {
   UNIT_LABELS,
   chooseRepeat,
 } from './repeat';
+import { labelClass as fieldLabelClass, selectClass } from './ui';
 
 type Props = {
   // Prefix for element ids, unique on the page.
@@ -63,10 +64,10 @@ export function RepeatControl({
     .join(' ');
   const choiceId = `${idBase}-repeat`;
   const everyId = `${idBase}-repeat-every`;
-  const labelClass = 'block text-sm font-medium';
+  const labelClass = `${fieldLabelClass} px-1`;
   return (
     <>
-      <div className="flex flex-col gap-2">
+      <div className="flex flex-col gap-1.5">
         {visibleLabels && (
           <label htmlFor={choiceId} className={labelClass}>
             Repeats
@@ -84,7 +85,7 @@ export function RepeatControl({
           onChange={(event) => {
             if (!ignored) onChange(chooseRepeat(form, event.target.value as RepeatChoice, seed));
           }}
-          className={`${className} ${dimmed}`}
+          className={`${className} ${selectClass} ${dimmed}`}
         >
           {REPEAT_CHOICES.map((choice) => (
             <option key={choice.value} value={choice.value}>
@@ -95,7 +96,7 @@ export function RepeatControl({
       </div>
       {form.choice === 'custom' && (
         <>
-          <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-1.5">
             {visibleLabels && (
               <label htmlFor={everyId} className={labelClass}>
                 Every
@@ -118,7 +119,7 @@ export function RepeatControl({
               onChange={(event) => {
                 if (!ignored) onChange({ ...form, every: event.target.value });
               }}
-              className={`${className} w-20 read-only:opacity-60 disabled:cursor-not-allowed disabled:opacity-60`}
+              className={`${className} w-20 text-center read-only:opacity-60 disabled:cursor-not-allowed disabled:opacity-60`}
             />
           </div>
           <select
@@ -130,7 +131,7 @@ export function RepeatControl({
             onChange={(event) => {
               if (!ignored) onChange({ ...form, unit: event.target.value as RepeatUnit });
             }}
-            className={`${className} ${dimmed}`}
+            className={`${className} ${selectClass} ${dimmed}`}
           >
             {REPEAT_UNITS.map((unit) => (
               <option key={unit} value={unit}>
@@ -147,7 +148,7 @@ export function RepeatControl({
 // The visible reason the Repeats control is disabled.
 export function RepeatHint({ idBase, className = '' }: { idBase: string; className?: string }) {
   return (
-    <p id={repeatHintId(idBase)} className={`text-sm text-muted-foreground ${className}`}>
+    <p id={repeatHintId(idBase)} className={`m-0 text-[13px] text-ink-3 ${className}`}>
       {REPEAT_NEEDS_DUE_DATE_HINT}
     </p>
   );
