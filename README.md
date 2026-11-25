@@ -305,18 +305,24 @@ PostgreSQL ends as a deadlock victim (a list delete racing a task update) is
 retried, up to three attempts. Lists are not filtered on the server:
 `GET /api/tasks` returns every task with its `listId` and the browser filters.
 
-The signed-in page shows a tab row above the add form: "All tasks", "Inbox",
-"Assigned to me" (always, also without shared lists) and the user's lists in
-creation order, then a "New list" button and, when
-there are lists, a "Manage lists" button. The tab row is a tablist named
-"Lists" with automatic activation: arrow keys (wrapping at the ends), Home and
-End move to a tab and select it, and only the selected tab is in the Tab
-order. The add form and the task list are the selected tab's tabpanel. The
+The signed-in page uses the Pior Labs shell shared with the other apps: the
+design system's drifting mesh behind a glass rail, with the content beside it.
+The rail holds the views and lists, then a "New list" button (its form opens
+in the rail) and, when there are lists, a "Manage lists" button (its panel
+opens in the main column), and at the end an account control whose menu shows
+who is signed in, the theme choice and "Sign out". The views are "All tasks",
+"Inbox", "Assigned to me" (always, also without shared lists) and the user's
+lists in creation order. They are a tablist named
+"Lists" with automatic activation: arrow keys (Left/Right or Up/Down, wrapping
+at the ends), Home and End move to a tab and select it, and only the selected
+tab is in the Tab order; a "Skip to tasks" link comes before it. The add form
+and the task list are the selected tab's tabpanel. The
 selected view is kept in the URL as `?list=all`, `?list=inbox`,
 `?list=assigned` or `?list=<id>`, so a reload keeps it; with no parameter, or an id that is not one
 of the user's lists, the view is "All tasks", which keeps every task in view by
-default. On a narrow screen the tabs get a row of their own that scrolls
-sideways inside itself, without scrolling the page.
+default. On a narrow screen the rail is a bar above the content and the tabs
+get a row of their own that scrolls sideways inside itself, without scrolling
+the page. The sign-in screen offers the theme choice too.
 
 "Inbox" shows the tasks with no list, a list's tab shows its tasks, "All
 tasks" shows every task, and "Assigned to me" shows the tasks whose assignee is

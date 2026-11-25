@@ -47,6 +47,11 @@ function taskList() {
   while (!lists.every((list) => container.contains(list))) container = container.parentElement!;
   return container;
 }
+// Sign out lives in the account menu: open it, then choose Sign out.
+async function signOut() {
+  await userEvent.click(screen.getByRole('button', { name: 'Household One, account' }));
+  await userEvent.click(screen.getByRole('menuitem', { name: 'Sign out' }));
+}
 // The Completed section starts collapsed; this opens it.
 async function expandCompleted() {
   const toggle = await screen.findByRole('button', { name: /^Completed \(\d+\)$/ });
@@ -134,7 +139,7 @@ describe('task list states', () => {
     signedIn(new Promise<Response>((resolve) => (finish = resolve)));
     render(<App />);
     expect((await screen.findByText('Loading your tasks...')).getAttribute('role')).toBe('status');
-    expect(screen.getByText('Signed in as Household One')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Household One, account' })).toBeTruthy();
     expect(screen.queryByRole('list')).toBeNull();
     expect(screen.queryByLabelText('New task')).toBeNull();
 
@@ -149,7 +154,7 @@ describe('task list states', () => {
     // Completed tasks are visually distinguished.
     expect(screen.getByText('Water the plants').className).toContain('line-through');
     expect(screen.getByText('Buy oat milk').className).not.toContain('line-through');
-    expect(screen.getByRole('button', { name: 'Sign out' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Household One, account' })).toBeTruthy();
   });
 
   test('shows an empty state when there are no tasks', async () => {
@@ -967,7 +972,7 @@ describe('session handling', () => {
     expect(screen.getByRole('alert').textContent).toBe('Your session has ended. Please sign in again.');
     expect(screen.queryByLabelText('New task')).toBeNull();
     expect(screen.queryByRole('list')).toBeNull();
-    expect(screen.queryByText('Signed in as Household One')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Household One, account' })).toBeNull();
   }
 
   test('a 401 while loading tasks returns to the signed-out view', async () => {
@@ -1023,7 +1028,7 @@ describe('session handling', () => {
     await userEvent.type(field, ' in flight{Enter}');
     await userEvent.click(button('Delete "Water the plants"'));
     await userEvent.click(button('Confirm deleting "Water the plants"'));
-    await userEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    await signOut();
     expect(await screen.findByRole('button', { name: 'Sign in with Pior Labs' })).toBeTruthy();
 
     rename.finish(json({ error: 'unauthorized' }, 401));
@@ -1043,7 +1048,7 @@ describe('session handling', () => {
     render(<App />);
     await userEvent.click(await screen.findByRole('checkbox', { name: 'Buy oat milk' }));
     await userEvent.type(screen.getByLabelText('New task'), 'In flight{Enter}');
-    await userEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    await signOut();
     expect(await screen.findByRole('button', { name: 'Sign in with Pior Labs' })).toBeTruthy();
 
     finishUpdate(json({ error: 'unauthorized' }, 401));
@@ -1060,7 +1065,7 @@ describe('session handling', () => {
     reply('POST /api/auth/sign-out', new Promise<Response>((resolve) => (finishSignOut = resolve)));
     render(<App />);
     const checkbox = await screen.findByRole('checkbox', { name: 'Buy oat milk' });
-    await userEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    await signOut();
     await userEvent.click(checkbox);
     await waitFor(() => expect(screen.queryByRole('list')).toBeNull());
 
@@ -1074,7 +1079,7 @@ describe('session handling', () => {
     reply('POST /api/auth/sign-out', json({ success: true }));
     render(<App />);
     await screen.findByRole('checkbox', { name: 'Buy oat milk' });
-    await userEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    await signOut();
     expect(await screen.findByRole('button', { name: 'Sign in with Pior Labs' })).toBeTruthy();
     expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.queryByRole('list')).toBeNull();
@@ -2507,7 +2512,7 @@ describe('notes', () => {
     const notes = await waitFor(() => rowNotes('Buy oat milk')!);
     expect(notes.textContent).toBe(markup);
     expect(notes.querySelector('b, a, strong')).toBeNull();
-    expect(screen.queryByRole('link')).toBeNull();
+    expect(within(taskList()).queryByRole('link')).toBeNull();
     expect(notes.className).toContain('whitespace-pre-wrap');
     expect(notes.className).toContain('max-h-40');
     expect(notes.className).toContain('overflow-y-auto');
@@ -3500,12 +3505,13 @@ describe('shared lists', () => {
     render(<App />);
     await ready();
     await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Assigned to me', 'Errands', 'Home (shared)', 'Groceries (shared)']));
-    // The accessible name says "shared"; the visible marker is an icon.
+    // The accessible name says "shared"; the visible marker is the people icon
+    // in place of the list icon every other list tab has.
     for (const name of ['Home (shared)', 'Groceries (shared)']) {
-      expect(tab(name).querySelector('svg[aria-hidden="true"]')).toBeTruthy();
+      expect(tab(name).querySelector('svg.lucide-users[aria-hidden="true"]')).toBeTruthy();
       expect(tab(name).querySelector('.sr-only')!.textContent).toBe('(shared)');
     }
-    expect(tab('Errands').querySelector('svg')).toBeNull();
+    expect(tab('Errands').querySelector('svg.lucide-users')).toBeNull();
     await userEvent.click(tab('Groceries (shared)'));
     expect(location.search).toBe('?list=12');
     expect(screen.getByText('No tasks in Groceries yet.')).toBeTruthy();
@@ -3520,8 +3526,8 @@ describe('shared lists', () => {
     expect(shareLabels('Mow')).toBe('Assigned to Household Two');
     await openManage();
     expect(manageRow('Errands').querySelector('[data-list-sharing]')).toBeNull();
-    expect(manageRow('Home').querySelector('[data-list-sharing]')!.textContent).toBe(' Shared with household');
-    expect(manageRow('Groceries').querySelector('[data-list-sharing]')!.textContent).toBe(' Shared by Household Two');
+    expect(manageRow('Home').querySelector('[data-list-sharing]')!.textContent).toBe('Shared with household');
+    expect(manageRow('Groceries').querySelector('[data-list-sharing]')!.textContent).toBe('Shared by Household Two');
     expect(within(manageRow('Errands')).getAllByRole('button').map((item) => item.textContent)).toEqual([
       'Rename',
       'Share with household',

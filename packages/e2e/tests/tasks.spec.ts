@@ -22,7 +22,7 @@ async function signIn(page: Page, user: FixtureUser) {
   await page.getByRole('button', { name: 'Sign in with Pior Labs' }).click();
   await expect(page.getByRole('heading', { name: 'Fixture central SSO' })).toBeVisible();
   await page.getByRole('link', { name: user }).click();
-  await expect(page.getByText(`Signed in as ${user}`)).toBeVisible();
+  await expect(page.getByRole('button', { name: `${user}, account` })).toBeVisible();
   await expect(page.getByLabel('New task')).toBeVisible();
 }
 

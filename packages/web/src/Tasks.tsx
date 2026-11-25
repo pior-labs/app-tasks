@@ -1,4 +1,8 @@
-import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
+import { type FormEvent, type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
+import { ChevronRight, LoaderCircle, Plus, RotateCw } from 'lucide-react';
+import { type Account, AppShell } from './AppShell';
+import { BrandMark } from './BrandMark';
+import { cn } from './cn';
 import {
   INCOMPLETE_DUE_DATE_MESSAGE,
   MAX_DUE_DATE,
@@ -10,7 +14,7 @@ import {
   msUntilNextLocalMidnight,
 } from './dueDate';
 import { jsonHeaders, serverError } from './http';
-import { ListBar, MANAGE_LISTS_BUTTON_ID, NEW_LIST_BUTTON_ID, TASKS_PANEL_ID, goneListMessage } from './ListBar';
+import { useListBar, MANAGE_LISTS_BUTTON_ID, NEW_LIST_BUTTON_ID, TASKS_PANEL_ID, goneListMessage } from './ListBar';
 import {
   type List,
   type Member,
@@ -34,6 +38,17 @@ import {
 } from './repeat';
 import { type RowMode, type ShareLabels, type Task, TaskRow, submitOnModEnter } from './TaskRow';
 import { groupTasks, visibleTasks } from './taskGroups';
+import {
+  FieldError,
+  buttonClass,
+  controlClass,
+  focusRing,
+  labelClass,
+  panelClass,
+  sheetClass,
+  smallControlClass,
+  textareaClass,
+} from './ui';
 import { VISIBLE_CHARACTER, characterCount } from './text';
 
 export type { Task };
@@ -203,8 +218,24 @@ const lostTaskMessage = (task: Task) => `"${task.title}" is no longer shared wit
 const vanishedListMessage = (list: List) =>
   `"${list.name}" was deleted or is no longer shared with you, so Inbox is shown.`;
 
-// `me` is the signed-in user's id.
-export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void }) {
+// `me` is the signed-in user's id. `account` is who is signed in, for the
+// shell's account menu, whose Sign out calls `onSignOut`; `onSignedOut` is
+// for a session that ended (a 401). `accountError` is a failed sign-out.
+export function Tasks({
+  me,
+  account,
+  signingOut,
+  accountError,
+  onSignOut,
+  onSignedOut,
+}: {
+  me: number;
+  account: Account;
+  signingOut: boolean;
+  accountError: string;
+  onSignOut: () => void;
+  onSignedOut: () => void;
+}) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [listState, setListState] = useState<'loading' | 'ready' | 'failed'>('loading');
   // The user's lists (for the tab row), loaded next to the tasks. When they
@@ -1182,22 +1213,84 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
     return { kind: 'view' };
   }
 
+  const { nav, panels } = useListBar({
+    lists,
+    me,
+    members,
+    failed: listsState === 'failed',
+    view,
+    onSelect: selectView,
+    onRetry: () => void loadLists(),
+    onCreated: (list) => {
+      setLists((current) => [...current, list]);
+      selectView(list.id);
+    },
+    onUpdated: (list) => {
+      setLists((current) => current.map((item) => (item.id === list.id ? list : item)));
+      // Unsharing cleared the assignees of the list's tasks on the server.
+      if (!list.shared) {
+        const left = closeRowsLeavingAssigned(list);
+        if (left.length > 0) setNotice(left.map(unassignedByListMessage).join(' '));
+        setTasks((current) =>
+          current.some((task) => task.listId === list.id && task.assigneeId !== null)
+            ? current.map((task) => (task.listId === list.id ? { ...task, assigneeId: null } : task))
+            : current,
+        );
+        setEditing((current) => (current?.listId === list.id ? { ...current, assigneeId: null } : current));
+      }
+    },
+    onLeft: (list) => {
+      const { left, lost } = removeList(list, false);
+      setNotice([leftListMessage(list), ...[...left, ...lost].map(lostTaskMessage)].join(' '));
+    },
+    onDeleted: (list, movedTaskIds) => {
+      const { left, lost } = removeList(list, true, movedTaskIds);
+      if (left.length > 0) setNotice(left.map(unassignedByListMessage).join(' '));
+      else if (lost.length > 0) setNotice(lost.map(lostTaskMessage).join(' '));
+      setEditing((current) => (current?.listId === list.id ? { ...current, listId: null, assigneeId: null } : current));
+    },
+    onGone: dropList,
+    onSignedOut,
+    taskCount: (id) => tasks.filter((task) => task.listId === id).length,
+    track,
+  });
+  // Every state of the page sits in the same frame; only the main column changes.
+  const shell = (main: ReactNode, rail: ReactNode = null) => (
+    <AppShell account={account} signingOut={signingOut} onSignOut={onSignOut} nav={rail}>
+      {accountError && (
+        <p
+          role="alert"
+          className="m-0 rounded-2xl border border-[var(--tk-danger-border)] bg-[var(--tk-danger-surface)] px-4 py-3 text-[14px] text-[var(--tk-danger-ink-strong)]"
+        >
+          {accountError}
+        </p>
+      )}
+      {main}
+    </AppShell>
+  );
+
   // The tasks and the lists load together; lists that fail do not hold up the tasks.
   if (listState === 'loading' || (listState === 'ready' && listsState === 'loading')) {
-    return <p role="status">Loading your tasks...</p>;
+    return shell(
+      <div className={cn(panelClass, 'flex items-center gap-3 text-ink-2')}>
+        <LoaderCircle aria-hidden="true" className="size-4 animate-spin motion-reduce:animate-none" />
+        <p role="status" className="m-0">
+          Loading your tasks...
+        </p>
+      </div>,
+    );
   }
   if (listState === 'failed') {
-    return (
-      <div className="space-y-3 rounded-lg border border-border p-5">
-        <p role="alert">Your tasks could not be loaded.</p>
-        <button
-          type="button"
-          onClick={() => void load()}
-          className="rounded-md border border-border px-4 py-2 font-medium"
-        >
+    return shell(
+      <div className={cn(panelClass, 'flex flex-col items-start gap-3')}>
+        <p role="alert" className="m-0 font-medium text-[var(--tk-danger-ink-strong)]">
+          Your tasks could not be loaded.
+        </p>
+        <button type="button" onClick={() => void load()} className={buttonClass('ghost')}>
+          <RotateCw aria-hidden="true" className="size-4" strokeWidth={2.1} />
           Try again
         </button>
-      </div>
+      </div>,
     );
   }
   const mixesLists = view === 'all' || view === 'assigned';
@@ -1303,8 +1396,6 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
       onCancelDelete={() => cancelDelete(task)}
     />
   );
-  const listClass = 'divide-y divide-border rounded-lg border border-border';
-  const headingClass = 'text-sm font-semibold uppercase tracking-wide';
   // Where an added task goes: the selected list, else Inbox.
   const destination = typeof view === 'number' ? viewName(view, lists) : 'Inbox';
   const emptyMessage =
@@ -1313,74 +1404,68 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
       : view === 'assigned'
         ? 'No tasks are assigned to you yet: tasks assigned to you in shared lists show here.'
         : `No tasks in ${viewName(view, lists)} yet.`;
-  return (
-    <div className="space-y-4">
-      <ListBar
-        lists={lists}
-        me={me}
-        members={members}
-        failed={listsState === 'failed'}
-        view={view}
-        onSelect={selectView}
-        onRetry={() => void loadLists()}
-        onCreated={(list) => {
-          setLists((current) => [...current, list]);
-          selectView(list.id);
-        }}
-        onUpdated={(list) => {
-          setLists((current) => current.map((item) => (item.id === list.id ? list : item)));
-          // Unsharing cleared the assignees of the list's tasks on the server.
-          if (!list.shared) {
-            const left = closeRowsLeavingAssigned(list);
-            if (left.length > 0) setNotice(left.map(unassignedByListMessage).join(' '));
-            setTasks((current) =>
-              current.some((task) => task.listId === list.id && task.assigneeId !== null)
-                ? current.map((task) => (task.listId === list.id ? { ...task, assigneeId: null } : task))
-                : current,
-            );
-            setEditing((current) => (current?.listId === list.id ? { ...current, assigneeId: null } : current));
-          }
-        }}
-        onLeft={(list) => {
-          const { left, lost } = removeList(list, false);
-          setNotice([leftListMessage(list), ...[...left, ...lost].map(lostTaskMessage)].join(' '));
-        }}
-        onDeleted={(list, movedTaskIds) => {
-          const { left, lost } = removeList(list, true, movedTaskIds);
-          if (left.length > 0) setNotice(left.map(unassignedByListMessage).join(' '));
-          else if (lost.length > 0) setNotice(lost.map(lostTaskMessage).join(' '));
-          setEditing((current) => (current?.listId === list.id ? { ...current, listId: null, assigneeId: null } : current));
-        }}
-        onGone={dropList}
-        onSignedOut={onSignedOut}
-        taskCount={(id) => tasks.filter((task) => task.listId === id).length}
-        track={track}
-      />
-      <div role="tabpanel" id={TASKS_PANEL_ID} aria-labelledby={tabId(view)} className="space-y-4">
-        <form onSubmit={(event) => void create(event)} noValidate className="space-y-2">
-          <div className="flex flex-wrap items-end gap-3">
-            <div className="flex min-w-48 flex-1 flex-col gap-2">
-              <label htmlFor="new-task-title" className="block text-sm font-medium">
-                New task
-              </label>
-              <input
-                id="new-task-title"
-                ref={titleInput}
-                value={title}
-                onChange={(event) => {
-                  setTitle(event.target.value);
-                  setCreateError(null);
-                }}
-                readOnly={creating}
-                placeholder={`Add to ${destination}`}
-                autoComplete="off"
-                aria-invalid={createError?.field === 'title' || undefined}
-                aria-describedby={createError?.field === 'title' ? 'new-task-error' : undefined}
-                className="min-w-0 rounded-md border border-border bg-card px-4 py-3 text-card-foreground read-only:opacity-60"
-              />
-            </div>
-            <div className="flex flex-col gap-2">
-              <label htmlFor="new-task-due-date" className="block text-sm font-medium">
+  const selectedList = typeof view === 'number' ? lists.find((list) => list.id === view) : undefined;
+  const openCount = shownTasks.filter((task) => !task.completed).length;
+  const doneCount = shownTasks.length - openCount;
+  const kicker =
+    view === 'all'
+      ? 'Every list'
+      : view === 'inbox'
+        ? 'Tasks in no list'
+        : view === 'assigned'
+          ? 'From shared lists'
+          : selectedList?.shared
+            ? selectedList.ownerId === me
+              ? 'Shared with household'
+              : `Shared by ${members.find((member) => member.id === selectedList.ownerId)?.name ?? 'another member'}`
+            : 'List';
+  const headingClass = 'm-0 px-1 font-mono text-[11px] font-semibold tracking-[0.16em] uppercase';
+  const listClass = cn(sheetClass, 'm-0 list-none divide-y divide-[var(--tk-soft-divider)] p-0');
+  return shell(
+    <>
+      <header className="flex flex-wrap items-end justify-between gap-x-5 gap-y-1 px-1 pt-1">
+        <div className="min-w-0">
+          <p className="m-0 text-[13px] tracking-wide text-ink-3">{kicker}</p>
+          <h1 className="my-1 min-w-0 font-serif text-[34px] leading-none font-normal tracking-[-0.03em] break-words text-ink sm:text-[44px]">
+            {viewName(view, lists)}
+          </h1>
+        </div>
+        <p aria-hidden="true" className="m-0 pb-1 font-serif text-[15px] text-ink-2 italic">
+          {openCount === 0 ? 'Nothing open' : `${openCount} open`}
+          {doneCount > 0 && ` \u00B7 ${doneCount} done`}
+        </p>
+      </header>
+      {panels}
+      <div role="tabpanel" id={TASKS_PANEL_ID} aria-labelledby={tabId(view)} className="tk-rise flex flex-col gap-5">
+        <form onSubmit={(event) => void create(event)} noValidate className={cn(panelClass, 'flex flex-col gap-3')}>
+          <label htmlFor="new-task-title" className="sr-only">
+            New task
+          </label>
+          <div className="relative">
+            <Plus
+              aria-hidden="true"
+              className="pointer-events-none absolute top-1/2 left-4 size-4.5 -translate-y-1/2 text-ink-3"
+              strokeWidth={2.2}
+            />
+            <input
+              id="new-task-title"
+              ref={titleInput}
+              value={title}
+              onChange={(event) => {
+                setTitle(event.target.value);
+                setCreateError(null);
+              }}
+              readOnly={creating}
+              placeholder={`Add to ${destination}`}
+              autoComplete="off"
+              aria-invalid={createError?.field === 'title' || undefined}
+              aria-describedby={createError?.field === 'title' ? 'new-task-error' : undefined}
+              className={cn(controlClass, 'min-h-12 w-full min-w-0 pl-11 text-[16px]')}
+            />
+          </div>
+          <div className="flex flex-wrap items-end gap-2.5">
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="new-task-due-date" className={cn(labelClass, 'px-1')}>
                 Due date
               </label>
               <input
@@ -1407,7 +1492,7 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
                 readOnly={creating}
                 aria-invalid={createError?.field === 'dueDate' || undefined}
                 aria-describedby={createError?.field === 'dueDate' ? 'new-task-error' : undefined}
-                className="rounded-md border border-border bg-card px-4 py-3 text-card-foreground read-only:opacity-60"
+                className={smallControlClass}
               />
             </div>
             <RepeatControl
@@ -1420,7 +1505,7 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
               locked={creating}
               invalid={createError?.field === 'repeat'}
               errorId="new-task-error"
-              className="rounded-md border border-border bg-card px-4 py-3 text-card-foreground"
+              className={smallControlClass}
               onChange={(value) => {
                 setRepeat(value);
                 setCreateError(null);
@@ -1429,12 +1514,12 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
             <button
               type="submit"
               aria-disabled={creating || undefined}
-              className="rounded-md bg-primary px-5 py-3 font-medium text-primary-foreground aria-disabled:opacity-50"
+              className={buttonClass('primary', 'default', 'w-full sm:ml-auto sm:w-auto')}
             >
               {creating ? 'Adding...' : 'Add task'}
             </button>
           </div>
-          {dueDate === '' && <RepeatHint idBase="new-task" />}
+          {dueDate === '' && <RepeatHint idBase="new-task" className="px-1" />}
           {/* After Add task in Tab order, so title, date, repeat, Add task stay as they were. */}
           <button
             type="button"
@@ -1444,15 +1529,20 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
               setNotesOpen((open) => !open);
               setCreateError((current) => (current?.field === 'notes' ? null : current));
             }}
-            className="flex items-center gap-2 rounded-md py-1 text-sm font-medium"
+            className={cn(
+              'flex cursor-pointer items-center gap-1.5 self-start rounded-full border-0 bg-transparent px-1 py-1 text-[13px] font-medium text-ink-2 hover:text-ink',
+              focusRing,
+            )}
           >
-            <span aria-hidden="true" className={`inline-block transition-transform ${notesOpen ? 'rotate-90' : ''}`}>
-              &#9656;
-            </span>
+            <ChevronRight
+              aria-hidden="true"
+              className={cn('size-4 transition-transform motion-reduce:transition-none', notesOpen && 'rotate-90')}
+              strokeWidth={2.2}
+            />
             Add notes
           </button>
-          <div id="new-task-notes-area" hidden={!notesOpen} className="flex flex-col gap-2">
-            <label htmlFor="new-task-notes" className="block text-sm font-medium">
+          <div id="new-task-notes-area" hidden={!notesOpen} className="flex flex-col gap-1.5">
+            <label htmlFor="new-task-notes" className={cn(labelClass, 'px-1')}>
               Notes
             </label>
             {/* Enter is a new line here; Ctrl+Enter or Cmd+Enter adds the task. */}
@@ -1468,35 +1558,44 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
               rows={3}
               aria-invalid={createError?.field === 'notes' || undefined}
               aria-describedby={createError?.field === 'notes' ? 'new-task-error' : undefined}
-              className="min-w-0 rounded-md border border-border bg-card px-4 py-3 text-card-foreground read-only:opacity-60"
+              className={cn(controlClass, textareaClass, 'min-w-0')}
             />
           </div>
           {createError && (
-            <p id="new-task-error" role="alert" className="text-sm text-destructive">
+            <FieldError id="new-task-error" className="px-1">
               {createError.message}
-            </p>
+            </FieldError>
           )}
         </form>
         {updateError && (
-          <p role="alert" className="text-sm text-destructive">
+          <p
+            role="alert"
+            className="m-0 rounded-2xl border border-[var(--tk-danger-border)] bg-[var(--tk-danger-surface)] px-4 py-3 text-[14px] text-[var(--tk-danger-ink-strong)]"
+          >
             {updateError}
           </p>
         )}
         {notice && (
-          <p role="status" className="text-sm text-muted-foreground">
+          <p
+            role="status"
+            className="m-0 rounded-2xl bg-[rgba(var(--surface-rgb),0.75)] px-4 py-3 text-[14px] text-muted-foreground shadow-[inset_0_0_0_1px_rgba(var(--frost-rgb),0.6)] backdrop-blur-md"
+          >
             {notice}
           </p>
         )}
         {shownTasks.length === 0 ? (
-          <p className="rounded-lg border border-dashed border-border p-5 text-muted-foreground">{emptyMessage}</p>
+          <div className="flex flex-col items-center gap-3 rounded-[26px] border border-dashed border-ink/15 px-6 py-10 text-center">
+            <BrandMark size={40} className="opacity-60" />
+            <p className="m-0 max-w-sm text-ink-2">{emptyMessage}</p>
+          </div>
         ) : (
-          <div className="space-y-6">
+          <div className="flex flex-col gap-6">
             {/* Each group is a list named by its heading: "Overdue, list, 2 items". */}
             {groups.open.map((group) => (
-              <section key={group.key} aria-labelledby={`group-${group.key}`} className="space-y-2">
+              <section key={group.key} aria-labelledby={`group-${group.key}`} className="flex flex-col gap-2">
                 <h2
                   id={`group-${group.key}`}
-                  className={`${headingClass} ${group.key === 'overdue' ? 'text-destructive' : 'text-muted-foreground'}`}
+                  className={`${headingClass} ${group.key === 'overdue' ? 'text-destructive' : 'text-ink-3'}`}
                 >
                   {group.heading}
                 </h2>
@@ -1506,23 +1605,28 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
               </section>
             ))}
             {groups.completed.length > 0 && (
-              <section aria-labelledby="group-completed" className="space-y-2">
-                <h2 id="group-completed" className={`${headingClass} text-muted-foreground`}>
+              <section aria-labelledby="group-completed" className="flex flex-col gap-2">
+                <h2 id="group-completed" className={`${headingClass} text-ink-3`}>
                   <button
                     type="button"
                     ref={completedToggle}
                     aria-expanded={completedOpen}
                     aria-controls="completed-tasks"
                     onClick={() => setCompletedOpen((open) => !open)}
-                    className="flex items-center gap-2 rounded-md py-1 uppercase tracking-wide"
+                    className={cn(
+                      '-ml-1 flex cursor-pointer items-center gap-1.5 rounded-full border-0 bg-transparent px-1 py-1 font-[inherit] tracking-[inherit] text-inherit uppercase hover:text-ink',
+                      focusRing,
+                    )}
                   >
-                    <span aria-hidden="true" className={`inline-block transition-transform ${completedOpen ? 'rotate-90' : ''}`}>
-                      &#9656;
-                    </span>
+                    <ChevronRight
+                      aria-hidden="true"
+                      className={cn('size-3.5 transition-transform motion-reduce:transition-none', completedOpen && 'rotate-90')}
+                      strokeWidth={2.4}
+                    />
                     Completed ({groups.completed.length})
                   </button>
                 </h2>
-                <ul id="completed-tasks" aria-labelledby="group-completed" hidden={!completedOpen} className={listClass}>
+                <ul id="completed-tasks" aria-labelledby="group-completed" hidden={!completedOpen} className={cn(listClass, 'opacity-95')}>
                   {groups.completed.map(renderRow)}
                 </ul>
               </section>
@@ -1530,6 +1634,7 @@ export function Tasks({ me, onSignedOut }: { me: number; onSignedOut: () => void
           </div>
         )}
       </div>
-    </div>
+    </>,
+    nav,
   );
 }
