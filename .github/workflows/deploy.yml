@@ -63,8 +63,10 @@ jobs:
       CENTRAL_AUTH_ISSUER: ${{ vars.CENTRAL_AUTH_ISSUER }}
       CENTRAL_AUTH_CLIENT_ID: ${{ vars.CENTRAL_AUTH_CLIENT_ID }}
       PLATFORM_DATABASE_URL_FILE: ${{ vars.PLATFORM_DATABASE_URL_FILE }}
+      TASKS_TIMEZONE: ${{ vars.TASKS_TIMEZONE }}
       CENTRAL_AUTH_CLIENT_SECRET: ${{ secrets.CENTRAL_AUTH_CLIENT_SECRET }}
       BETTER_AUTH_SECRET: ${{ secrets.BETTER_AUTH_SECRET }}
+      TASKS_MCP_TOKENS: ${{ secrets.TASKS_MCP_TOKENS }}
       EXPECTED_SHA: ${{ needs.resolve.outputs.sha }}
       EXPECTED_RUN_ID: ${{ needs.resolve.outputs.run_id }}
       EXPECTED_ATTEMPT: ${{ needs.resolve.outputs.attempt }}

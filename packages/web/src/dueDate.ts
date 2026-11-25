@@ -4,7 +4,7 @@
 // arithmetic, which has no daylight saving gaps, so no local time conversion
 // can move a due date to another day.
 
-// The supported range, the same as the API's (packages/api/src/tasks.ts).
+// The supported range, the same as the API's (packages/api/src/services/tasks.ts).
 export const MIN_DUE_DATE = '2025-01-01';
 export const MAX_DUE_DATE = '2100-12-31';
 export const DUE_DATE_RANGE_MESSAGE = 'Choose a due date from January 1, 2025 to December 31, 2100.';

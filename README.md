@@ -75,7 +75,9 @@ are persisted in Tasks' own database, alongside the task-domain `tasks` table.
 
 `GET /api/me` requires an unexpired local session and returns only ID/name/email.
 `/health` and `/api/health` are public liveness endpoints. Other API routes after
-the auth boundary require a session. Sign-out revokes only the Tasks session;
+the auth boundary require a session, except `POST /api/mcp`, which takes a member
+token instead (see [MCP](#mcp)); a session does not authorize it and a token
+authorizes nothing else. Sign-out revokes only the Tasks session;
 provider logout is disabled. The web app starts sign-in with
 `POST /api/auth/sign-in/social` and `{ "provider": "auth-pior" }`.
 Cookies use the unique `tasks` prefix: `tasks.session_token` and the pinned
@@ -628,6 +630,131 @@ after the task (for example `Edit "Buy oat milk"`).
   A completion change answered with 404 for a task this page has already
   removed shows no error.
 
+## MCP
+
+Agents and MCP clients (Claude Code, Claude desktop, ChatGPT desktop, later the
+household chatbot) can read and change a member's tasks through the MCP
+endpoint `https://tasks.szarans.ca/api/mcp`. Telling an agent "Add for tomorrow
+to buy broccoli" ends with an Inbox task "Buy broccoli" due on the household's
+tomorrow, which the member sees in the web app.
+
+The tools call the same code as the web API (`packages/api/src/services/`), so
+they follow exactly the web app's rules (titles, notes, due dates, repeats,
+lists, sharing, assignees) and refuse in the same words:
+
+| Tool | Kind | Does |
+| --- | --- | --- |
+| `list_lists` | read only | Inbox, the member's lists and every shared list, with whose each is |
+| `list_tasks` | read only | Tasks matching every filter given: `list` (name, id or `Inbox`), `due_from`/`due_to`, `overdue`, `assigned_to_me`, `include_completed` (default false), `search` (title text); at most 100 (`limit` up to 200), by due date (none last) then oldest first, saying when more matched |
+| `add_task` | write | `title`, optional `due_date`, `notes`, `repeat` `{ every, unit }`, `list` (default Inbox) and `assignee` (shared lists only) |
+| `update_task` | write, idempotent | `task_id` plus any of `title`, `due_date`, `notes`, `repeat`, `list`, `assignee`; `null` clears one, `list: null` or `"Inbox"` moves to Inbox |
+| `complete_task` | write | Ticks a task off; a repeating task gets its next occurrence, which the result names |
+| `reopen_task` | write | Undoes completing; an open next occurrence it created is removed again |
+| `delete_task` | destructive | Deletes a task permanently, so clients ask for confirmation |
+
+- **Who it acts as.** A member token acts as one member, exactly as that member
+  in the web app: their Inbox and lists, and every shared list. Another
+  member's private tasks and lists behave as not found. Tasks added through MCP
+  record the member as their creator, and completions as who completed them.
+  No tool takes a user, owner or email argument.
+- **Names.** A list or assignee can be given by name, matched like list names in
+  the web app (letter case, spacing and fullwidth forms do not matter), or by
+  id; `Inbox` means no list and `me` means the member. A name that fits more
+  than one list or member is an error naming the candidates and changes
+  nothing. Results name people by display name, never by email address.
+- **Today.** Agents get "today" from the server, in the household's timezone
+  `TASKS_TIMEZONE` (default `America/Toronto`): the server instructions and
+  every result state it, and the tools ask agents to turn "tomorrow" into a
+  date from it. Completing a repeating task schedules from that date.
+  `overdue` means open and due before it.
+- **Not here.** Lists cannot be created, renamed, shared or deleted through MCP.
+  There is no stdio transport.
+
+### Member tokens
+
+Each token is 32 random bytes and acts as one member, identified by email. The
+server keeps only SHA-256 hashes, in the `TASKS_MCP_TOKENS` `PRODUCTION` secret:
+comma-separated `<member email>:<sha256 hex>` entries (see
+[deployment](docs/DEPLOYMENT.md#mcp-member-tokens)). To create one:
+
+```sh
+pnpm --filter @tasks/api mcp:token one@example.com
+```
+
+It prints the token once, for the member's MCP client, and the entry to add to
+`TASKS_MCP_TOKENS`; redeploy to apply it. The member must have signed in to
+Tasks once; until then the token answers 401. The email is looked up on every
+request, so no restart is needed after that first sign-in. If the member's
+email changes in service-auth, issue a new entry for the new email.
+
+- **Rotate.** Create a new token, add its entry next to the old one (one email
+  may have several entries), redeploy, switch the client, then remove the old
+  entry and redeploy again.
+- **Revoke.** Remove the entry and redeploy. Without any entry the endpoint
+  answers 401 to everything.
+- A malformed `TASKS_MCP_TOKENS` or `TASKS_TIMEZONE` stops the API at startup
+  (the deploy checks the token format before staging).
+
+Requests are checked in this order: an `Origin` header other than the app's
+answers 403; a missing, wrong or revoked token, or one for an email with no
+Tasks user, answers 401 with `WWW-Authenticate: Bearer realm="tasks"` (plus
+`error="invalid_token"` when a token was sent); a method other than POST
+answers 405. Tokens are compared by hash in constant time. The endpoint is
+stateless Streamable HTTP with JSON responses: no sessions and no server
+push. Nothing about a request is logged except a fixed reason for a refusal
+and the tool name of a server error; never the token, headers, body or task
+content. The design is recorded in
+[decision 0001](docs/decisions/0001-mcp-member-tokens.md).
+
+### Client setup
+
+The endpoint is on the private network, like the rest of Tasks: it is
+reachable through platform Caddy from the household LAN or Tailscale only.
+Clients must run on a computer that can reach `https://tasks.szarans.ca`.
+**Hosted cloud connectors cannot reach it** (for example Claude's web and
+desktop "Connectors" and ChatGPT's hosted connectors, which call the server
+from the provider's cloud). Keep tokens in private client configuration, never
+in source control.
+
+Claude Code:
+
+```sh
+claude mcp add --transport http tasks https://tasks.szarans.ca/api/mcp \
+  --header "Authorization: Bearer $TASKS_MCP_TOKEN"
+```
+
+Claude desktop, through a local bridge in `claude_desktop_config.json` (the
+bridge runs on the computer, so it reaches the private network):
+
+```json
+{
+  "mcpServers": {
+    "tasks": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://tasks.szarans.ca/api/mcp", "--header", "Authorization:${TASKS_AUTH}"],
+      "env": { "TASKS_AUTH": "Bearer <token>" }
+    }
+  }
+}
+```
+
+ChatGPT desktop: **Settings, MCP servers, Add server**, choose **Streamable
+HTTP**, enter `https://tasks.szarans.ca/api/mcp` and set the header
+`Authorization: Bearer <token>` in the client's private settings. With
+`~/.codex/config.toml`:
+
+```toml
+[mcp_servers.tasks]
+url = "https://tasks.szarans.ca/api/mcp"
+bearer_token_env_var = "TASKS_MCP_TOKEN"
+```
+
+For local development the endpoint is `http://localhost:5173/api/mcp` (through
+the Vite proxy) with `TASKS_MCP_TOKENS` in `.env.local`. The end-to-end API
+server (`packages/api/test/e2e-server.ts`) also reads `TASKS_MCP_TOKENS` and
+`TASKS_TIMEZONE`, so the endpoint can be tried against fixture users; see
+`packages/api/test/mcp-*.test.ts` for SDK client examples.
+
 ## Verification
 
 ```sh
@@ -696,7 +823,18 @@ every member's rights on a shared list with duplicate names checked against
 the owner's lists, ownership on moves, deleting a shared list into each
 creator's Inbox, deletes and unshares racing adds, moves and completions
 without a 500, attribution including the next occurrence, every assignment
-rule, and the task shape. They do not prove hosted SSO.
+rule, and the task shape. MCP tests (`packages/api/test/mcp-*.test.ts`) use
+the official SDK client over a real HTTP listener: `mcp-auth` covers the
+initialize handshake, the seven tools and their annotations, every way a
+request can be refused (no, malformed, wrong, revoked and unresolved tokens,
+no configured tokens, cookie only, a token on other `/api` routes, a foreign
+`Origin`, other methods) and that logs hold no token or task content;
+`mcp-tools` covers the broccoli example against the web API, the household
+today across a UTC midnight, cross-member isolation and shared lists,
+every `list_tasks` filter and the result bound, each write compared with the
+matching web API call, and lookups by name; `mcp-config` covers parsing
+`TASKS_MCP_TOKENS` and `TASKS_TIMEZONE`, the token script and startup failures.
+They do not prove hosted SSO.
 
 Web component tests (`packages/web/src/*.test.tsx`) use Vitest, jsdom and
 Testing Library with `fetch` stubbed. They cover the signed-out view, the task
@@ -828,6 +966,7 @@ Set these `PRODUCTION` environment secrets:
 - `COMPOSE_PROJECT_NAME`: `tasks` for a new project.
 - `CENTRAL_AUTH_CLIENT_SECRET`: the same private value as Auth's `TASKS_CLIENT_SECRET`.
 - `BETTER_AUTH_SECRET`: a separate stable application session secret, at least 32 characters.
+- `TASKS_MCP_TOKENS` (optional): MCP member token hashes; see [MCP member tokens](docs/DEPLOYMENT.md#mcp-member-tokens).
 
 Public runtime configuration has versioned production defaults in
 `scripts/deploy.py`, with optional `PRODUCTION` environment variable overrides. See the complete

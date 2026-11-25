@@ -6,12 +6,15 @@ import { createAuth } from './auth.js';
 import * as schema from './db/schema.js';
 import { authEnvironment, databaseConnection } from './env.js';
 import { loadEnvironment } from './load-env.js';
+import { mcpEnvironment } from './mcp/config.js';
 
 loadEnvironment();
 const connection = databaseConnection();
 const client = postgres(connection.url, connection.options);
 const env = authEnvironment();
-const app = createApp(createAuth(client, env), drizzle(client, { schema }), env.baseURL);
+// TASKS_MCP_TOKENS and TASKS_TIMEZONE; a malformed value stops startup here.
+const mcp = mcpEnvironment();
+const app = createApp(createAuth(client, env), drizzle(client, { schema }), env.baseURL, { mcp });
 const server = serve({
   fetch: app.fetch,
   port: Number(process.env.API_PORT ?? 3000),

@@ -1,5 +1,5 @@
 // Text rules shared by task titles and list names. They mirror the server
-// (packages/api/src/tasks.ts) so the forms and the API agree. A text made only
+// (packages/api/src/services/tasks.ts) so the forms and the API agree. A text made only
 // of whitespace, control characters and invisible "default ignorable" code
 // points (such as a zero width space) is treated as empty; visible text is
 // sent unchanged apart from trimming.

@@ -1,18 +1,26 @@
 import { Hono } from 'hono';
 import type { AppAuth } from './auth.js';
 import { createListRoutes } from './lists.js';
+import { type McpConfig, DEFAULT_TIMEZONE } from './mcp/config.js';
+import { createMcpHandler } from './mcp/route.js';
 import { createMemberRoutes } from './members.js';
-import { createTaskRoutes, type AppDatabase } from './tasks.js';
+import type { AppDatabase } from './services/database.js';
+import { createTaskRoutes } from './tasks.js';
 
 export type AppEnv = { Variables: { user: AppAuth['$Infer']['Session']['user'] } };
 
 // appOrigin is the configured application origin (BETTER_AUTH_URL). `now` is
-// the server clock; tests replace it to pin the server's date.
+// the server clock; tests replace it to pin the server's date. `mcp` is the
+// MCP endpoint's member tokens and household timezone (src/mcp/config.ts);
+// without it no token is accepted.
 export function createApp(
   auth: AppAuth,
   db: AppDatabase,
   appOrigin: string,
-  { now = () => new Date() }: { now?: () => Date } = {},
+  {
+    now = () => new Date(),
+    mcp = { tokens: [], timeZone: DEFAULT_TIMEZONE },
+  }: { now?: () => Date; mcp?: McpConfig } = {},
 ) {
   const app = new Hono<AppEnv>();
   app.get('/health', (c) => c.json({ ok: true }));
@@ -22,6 +30,10 @@ export function createApp(
     await next();
   });
   app.on(['GET', 'POST'], '/api/auth/*', (c) => auth.handler(c.req.raw));
+  // The MCP endpoint authorizes with a member token, not a session, so it
+  // comes before the session middleware. Only this exact path is exempt;
+  // every other method and path below /api still needs a session.
+  app.all('/api/mcp', createMcpHandler(db, appOrigin, { config: mcp, now }));
   // Everything added under /api after this middleware requires a real DB session.
   app.use('/api/*', async (c, next) => {
     c.header('Cache-Control', 'no-store');

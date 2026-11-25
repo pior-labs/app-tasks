@@ -12,6 +12,7 @@ import { createAuth } from '../src/auth.js';
 import { createApp } from '../src/app.js';
 import * as schema from '../src/db/schema.js';
 import { databaseConnection } from '../src/env.js';
+import type { McpConfig } from '../src/mcp/config.js';
 
 // Ways the fixture can corrupt the ID token it issues, to prove each is rejected.
 export type IdTokenMode =
@@ -40,7 +41,9 @@ export const fixtureUsers = [
 ];
 
 // Always allocate a new database. Never migrate/truncate an existing database.
-export async function createFixture(baseURL = 'http://localhost:5173') {
+// `mcp` configures the MCP endpoint (member tokens, household timezone); by
+// default no token is accepted.
+export async function createFixture(baseURL = 'http://localhost:5173', { mcp }: { mcp?: McpConfig } = {}) {
   let container: string | undefined;
   let adminURL = process.env.TEST_DATABASE_URL;
   if (!adminURL) {
@@ -229,7 +232,7 @@ export async function createFixture(baseURL = 'http://localhost:5173') {
     // clock shifted by a fixed offset, so time keeps running from a set moment.
     let clockOffset: number | null = null;
     const now = () => new Date(Date.now() + (clockOffset ?? 0));
-    const app = createApp(auth, drizzle(client, { schema }), baseURL, { now });
+    const app = createApp(auth, drizzle(client, { schema }), baseURL, { now, mcp });
     return {
       app,
       auth,
