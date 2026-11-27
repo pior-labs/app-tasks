@@ -326,7 +326,10 @@ there are lists, "Manage lists". Opening it focuses the checked item; arrow
 keys (wrapping at the ends), Home and End move between the items, Enter, Space
 or a click chooses, and Escape or a click outside closes it and hands focus
 back to the title (the down and up arrows on the title open it too). Choosing
-a view closes the menu with focus on the title. A "Skip to tasks" link comes
+a view closes the menu with focus on the title. The menu is open only while
+focus is in it: when focus moves elsewhere it closes, and when the item with
+focus leaves the page (a refresh took its list away, or the lists failed to
+load) it closes with focus on the title, where the arrows open it again. A "Skip to tasks" link comes
 first in the Tab order, then the title. The shown view is kept in the URL as
 `?list=all`, `?list=inbox`, `?list=assigned` or `?list=<id>`, so a reload
 keeps it; with no parameter, or an id that is not one of the user's lists, the
@@ -494,7 +497,8 @@ delete, or focus: a refresh that overlaps a change the page is making is
 dropped and the next trigger tries again, and a focused control whose row
 moves to another group keeps focus in its new place. Focus on a control a
 refresh takes away goes to the next row still shown, else the previous one,
-else the + button; from a view picker item, to the view title; from a Manage
+else the + button; from a view picker item, to the view title (the menu
+closes); from a Manage
 lists entry, to the nearest list left there, else the view title; and from a
 List option of the open add sheet, to its List chip. A refresh never moves
 focus out of the open add sheet, nor closes it. If the selected list is
@@ -538,7 +542,11 @@ backdrop close it and return focus to the + button; the draft (title, date,
 repeat, list and notes) is kept for the next time it opens. "Add task" (or
 Enter in the title) adds the task; after a successful add the sheet closes,
 the draft is cleared and focus returns to the + button. A failed or refused add
-keeps the sheet open with the draft. While the add is pending the sheet's
+keeps the sheet open with the draft. A notice or an error posted on the inert
+page while the sheet is open (a refresh's notice, a failed save, the lists
+failing to load) is said again from live regions inside the sheet, so screen
+readers still announce it; the sheet's own errors are said once, where they
+show. While the add is pending the sheet's
 controls are locked (`readOnly` and `aria-disabled`, never `disabled`), a
 second submit is ignored, and the sheet cannot be closed. The sheet rises in
 and the menus pop open with short animations that reduced motion turns off.
@@ -895,7 +903,8 @@ list states, the calm layout (one column, the add sheet with its focus trap,
 Escape, Cancel and backdrop, the kept draft, each chip and its request body,
 the pending lock, the List chip's destination and notice, and where focus goes
 when the + button, the view title or the List chip stand in for a control that
-is gone, after a user action or a refresh, with the sheet or the picker open),
+is gone, after a user action or a refresh, with the sheet or the picker open,
+messages from the inert page said from the sheet, and lists of the same name),
 creating, completing, renaming and deleting tasks, due dates in
 the add sheet and in edit mode, grouping and sorting, the Completed section,
 date labels and overdue marking, the midnight and visibility refresh (with a
@@ -969,7 +978,9 @@ notice for a task added to another list; check the "Show N done" toggle; check
 at 1280px and 390px that the page is one column whose last task clears the +
 button, and that reduced motion stops the sheet and menu animations; and, with
 two members, that a refresh taking away the focused control moves focus to the
-+ button, the view title or the List chip, never out of the open sheet.
++ button, the view title or the List chip, never out of the open sheet (the
+view picker closing when its item goes, and the sheet saying the page's
+notice), and that two lists of the same name each take their own tasks.
 Lists scenarios (`packages/e2e/tests/lists.spec.ts`) create lists and switch
 between them through the view picker with the keyboard only; add tasks in a named list and in "All
 tasks" and see them in the right views after a reload, with the URL keeping the

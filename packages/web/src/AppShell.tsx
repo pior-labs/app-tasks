@@ -6,6 +6,10 @@ import { focusRing, menuClass, menuItemClass } from './ui';
 
 export type Account = { name: string; email: string };
 
+// The page behind a modal, which is inert while the modal is open: the add
+// sheet repeats the messages posted in it then (see AddSheet.tsx).
+export const PAGE_ID = 'page';
+
 // The design system's drifting mesh and grain, the ambient layer every screen
 // sits on. Fixed and inert: blobs at z-index 0, grain at 1, so content that
 // wants to be above them takes 2.
@@ -168,7 +172,7 @@ export function AppShell({
   return (
     <div className="relative min-h-dvh text-[15px] leading-[1.55] text-ink">
       <MeshBackdrop />
-      <div inert={inert} className="relative z-2">
+      <div id={PAGE_ID} inert={inert} className="relative z-2">
         <a
           href="#main-content"
           className={cn(

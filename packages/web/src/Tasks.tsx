@@ -1,7 +1,7 @@
 import { type FormEvent, type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { LoaderCircle, Plus, RotateCw } from 'lucide-react';
 import { type AddDetail, type AddDraft, type AddField, AddSheet, detailOf } from './AddSheet';
-import { type Account, AppShell } from './AppShell';
+import { type Account, AppShell, PAGE_ID } from './AppShell';
 import { BrandMark } from './BrandMark';
 import { cn } from './cn';
 import {
@@ -1501,6 +1501,7 @@ export function Tasks({
       {sheetOpen && (
         <AddSheet
           id={ADD_SHEET_ID}
+          pageId={PAGE_ID}
           draft={{ ...draft, listId: addListId }}
           lists={lists}
           today={today}

@@ -1,4 +1,4 @@
-import { type KeyboardEvent, useEffect, useRef, useState } from 'react';
+import { type FocusEvent, type KeyboardEvent, useEffect, useRef, useState } from 'react';
 import { Check, ChevronDown, Inbox, Layers, ListTodo, Plus, Settings2, UserCheck, Users } from 'lucide-react';
 import { cn } from './cn';
 import { BUILT_IN_VIEWS, type List, type View, viewItemId, viewName } from './lists';
@@ -28,6 +28,10 @@ type Props = {
 // list" and "Manage lists". Arrow keys, Home and End move between the items
 // (focus only; Enter, Space or a click chooses). Escape or a click outside
 // closes it and hands focus back to the title; Tab closes it and moves on.
+// The menu is open only while focus is in it: when focus goes elsewhere, or
+// the item it was on leaves the page (a refresh took the list away, or the
+// lists failed to load), the menu closes, in the second case with focus on
+// the title, where the arrows open it again.
 export function ViewPicker({ lists, view, listActions, onSelect, onNewList, onManageLists }: Props) {
   const [open, setOpen] = useState(false);
   const holder = useRef<HTMLDivElement>(null);
@@ -36,16 +40,19 @@ export function ViewPicker({ lists, view, listActions, onSelect, onNewList, onMa
   // The item to focus once the menu is on the page.
   const focusOnOpen = useRef<'checked' | 'first' | 'last'>('checked');
   const items = () => [...(menu.current?.querySelectorAll<HTMLElement>('[role^="menuitem"]') ?? [])];
-  useEffect(() => {
-    if (!open) return;
+  const focusItem = (where: 'checked' | 'first' | 'last') => {
     const all = items();
     const target =
-      focusOnOpen.current === 'first'
+      where === 'first'
         ? all[0]
-        : focusOnOpen.current === 'last'
+        : where === 'last'
           ? all[all.length - 1]
           : (all.find((item) => item.getAttribute('aria-checked') === 'true') ?? all[0]);
     target?.focus();
+  };
+  useEffect(() => {
+    if (!open) return;
+    focusItem(focusOnOpen.current);
     const onPointer = (event: MouseEvent) => {
       if (holder.current?.contains(event.target as Node)) return;
       setOpen(false);
@@ -60,18 +67,35 @@ export function ViewPicker({ lists, view, listActions, onSelect, onNewList, onMa
     return () => document.removeEventListener('mousedown', onPointer);
   }, [open]);
 
+  // After every render: an open menu whose focused item has left the page
+  // (focus fell to the body) closes, and focus goes to the title, as after
+  // Escape. This runs before Tasks' own refresh focus rules, which then find
+  // focus on the page and leave it.
+  useEffect(() => {
+    if (!open) return;
+    const active = document.activeElement;
+    if (!active || active === document.body) close();
+  });
+
   const close = () => {
     setOpen(false);
     trigger.current?.focus();
   };
   const openWith = (where: 'checked' | 'first' | 'last') => {
     focusOnOpen.current = where;
-    setOpen(true);
+    // Already open (focus is on the title): move into the menu now.
+    if (open) focusItem(where);
+    else setOpen(true);
+  };
+  // Focus moved away from the title and the menu (a save's error field, for
+  // example): the menu closes and focus stays where it went.
+  const onBlur = (event: FocusEvent) => {
+    const next = event.relatedTarget as Node | null;
+    if (open && next && !holder.current?.contains(next)) setOpen(false);
   };
 
   function onTriggerKeyDown(event: KeyboardEvent) {
-    // Focus can be back on the title while the menu is open (a refresh took
-    // away the item it was on): Escape still closes it.
+    // Should focus be on the title while the menu is open, Escape still closes it.
     if (event.key === 'Escape' && open) {
       event.preventDefault();
       event.stopPropagation();
@@ -119,7 +143,7 @@ export function ViewPicker({ lists, view, listActions, onSelect, onNewList, onMa
   };
   const views: View[] = [...BUILT_IN_VIEWS, ...lists.map((list) => list.id)];
   return (
-    <div ref={holder} className="relative min-w-0">
+    <div ref={holder} onBlur={onBlur} className="relative min-w-0">
       <h1 className="m-0 min-w-0">
         <button
           ref={trigger}
@@ -153,6 +177,10 @@ export function ViewPicker({ lists, view, listActions, onSelect, onNewList, onMa
         aria-label="Views and lists"
         hidden={!open}
         onKeyDown={onMenuKeyDown}
+        // A press on the menu's padding or a separator keeps focus on its item.
+        onMouseDown={(event) => {
+          if (!(event.target as Element).closest('[role^="menuitem"]')) event.preventDefault();
+        }}
         className={cn(
           menuClass,
           'tk-pop absolute top-full left-0 z-40 mt-1 max-h-[min(70dvh,32rem)] w-64 max-w-[calc(100vw-2.5rem)] overflow-y-auto',

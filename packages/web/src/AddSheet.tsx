@@ -1,4 +1,4 @@
-import { type FormEvent, type KeyboardEvent, type ReactNode, type RefObject, useEffect, useRef } from 'react';
+import { type FormEvent, type KeyboardEvent, type ReactNode, type RefObject, useEffect, useRef, useState } from 'react';
 import { CalendarDays, List as ListIcon, Repeat as RepeatIcon, StickyNote, X } from 'lucide-react';
 import { cn } from './cn';
 import { MAX_DUE_DATE, MIN_DUE_DATE, addDays, dueLabel, holdsNoDate } from './dueDate';
@@ -29,6 +29,8 @@ export type AddDraft = {
 
 type Props = {
   id: string;
+  // The id of the page behind the sheet, inert while the sheet is open.
+  pageId: string;
   draft: AddDraft;
   lists: List[];
   // The browser's local date, for the date shortcuts and the chip's words.
@@ -46,6 +48,51 @@ type Props = {
 };
 
 const ERROR_ID = 'new-task-error';
+
+// While the sheet is open the page behind it is inert, which takes the page's
+// live regions out of the accessibility tree: a notice or an error posted
+// there meanwhile (a refresh's "... so Inbox is shown.", a failed save, the
+// lists failing to load) would not be announced. This watches the page's
+// live regions and returns each message that appears there, to be said again
+// in the sheet's own live regions: status-like ones politely, alerts
+// assertively. Messages already shown when the sheet opened are not repeated,
+// and the sheet's own errors are outside the page, so they are said once.
+function usePageMessages(pageId: string) {
+  const [messages, setMessages] = useState({ polite: '', assertive: '' });
+  useEffect(() => {
+    const page = document.getElementById(pageId);
+    if (!page) return;
+    const regions = () =>
+      [...page.querySelectorAll<HTMLElement>('[role="status"], [role="alert"], [aria-live]')].filter(
+        (region) => region.getAttribute('aria-live') !== 'off' && !region.closest('[hidden]'),
+      );
+    const text = (region: HTMLElement) => region.textContent?.trim() ?? '';
+    // What each region said last; a region that is new since then counts as changed.
+    const said = new WeakMap<HTMLElement, string>();
+    for (const region of regions()) said.set(region, text(region));
+    const observer = new MutationObserver(() => {
+      const polite: string[] = [];
+      const assertive: string[] = [];
+      for (const region of regions()) {
+        const now = text(region);
+        if (said.get(region) === now) continue;
+        said.set(region, now);
+        if (now === '') continue;
+        const urgent = region.getAttribute('role') === 'alert' || region.getAttribute('aria-live') === 'assertive';
+        (urgent ? assertive : polite).push(now);
+      }
+      if (polite.length > 0 || assertive.length > 0) {
+        setMessages((current) => ({
+          polite: polite.length > 0 ? polite.join(' ') : current.polite,
+          assertive: assertive.length > 0 ? assertive.join(' ') : current.assertive,
+        }));
+      }
+    });
+    observer.observe(page, { childList: true, subtree: true, characterData: true });
+    return () => observer.disconnect();
+  }, [pageId]);
+  return messages;
+}
 const chipValue = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 
 // One detail of the new task as a pill: the button names the detail and its
@@ -122,6 +169,7 @@ function Chip({
 // controls are locked with readOnly and aria-disabled, like the rest of Tasks.
 export function AddSheet({
   id,
+  pageId,
   draft,
   lists,
   today,
@@ -136,6 +184,7 @@ export function AddSheet({
   onClose,
 }: Props) {
   const sheet = useRef<HTMLFormElement>(null);
+  const pageMessages = usePageMessages(pageId);
   // Focus starts in the title field.
   useEffect(() => {
     titleRef.current?.focus();
@@ -190,9 +239,11 @@ export function AddSheet({
   const list = draft.listId === null ? undefined : lists.find((item) => item.id === draft.listId);
   const listText = list?.name ?? 'Inbox';
   const hasNotes = draft.notes.trim() !== '';
-  const option = (label: string, selected: boolean, pick: () => void, extra?: ReactNode) => (
+  // Keyed by what it chooses, not its label: two lists can share a name
+  // (names are unique per owner only).
+  const option = (key: string, label: string, selected: boolean, pick: () => void, extra?: ReactNode) => (
     <button
-      key={label}
+      key={key}
       type="button"
       aria-pressed={selected}
       aria-disabled={creating || undefined}
@@ -226,6 +277,13 @@ export function AddSheet({
         className="tk-sheet relative flex max-h-[calc(100dvh-1.5rem)] w-full max-w-xl flex-col overflow-y-auto rounded-t-[30px] bg-[var(--tk-sheet-solid)] px-5 pt-3 pb-[max(1.5rem,env(safe-area-inset-bottom))] shadow-[var(--tk-menu-shadow)] focus:outline-none sm:rounded-[30px] sm:pt-5"
       >
         <div aria-hidden="true" className="mx-auto mb-4 h-1 w-10 shrink-0 rounded-full bg-ink/15 sm:hidden" />
+        {/* On the page from the start, empty, so a message put in them is announced. */}
+        <div aria-live="polite" aria-atomic="true" className="sr-only">
+          {pageMessages.polite}
+        </div>
+        <div aria-live="assertive" aria-atomic="true" className="sr-only">
+          {pageMessages.assertive}
+        </div>
         <label htmlFor="new-task-title" className="sr-only">
           New task
         </label>
@@ -297,9 +355,9 @@ export function AddSheet({
             typed date still counts as one when the Date options are closed. */}
         <div id="new-task-date-options" hidden={detail !== 'date'} className="mt-3 flex flex-col gap-2">
           <div className="flex flex-wrap items-center gap-2">
-            {option('Today', draft.dueDate === today, () => setDate(today))}
-            {option('Tomorrow', draft.dueDate === addDays(today, 1), () => setDate(addDays(today, 1)))}
-            {option('Next week', draft.dueDate === addDays(today, 7), () => setDate(addDays(today, 7)))}
+            {option('today', 'Today', draft.dueDate === today, () => setDate(today))}
+            {option('tomorrow', 'Tomorrow', draft.dueDate === addDays(today, 1), () => setDate(addDays(today, 1)))}
+            {option('next-week', 'Next week', draft.dueDate === addDays(today, 7), () => setDate(addDays(today, 7)))}
             <label htmlFor="new-task-due-date" className="sr-only">
               Due date
             </label>
@@ -355,9 +413,10 @@ export function AddSheet({
         )}
         <div id="new-task-list-options" hidden={detail !== 'list'} className="mt-3 flex flex-col gap-2">
           <div role="group" aria-label="List" className="flex flex-wrap gap-2">
-            {option('Inbox', draft.listId === null, () => change({ listId: null }))}
+            {option('inbox', 'Inbox', draft.listId === null, () => change({ listId: null }))}
             {lists.map((item) =>
               option(
+                `list-${item.id}`,
                 item.name,
                 draft.listId === item.id,
                 () => change({ listId: item.id }),

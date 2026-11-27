@@ -388,6 +388,13 @@ test('a refresh that takes away the control with focus moves it to the + button 
     await expect(chip(one, 'List')).toHaveAccessibleName('List: Inbox');
     await expect(addSheet(one)).toBeVisible();
     await expect(viewTitle(one)).toHaveText('Inbox');
+    // The page's notice sits behind the sheet, in inert content; the sheet's
+    // own live region says it (tasks-calm-layout R1-F3).
+    const fellBack = '"Focus: shared" was deleted or is no longer shared with you, so Inbox is shown.';
+    const sheetSays = addSheet(one).locator('[aria-live="polite"]');
+    await expect(sheetSays).toHaveText(fellBack);
+    expect(await sheetSays.evaluate((region) => region.closest('[inert]') === null)).toBe(true);
+    expect(await statusMessage(one).evaluate((region) => region.closest('[inert]') !== null)).toBe(true);
     await one.keyboard.press('Escape');
     await expect(addButton(one)).toBeFocused();
 
@@ -409,9 +416,17 @@ test('a refresh that takes away the control with focus moves it to the + button 
     await expect(statusMessage(one)).toHaveText(
       '"Focus: shared" was deleted or is no longer shared with you, so Inbox is shown.',
     );
-    // Escape on the title closes the menu that was left open.
+    // The menu closed with it, and the arrows open it again on the checked
+    // item (tasks-calm-layout R1-F2).
+    await expect(viewMenu(one)).toBeHidden();
+    await expect(viewTitle(one)).toHaveAttribute('aria-expanded', 'false');
+    await one.keyboard.press('ArrowDown');
+    await expect(viewItem(one, 'Inbox')).toBeFocused();
+    await one.keyboard.press('ArrowDown');
+    await expect(viewItem(one, 'Assigned to me')).toBeFocused();
     await one.keyboard.press('Escape');
     await expect(viewMenu(one)).toBeHidden();
+    await expect(viewTitle(one)).toBeFocused();
 
     // 5. Focus on the only entry in One's Manage lists, which Two deletes:
     // Manage lists goes with it, and focus goes to the view title (it went to
@@ -429,6 +444,70 @@ test('a refresh that takes away the control with focus moves it to the + button 
     await expect(one.getByRole('region', { name: 'Manage lists' })).toHaveCount(0);
     await expect(viewTitle(one)).toBeFocused();
     await screenshot(one, testInfo, 'focus-after-refresh');
+  } finally {
+    await one.context().close();
+    await two.context().close();
+  }
+});
+
+test('two lists with the same name, the user\'s and another member\'s, are both offered and each takes its own tasks (tasks-calm-layout R1-F1)', async ({
+  browser,
+}) => {
+  test.setTimeout(90_000);
+  const one = await member(browser, 'Household One');
+  const two = await member(browser, 'Household Two');
+  const errors: string[] = [];
+  one.on('console', (message) => {
+    if (message.type() === 'error') errors.push(message.text());
+  });
+  try {
+    // Names are unique per owner only: both members share a "Dup: Home"
+    // (made through the API, so neither page sees the other's too early).
+    const sharedList = (page: Page) =>
+      page.evaluate(async () => {
+        const headers = { 'Content-Type': 'application/json' };
+        const created = await fetch('/api/lists', { method: 'POST', headers, body: JSON.stringify({ name: 'Dup: Home' }) });
+        const { list } = (await created.json()) as { list: { id: number } };
+        const shared = await fetch(`/api/lists/${list.id}`, { method: 'PATCH', headers, body: JSON.stringify({ shared: true }) });
+        if (!created.ok || !shared.ok) throw new Error('could not make the list');
+        return list.id;
+      });
+    const mineId = await sharedList(one);
+    const theirsId = await sharedList(two);
+    await nextRefresh(one);
+    await expect(viewMenu(one).getByRole('menuitemradio', { name: 'Dup: Home (shared)', includeHidden: true })).toHaveCount(2);
+    await pick(one, 'All tasks');
+
+    const creates = recordCreates(one);
+    const options = addSheet(one).getByRole('button', { name: 'Dup: Home (shared)', exact: true });
+    for (const [index, title] of ['Dup: into mine', 'Dup: into theirs'].entries()) {
+      await addButton(one).click();
+      await newTaskField(one).fill(title);
+      await chip(one, 'List').click();
+      await expect(options).toHaveCount(2);
+      await options.nth(index).click();
+      await expect(options.nth(index)).toHaveAttribute('aria-pressed', 'true');
+      await expect(options.nth(1 - index)).toHaveAttribute('aria-pressed', 'false');
+      await sheetButton(one, 'Add task').click();
+      await expect(addSheet(one)).toHaveCount(0);
+      await expect(checkbox(one, title)).toBeVisible();
+    }
+    expect(creates).toEqual([
+      { title: 'Dup: into mine', listId: mineId },
+      { title: 'Dup: into theirs', listId: theirsId },
+    ]);
+
+    // Each list's view shows its own task.
+    const items = viewMenu(one).getByRole('menuitemradio', { name: 'Dup: Home (shared)', includeHidden: true });
+    await viewTitle(one).click();
+    await items.nth(0).click();
+    await expect(checkbox(one, 'Dup: into mine')).toBeVisible();
+    await expect(checkbox(one, 'Dup: into theirs')).toHaveCount(0);
+    await viewTitle(one).click();
+    await items.nth(1).click();
+    await expect(checkbox(one, 'Dup: into theirs')).toBeVisible();
+    await expect(checkbox(one, 'Dup: into mine')).toHaveCount(0);
+    expect(errors.filter((text) => /same key/.test(text))).toEqual([]);
   } finally {
     await one.context().close();
     await two.context().close();
