@@ -18,7 +18,7 @@ async function signIn(page: Page, user: FixtureUser) {
   await expect(page.getByRole('heading', { name: 'Fixture central SSO' })).toBeVisible();
   await page.getByRole('link', { name: user }).click();
   await expect(page.getByRole('button', { name: `${user}, account` })).toBeVisible();
-  await expect(page.getByLabel('New task')).toBeVisible();
+  await expect(addButton(page)).toBeVisible();
 }
 // A member in their own browser context. The page clock is installed (it
 // keeps running at the real pace) so a test can jump to the next 30-second
@@ -43,8 +43,25 @@ async function expectNoReload(page: Page) {
 
 const ASSIGNED = 'Assigned to me';
 const EMPTY = 'No tasks are assigned to you yet: tasks assigned to you in shared lists show here.';
-const tablist = (page: Page) => page.getByRole('tablist', { name: 'Lists' });
-const tab = (page: Page, name: string) => tablist(page).getByRole('tab', { name, exact: true });
+// The view title is the button that opens the view picker, a menu of the
+// views and lists. Its items stay on the page, hidden, while it is closed.
+const viewTitle = (page: Page) => page.locator('#view-title');
+const viewMenu = (page: Page) => page.getByRole('menu', { name: 'Views and lists', includeHidden: true });
+const tab = (page: Page, name: string) =>
+  viewMenu(page).getByRole('menuitemradio', { name, exact: true, includeHidden: true });
+const viewItem = (page: Page, name: RegExp) =>
+  viewMenu(page).getByRole('menuitemradio', { name, includeHidden: true });
+const menuItem = (page: Page, name: string) =>
+  viewMenu(page).getByRole('menuitem', { name, exact: true, includeHidden: true });
+// Chooses a view, or New list or Manage lists, from the picker.
+async function pick(page: Page, name: string) {
+  if ((await viewTitle(page).getAttribute('aria-expanded')) !== 'true') await viewTitle(page).click();
+  await tab(page, name).or(menuItem(page, name)).click();
+  await expect(viewMenu(page)).toBeHidden();
+}
+const addButton = (page: Page) => page.getByRole('button', { name: 'Add a task', exact: true });
+const addSheet = (page: Page) => page.getByRole('dialog', { name: 'New task' });
+const newTaskField = (page: Page) => addSheet(page).getByRole('textbox', { name: 'New task', exact: true });
 const sharedTab = (page: Page, name: string) => tab(page, `${name} (shared)`);
 const checkbox = (page: Page, title: string) => page.getByRole('checkbox', { name: title, exact: true });
 const rowOf = (page: Page, title: string) => page.getByRole('listitem').filter({ has: checkbox(page, title) });
@@ -54,23 +71,23 @@ const button = (page: Page, name: string) => page.getByRole('button', { name, ex
 const statusMessage = (page: Page) => page.getByRole('status');
 
 async function addTask(page: Page, title: string) {
-  await page.getByLabel('New task').fill(title);
-  await page.getByLabel('New task').press('Enter');
+  await addButton(page).click();
+  await newTaskField(page).fill(title);
+  await newTaskField(page).press('Enter');
   await expect(checkbox(page, title)).toBeVisible();
+  await expect(addButton(page)).toBeFocused();
 }
 async function createList(page: Page, name: string) {
-  await button(page, 'New list').click();
+  await pick(page, 'New list');
   await page.getByRole('textbox', { name: 'List name' }).fill(name);
   await page.getByRole('textbox', { name: 'List name' }).press('Enter');
-  await expect(tab(page, name)).toHaveAttribute('aria-selected', 'true');
+  await expect(tab(page, name)).toHaveAttribute('aria-checked', 'true');
 }
 async function share(page: Page, name: string) {
-  if ((await button(page, 'Manage lists').getAttribute('aria-expanded')) !== 'true') {
-    await button(page, 'Manage lists').click();
-  }
+  if (!(await page.getByRole('list', { name: 'Your lists' }).isVisible())) await pick(page, 'Manage lists');
   await button(page, `Share "${name}" with household`).click();
-  await expect(sharedTab(page, name)).toBeVisible();
-  await button(page, 'Manage lists').click();
+  await expect(sharedTab(page, name)).toBeAttached();
+  await button(page, 'Close Manage lists').click();
 }
 async function assign(page: Page, title: string, to: string) {
   await button(page, `Edit "${title}"`).click();
@@ -90,6 +107,9 @@ async function closeContexts(one: Page, two: Page) {
 test('Two sees tasks assigned to them across shared lists, live; reassigning one removes it with a notice (AC-1, AC-2, AC-4, AC-6, AC-8)', async ({
   browser,
 }, testInfo) => {
+  // Two members and many steps: it took 26s of the default 30s before every
+  // add went through the + button and every view through the picker.
+  test.setTimeout(90_000);
   const one = await member(browser, 'Household One');
   const two = await member(browser, 'Household Two');
   try {
@@ -103,9 +123,14 @@ test('Two sees tasks assigned to them across shared lists, live; reassigning one
 
     // Two opens the view: the tab follows Inbox, and nothing is theirs yet.
     await two.reload();
-    await expect(tablist(two).getByRole('tab')).toHaveText(['All tasks', 'Inbox', ASSIGNED, 'Assigned: groceries (shared)']);
-    await tab(two, ASSIGNED).click();
-    await expect(tab(two, ASSIGNED)).toHaveAttribute('aria-selected', 'true');
+    await expect(viewMenu(two).getByRole('menuitemradio', { includeHidden: true })).toHaveText([
+      'All tasks',
+      'Inbox',
+      ASSIGNED,
+      'Assigned: groceries (shared)',
+    ]);
+    await pick(two, ASSIGNED);
+    await expect(tab(two, ASSIGNED)).toHaveAttribute('aria-checked', 'true');
     expect(new URL(two.url()).searchParams.get('list')).toBe('assigned');
     await expect(two.getByText(EMPTY)).toBeVisible();
     await screenshot(two, testInfo, 'assigned-empty');
@@ -131,9 +156,9 @@ test('Two sees tasks assigned to them across shared lists, live; reassigning one
     await assign(two, 'Assigned: rake leaves', 'Me (Household Two)');
     await expect(labels(two, 'Assigned: rake leaves')).toHaveText('Assigned to you');
     // A task in Two's Inbox does not show.
-    await tab(two, 'Inbox').click();
+    await pick(two, 'Inbox');
     await addTask(two, 'Assigned: inbox note');
-    await tab(two, ASSIGNED).click();
+    await pick(two, ASSIGNED);
     await expect(checkbox(two, 'Assigned: rake leaves')).toBeVisible();
     await expect(checkbox(two, 'Assigned: oat milk')).toBeVisible();
     await expect(checkbox(two, 'Assigned: inbox note')).toHaveCount(0);
@@ -142,14 +167,15 @@ test('Two sees tasks assigned to them across shared lists, live; reassigning one
 
     // A reload keeps the view.
     await two.reload();
-    await expect(tab(two, ASSIGNED)).toHaveAttribute('aria-selected', 'true');
+    await expect(tab(two, ASSIGNED)).toHaveAttribute('aria-checked', 'true');
     await expect(checkbox(two, 'Assigned: oat milk')).toBeVisible();
     await expect(checkbox(two, 'Assigned: rake leaves')).toBeVisible();
 
     // Adding from the view puts the task in Inbox, with a notice.
-    await two.getByLabel('New task').fill('Assigned: call the plumber');
-    await expect(two.getByLabel('New task')).toHaveAttribute('placeholder', 'Add to Inbox');
-    await two.getByLabel('New task').press('Enter');
+    await addButton(two).click();
+    await newTaskField(two).fill('Assigned: call the plumber');
+    await expect(addSheet(two).getByRole('button', { name: /^List: / })).toHaveAccessibleName('List: Inbox');
+    await newTaskField(two).press('Enter');
     await expect(statusMessage(two)).toHaveText('Added "Assigned: call the plumber" to Inbox.');
     await expect(checkbox(two, 'Assigned: call the plumber')).toHaveCount(0);
 
@@ -163,7 +189,7 @@ test('Two sees tasks assigned to them across shared lists, live; reassigning one
 
     // One sees it is theirs now, in their own view.
     await nextRefresh(one);
-    await tab(one, ASSIGNED).click();
+    await pick(one, ASSIGNED);
     await expect(checkbox(one, 'Assigned: oat milk')).toBeVisible();
     await expect(labels(one, 'Assigned: oat milk')).toHaveText('Assigned to you');
     await expect(checkbox(one, 'Assigned: rake leaves')).toHaveCount(0);
@@ -175,7 +201,7 @@ test('Two sees tasks assigned to them across shared lists, live; reassigning one
     await nextRefresh(two);
     await expect(checkbox(two, 'Assigned: oat milk')).toBeVisible();
     await expectNoReload(two);
-    await sharedTab(one, 'Assigned: groceries').click();
+    await pick(one, 'Assigned: groceries (shared)');
     await assign(one, 'Assigned: oat milk', 'Nobody');
     await expect(labels(one, 'Assigned: oat milk')).toHaveCount(0);
     await nextRefresh(two);
@@ -187,7 +213,7 @@ test('Two sees tasks assigned to them across shared lists, live; reassigning one
   }
 });
 
-test('the tab is in the keyboard tab order after Inbox; the view survives a reload (AC-1, AC-8)', async ({ browser }, testInfo) => {
+test('the view follows Inbox in the picker and is reached by keyboard; the view survives a reload (AC-1, AC-8; calm-layout AC-2)', async ({ browser }, testInfo) => {
   const one = await member(browser, 'Household One');
   const two = await member(browser, 'Household Two');
   try {
@@ -196,43 +222,42 @@ test('the tab is in the keyboard tab order after Inbox; the view survives a relo
     await share(one, 'Keys: shared');
     await assign(one, 'Keys: hoover', 'Me (Household One)');
 
-    await tab(one, 'All tasks').click();
-    await tab(one, 'Inbox').focus();
-    await one.keyboard.press('Enter');
-    await one.keyboard.press('ArrowRight');
+    await pick(one, 'Inbox');
+    // From the title, the down arrow opens the menu at Inbox; the next item is the view.
+    await expect(viewTitle(one)).toBeFocused();
+    await one.keyboard.press('ArrowDown');
+    await expect(tab(one, 'Inbox')).toBeFocused();
+    await one.keyboard.press('ArrowDown');
     await expect(tab(one, ASSIGNED)).toBeFocused();
-    await expect(tab(one, ASSIGNED)).toHaveAttribute('aria-selected', 'true');
+    await one.keyboard.press('ArrowDown');
+    await expect(sharedTab(one, 'Keys: shared')).toBeFocused();
+    await one.keyboard.press('ArrowUp');
+    await expect(tab(one, ASSIGNED)).toBeFocused();
+    await one.keyboard.press('Enter');
+    await expect(viewTitle(one)).toBeFocused();
+    await expect(viewTitle(one)).toHaveText(ASSIGNED);
+    await expect(tab(one, ASSIGNED)).toHaveAttribute('aria-checked', 'true');
     expect(new URL(one.url()).searchParams.get('list')).toBe('assigned');
     await expect(checkbox(one, 'Keys: hoover')).toBeVisible();
     await expect(listLabel(one, 'Keys: hoover')).toHaveText('List: Keys: shared');
-    // Only the selected tab is in the Tab order.
-    await expect(tablist(one).locator('[role="tab"][tabindex="0"]')).toHaveCount(1);
-    await expect(tab(one, ASSIGNED)).toHaveAttribute('tabindex', '0');
-    await one.keyboard.press('ArrowRight');
-    await expect(sharedTab(one, 'Keys: shared')).toBeFocused();
-    await one.keyboard.press('ArrowLeft');
-    await expect(tab(one, ASSIGNED)).toBeFocused();
-    await one.keyboard.press('ArrowLeft');
-    await expect(tab(one, 'Inbox')).toBeFocused();
-    await one.keyboard.press('End');
-    await one.keyboard.press('ArrowLeft');
-    await expect(tab(one, ASSIGNED)).toBeFocused();
+    // Only the view title is in the Tab order; the menu's items are not.
+    await expect(viewMenu(one).locator('[tabindex="0"]')).toHaveCount(0);
     await screenshot(one, testInfo, 'assigned-keyboard');
 
     // Loading the URL opens the view.
     await one.goto('/?list=assigned');
-    await expect(tab(one, ASSIGNED)).toHaveAttribute('aria-selected', 'true');
+    await expect(tab(one, ASSIGNED)).toHaveAttribute('aria-checked', 'true');
     await expect(checkbox(one, 'Keys: hoover')).toBeVisible();
     // Two has nothing assigned.
     await two.goto('/?list=assigned');
-    await expect(tab(two, ASSIGNED)).toHaveAttribute('aria-selected', 'true');
+    await expect(tab(two, ASSIGNED)).toHaveAttribute('aria-checked', 'true');
     await expect(two.getByText(EMPTY)).toBeVisible();
   } finally {
     await closeContexts(one, two);
   }
 });
 
-test('the tab row with "Assigned to me" fits a phone without a page scroll (AC-8)', async ({ browser }, testInfo) => {
+test('the view picker with "Assigned to me" fits a phone without a page scroll (AC-8; calm-layout AC-1)', async ({ browser }, testInfo) => {
   const one = await member(browser, 'Household One', { width: 390, height: 844 });
   const two = await member(browser, 'Household Two');
   try {
@@ -240,20 +265,21 @@ test('the tab row with "Assigned to me" fits a phone without a page scroll (AC-8
     await addTask(one, 'Phone: flour');
     await share(one, 'Phone: kitchen and pantry restock');
     await assign(one, 'Phone: flour', 'Me (Household One)');
-    await tab(one, ASSIGNED).click();
+    await pick(one, ASSIGNED);
     await expect(checkbox(one, 'Phone: flour')).toBeVisible();
-    await tab(one, ASSIGNED).focus();
+    await viewTitle(one).click();
+    await expect(tab(one, ASSIGNED)).toBeFocused();
     await expect(tab(one, ASSIGNED)).toBeInViewport();
     const measured = await one.evaluate(() => {
-      const row = document.querySelector('[role="tablist"]')!;
+      const menu = document.getElementById('view-menu')!;
       return {
         page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
-        rowRight: row.getBoundingClientRect().right,
+        menuRight: menu.getBoundingClientRect().right,
         viewport: document.documentElement.clientWidth,
       };
     });
     expect(measured.page).toBe(0);
-    expect(measured.rowRight).toBeLessThanOrEqual(measured.viewport);
+    expect(measured.menuRight).toBeLessThanOrEqual(measured.viewport);
     expect(await one.evaluate(() => window.scrollX)).toBe(0);
     await screenshot(one, testInfo, 'assigned-phone');
   } finally {

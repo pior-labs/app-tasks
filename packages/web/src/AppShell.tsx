@@ -1,7 +1,6 @@
 import { type ReactNode, useEffect, useRef, useState } from 'react';
-import { Check, ChevronsUpDown, LogOut } from 'lucide-react';
+import { Check, LogOut } from 'lucide-react';
 import { useTheme } from '@pior-labs/design-system';
-import { Wordmark } from './BrandMark';
 import { cn } from './cn';
 import { focusRing, menuClass, menuItemClass } from './ui';
 
@@ -67,9 +66,9 @@ export function ThemeSwitcher({ role = 'menuitemradio' }: { role?: 'menuitemradi
   );
 }
 
-// Who is signed in, behind one control: the theme and Sign out live in its
-// menu. Escape or a click elsewhere closes the menu, and Escape hands focus
-// back to the control that opened it.
+// Who is signed in, behind one round avatar at the top right: the theme and
+// Sign out live in its menu. Escape or a click elsewhere closes the menu, and
+// Escape hands focus back to the avatar.
 function AccountMenu({ account, signingOut, onSignOut }: { account: Account; signingOut: boolean; onSignOut: () => void }) {
   const [open, setOpen] = useState(false);
   const holder = useRef<HTMLDivElement>(null);
@@ -92,7 +91,7 @@ function AccountMenu({ account, signingOut, onSignOut }: { account: Account; sig
     };
   }, [open]);
   return (
-    <div ref={holder} className="relative min-w-0">
+    <div ref={holder} className="relative shrink-0">
       <button
         ref={trigger}
         type="button"
@@ -102,33 +101,19 @@ function AccountMenu({ account, signingOut, onSignOut }: { account: Account; sig
         aria-controls={open ? 'account-menu' : undefined}
         onClick={() => setOpen((value) => !value)}
         className={cn(
-          'flex w-full min-w-0 cursor-pointer items-center gap-2.5 rounded-2xl border-0 bg-transparent p-1.5 text-left font-[inherit] transition-colors hover:bg-frost/50 md:p-2',
-          open ? 'bg-frost/70' : '',
+          'grid size-10 cursor-pointer place-items-center rounded-full border-0 font-serif text-[16px] text-ink shadow-[inset_0_0_0_1px_rgba(var(--frost-rgb),0.6)] transition-[filter] hover:brightness-95 pointer-coarse:size-11',
           focusRing,
         )}
+        style={{ background: 'var(--tk-avatar-bg)' }}
       >
-        <span
-          aria-hidden="true"
-          className="flex size-8 shrink-0 items-center justify-center rounded-full font-serif text-[15px] text-ink shadow-[inset_0_0_0_1px_rgba(var(--frost-rgb),0.6)]"
-          style={{ background: 'var(--tk-avatar-bg)' }}
-        >
-          {account.name.trim()[0]?.toUpperCase() ?? '?'}
-        </span>
-        <span className="hidden min-w-0 flex-1 flex-col leading-[1.15] md:flex">
-          <span className="truncate font-serif text-[15px] text-ink">{account.name}</span>
-          <span className="truncate text-[11px] text-ink-2">Account</span>
-        </span>
-        <ChevronsUpDown aria-hidden="true" className="hidden size-3.5 shrink-0 text-ink-3 md:block" />
+        <span aria-hidden="true">{account.name.trim()[0]?.toUpperCase() ?? '?'}</span>
       </button>
       {open && (
         <div
           id="account-menu"
           role="menu"
           aria-label="Account"
-          className={cn(
-            menuClass,
-            'absolute right-0 z-40 mt-2 w-64 md:right-auto md:bottom-full md:left-0 md:mt-0 md:mb-2 md:w-full md:min-w-56',
-          )}
+          className={cn(menuClass, 'tk-pop absolute top-full right-0 z-40 mt-2 w-64 max-w-[calc(100vw-2.5rem)]')}
         >
           <div className="border-b border-dashed border-ink/10 px-3 pt-2 pb-2.5">
             <p className="m-0 truncate text-[13px] text-ink">Signed in as {account.name}</p>
@@ -158,63 +143,53 @@ function AccountMenu({ account, signingOut, onSignOut }: { account: Account; sig
   );
 }
 
-// The frame every signed-in screen shares. On a wide screen the rail is a
-// sticky glass card beside the content, holding the mark, the views and lists
-// (`nav`), and the account; on a phone the same rail is a bar above the
-// content with the tabs in a sideways row. It is one element either way, so
-// each control exists once and keyboard order follows what is seen.
+// The frame every signed-in screen shares: one calm column, about 36rem wide,
+// over the mesh. The header holds the view title with its picker (`title`)
+// and the account avatar; the column below is the main content. `overlay`
+// (the + button and the add sheet) sits outside the column, and while a modal
+// is open (`inert`) the column cannot be reached at all.
 export function AppShell({
   account,
   signingOut,
   onSignOut,
-  nav,
+  title,
+  inert = false,
+  overlay,
   children,
 }: {
   account: Account;
   signingOut: boolean;
   onSignOut: () => void;
-  nav?: ReactNode;
+  title?: ReactNode;
+  inert?: boolean;
+  overlay?: ReactNode;
   children: ReactNode;
 }) {
   return (
     <div className="relative min-h-dvh text-[15px] leading-[1.55] text-ink">
       <MeshBackdrop />
-      <a
-        href="#main-content"
-        className={cn(
-          'absolute top-3 left-3 z-50 -translate-y-24 rounded-full border border-ink/15 bg-cream px-4 py-2.5 text-sm font-medium text-ink transition-transform focus:translate-y-0',
-          focusRing,
-        )}
-      >
-        Skip to tasks
-      </a>
-      <div className="relative z-2 mx-auto grid max-w-300 grid-cols-[minmax(0,1fr)] gap-4 px-3 pt-3 pb-12 sm:px-5 md:grid-cols-[248px_minmax(0,1fr)] md:gap-7 md:px-8 md:pt-6 md:pb-16">
-        <aside
-          aria-label="Tasks"
-          // On a phone the rail wraps: the mark, then the tab row, then the
-          // list actions with the account at the end of the same row. `nav`
-          // takes part in that wrap directly (display: contents), so its
-          // parts size themselves with basis-full or flex-1.
+      <div inert={inert} className="relative z-2">
+        <a
+          href="#main-content"
           className={cn(
-            'relative z-20 flex min-w-0 flex-wrap items-center gap-2 rounded-[26px] border border-frost/80 bg-[rgba(var(--surface-rgb),0.6)] p-3',
-            'shadow-[0_8px_32px_color-mix(in_srgb,var(--ink)_8%,transparent),inset_0_0_0_1px_rgba(var(--frost-rgb),0.5)] backdrop-blur-xl backdrop-saturate-150',
-            'md:sticky md:top-6 md:max-h-[calc(100dvh-3rem)] md:flex-col md:flex-nowrap md:items-stretch md:self-start md:rounded-4xl md:px-4 md:pt-5 md:pb-4',
+            'absolute top-3 left-3 z-50 -translate-y-24 rounded-full border border-ink/15 bg-cream px-4 py-2.5 text-sm font-medium text-ink transition-transform focus:translate-y-0 motion-reduce:transition-none',
+            focusRing,
           )}
         >
-          <p className="m-0 flex basis-full items-center gap-2.5 px-1.5 md:mb-1 md:basis-auto md:border-b md:border-dashed md:border-ink/10 md:px-2 md:pb-3.5">
-            <Wordmark size={30} textClass="text-[21px]" />
-          </p>
-          <div className="contents md:-mx-1 md:flex md:min-h-0 md:flex-1 md:flex-col md:gap-2 md:overflow-y-auto md:px-1 md:py-1">
-            {nav}
-          </div>
-          <div className="ml-auto md:mt-1 md:ml-0 md:border-t md:border-dashed md:border-ink/10 md:pt-3">
+          Skip to tasks
+        </a>
+        {/* Bottom padding leaves room to scroll the last task clear of the + button. */}
+        <div className="mx-auto flex max-w-xl flex-col gap-6 px-5 pt-10 pb-36 sm:pt-16">
+          <header className="flex items-start justify-between gap-4">
+            <div className="min-w-0 flex-1">{title}</div>
             <AccountMenu account={account} signingOut={signingOut} onSignOut={onSignOut} />
-          </div>
-        </aside>
-        <main id="main-content" tabIndex={-1} className="flex min-w-0 flex-col gap-5 focus:outline-none">
-          {children}
-        </main>
+          </header>
+          <main id="main-content" tabIndex={-1} className="flex min-w-0 flex-col gap-4 focus:outline-none">
+            {children}
+          </main>
+        </div>
       </div>
+      {overlay}
     </div>
   );
 }

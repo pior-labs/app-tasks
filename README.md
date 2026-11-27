@@ -283,7 +283,7 @@ plain i), and a name only the index refuses is 409 `duplicate_list_name` too.
 So "İstanbul" and "i̇stanbul" (an i with a combining dot) share a fold and
 cannot both exist, and "istanbul" next to "İstanbul" is refused by the index.
 Lists stored before the fold check that share a fold stay, and each can keep
-its own name. A user can have at most 50 lists, so the tab row stays usable;
+its own name. A user can have at most 50 lists, so the view picker stays usable;
 one more is 409 `list_limit_reached`. Creates and renames for one user run one
 after another, so parallel requests cannot pass the limit or add two names
 with one fold.
@@ -307,26 +307,35 @@ PostgreSQL ends as a deadlock victim (a list delete racing a task update) is
 retried, up to three attempts. Lists are not filtered on the server:
 `GET /api/tasks` returns every task with its `listId` and the browser filters.
 
-The signed-in page uses the Pior Labs shell shared with the other apps: the
-design system's drifting mesh behind a glass rail, with the content beside it.
-The rail holds the views and lists, then a "New list" button (its form opens
-in the rail) and, when there are lists, a "Manage lists" button (its panel
-opens in the main column), and at the end an account control whose menu shows
-who is signed in, the theme choice and "Sign out". The views are "All tasks",
-"Inbox", "Assigned to me" (always, also without shared lists) and the user's
-lists in creation order. They are a tablist named
-"Lists" with automatic activation: arrow keys (Left/Right or Up/Down, wrapping
-at the ends), Home and End move to a tab and select it, and only the selected
-tab is in the Tab order; a "Skip to tasks" link comes before it. The add form
-and the task list are the selected tab's tabpanel. The
-selected view is kept in the URL as `?list=all`, `?list=inbox`,
-`?list=assigned` or `?list=<id>`, so a reload keeps it; with no parameter, or an id that is not one
-of the user's lists, the view is "All tasks", which keeps every task in view by
-default. On a narrow screen the rail is a bar above the content and the tabs
-get a row of their own that scrolls sideways inside itself, without scrolling
-the page. The sign-in screen offers the theme choice too.
+The signed-in page is one calm column, about 36rem wide, over the design
+system's drifting mesh. At the top is the view's name as a large serif title,
+which is also the button that opens the view picker, with the view's kicker
+(for example "Every list" or "Shared with household") and the open count under
+it, and the account avatar at the top right, whose menu shows who is signed
+in, the theme choice and "Sign out". Under the header come the New list form
+and the Manage lists panel when open, the notices, and the tasks. A round +
+button fixed at the bottom right (on a wide screen, at the column's right
+edge) opens the add sheet; the column leaves room below the last task so the
+button never covers it. The Tasks wordmark is on the sign-in screen only.
 
-"Inbox" shows the tasks with no list, a list's tab shows its tasks, "All
+The view picker is a menu opened from the title (`aria-haspopup="menu"`,
+`aria-expanded`). It lists "All tasks", "Inbox", "Assigned to me" (always,
+also without shared lists) and the user's lists in creation order as
+`menuitemradio` items with the shown one checked, then "New list" and, when
+there are lists, "Manage lists". Opening it focuses the checked item; arrow
+keys (wrapping at the ends), Home and End move between the items, Enter, Space
+or a click chooses, and Escape or a click outside closes it and hands focus
+back to the title (the down and up arrows on the title open it too). Choosing
+a view closes the menu with focus on the title. A "Skip to tasks" link comes
+first in the Tab order, then the title. The shown view is kept in the URL as
+`?list=all`, `?list=inbox`, `?list=assigned` or `?list=<id>`, so a reload
+keeps it; with no parameter, or an id that is not one of the user's lists, the
+view is "All tasks", which keeps every task in view by default. When the lists
+fail to load, the message and "Load lists again" show under the header and the
+picker offers the built-in views only. The sign-in screen offers the theme
+choice too.
+
+"Inbox" shows the tasks with no list, a list's view shows its tasks, "All
 tasks" shows every task, and "Assigned to me" shows the tasks whose assignee is
 the user, from every shared list they can see (their own and other members'),
 open and completed. It is a filter in the browser over `GET /api/tasks`; tasks
@@ -334,32 +343,35 @@ in Inbox or in a list that is not shared never show there, since only a task
 in a shared list has an assignee. Each view keeps the grouping, the Completed
 section and the ordering described below, and has its own empty state ("No
 tasks in Errands yet."; "All tasks" keeps "No tasks yet. Add your first one
-above."; "Assigned to me" says "No tasks are assigned to you yet: tasks
+with the + button."; "Assigned to me" says "No tasks are assigned to you yet: tasks
 assigned to you in shared lists show here.").
 In "All tasks" and "Assigned to me", a row in a named list shows the list's
-name as a muted label under the due date line (read as "List: Errands"); Inbox
-rows show none, and the label is not part of the checkbox's description. A
-task added while a named list is selected is created in it (`listId` is sent);
-in "All tasks", Inbox and "Assigned to me" the add request sends no
-`listId`. The title field's placeholder names the destination ("Add to
-Errands", "Add to Inbox"). A task added from "Assigned to me" is in Inbox, so
-it does not show there, and a status message says `Added "Milk" to Inbox.`
+name as a muted label after the due date (read as "List: Errands"); Inbox
+rows show none, and the label is not part of the checkbox's description. The
+add sheet's List chip starts at the view's list when a named list is shown,
+and at Inbox in "All tasks", Inbox and "Assigned to me"; a list there sends
+its `listId`, Inbox sends none. A task that lands outside the view shown (in
+another list, or in Inbox from "Assigned to me") does not show there, and a
+status message says where it went (`Added "Milk" to Inbox.`).
 
-"New list" reveals a "List name" field with "Create list" and Cancel. Enter
-creates the list, adds its tab, selects it and focuses it; Escape or Cancel
-closes the field without a request and returns focus to "New list". The field
+"New list" (from the view picker) opens a "List name" field with "Create list"
+and Cancel under the header. Enter creates the list, adds it to the picker and
+shows it, with focus on the view title; Escape or Cancel closes the field
+without a request and returns focus to the view title. The field
 checks the server's rules first (length, visible characters, reserved names
 and a duplicate of a loaded list, with the same fold as the server) and shows
 those errors, and
 `invalid_list_name`, `duplicate_list_name` and `list_limit_reached` from the
 server, on the field with `aria-invalid` and `aria-describedby`. "Manage lists"
-shows each list with Rename and Delete. Rename works like a task rename: Enter
-saves, Escape cancels, errors show on the field, and the tab and the labels
+(from the view picker) opens a panel under the header, with a "Close Manage
+lists" control, showing each list with Rename and Delete. Rename works like a task rename: Enter
+saves, Escape cancels, errors show on the field, and the picker and the labels
 change once the server stored the name. Delete asks in the row, naming the
 list and how many loaded tasks will move ("Delete Errands? Its 3 tasks will
-move to Inbox."); after the server deleted it the tab goes, its tasks show in
-Inbox, and if it was selected the view and the URL switch to Inbox. Focus moves
-to the next list's Rename, else the previous one's, else "New list".
+move to Inbox."); after the server deleted it the list leaves the picker, its
+tasks show in Inbox, and if it was shown the view and the URL switch to Inbox.
+Focus moves to the next list's Rename, else the previous one's, else the view
+title (the panel closes with the last list).
 
 The edit row has a "List" select (named `List for "<title>"`, with Inbox and
 every list) after the date and repeat controls and before the notes, so title
@@ -374,8 +386,10 @@ longer assigned to you.`); a move to another shared list keeps it. If the
 server answers `invalid_list` (the list was deleted meanwhile), the error shows
 on the select and the lists are loaded again, so the select no longer offers
 the missing list. If a list was deleted in another tab, an add to it, or a
-rename or delete of it, shows a notice, drops its tab (its tasks show in Inbox)
-and switches to Inbox if it was selected; an add keeps the typed task. Lists
+rename or delete of it, shows a notice, drops it from the picker (its tasks
+show in Inbox) and switches to Inbox if it was shown; an add keeps the sheet
+open with the typed task, its List chip opened with "That list no longer
+exists. Choose another list.", now adding to Inbox (or the view's list). Lists
 that fail to load show an error with a "Load lists again" button while the
 tasks still work in "All tasks". A 401 from any list request returns the page
 to the signed-out view.
@@ -424,7 +438,7 @@ changes on a move.
   who unshares someone else's list loses access to it.
 - Names: duplicates and the 50-list limit count the owner's lists, so two
   members may each have a "Groceries", one of them shared. The shared marker
-  tells the tabs apart.
+  tells them apart in the view picker.
 - Deleting a shared list moves each task, open and completed, to the Inbox of
   whoever added it (the list owner when that is unknown) and clears its
   assignee; `movedTaskIds` names them all. An unshared list's tasks go to the
@@ -445,7 +459,7 @@ changes on a move.
   and then the list. Adds, moves and edits racing a delete or an unshare
   answer `invalid_list` or 404, or land in Inbox, never 500.
 
-In the web app a shared list's tab shows a two-people icon after its name,
+In the web app a shared list's picker item shows a two-people icon,
 and its accessible name ends in "(shared)" ("Groceries (shared)"); the List
 select names it the same way. "Manage lists" offers "Share with household" or
 "Stop sharing" next to Rename and Delete for every list, says "Shared with
@@ -454,7 +468,7 @@ other members'. Sharing and stopping sharing one's own list send the request
 at once; stopping sharing someone else's list first asks in the row ("Stop
 sharing Groceries? It goes back to Household Two with all its tasks, and you
 will lose access to it."), with focus on Cancel and Escape to cancel; after
-the server stored it the tab and its tasks go, a status message says so, and a
+the server stored it the list and its tasks go, a status message says so, and a
 selected view switches to Inbox. The delete question for a shared list says
 "Its 3 tasks will return to the Inbox of whoever added them." Errors show
 above the managed lists, as for a failed delete.
@@ -475,10 +489,15 @@ in, the page fetches the lists, tasks and members again when the window gains
 focus, when the page becomes visible, and every 30 seconds while it is
 visible, one refresh at a time. A refresh shows what other members added,
 changed, completed or deleted, and their list renames, shares and deletes. It
-never touches the add form, the row being edited or asking to confirm a
+never touches the add sheet's draft, the row being edited or asking to confirm a
 delete, or focus: a refresh that overlaps a change the page is making is
 dropped and the next trigger tries again, and a focused control whose row
-moves to another group keeps focus in its new place. If the selected list is
+moves to another group keeps focus in its new place. Focus on a control a
+refresh takes away goes to the next row still shown, else the previous one,
+else the + button; from a view picker item, to the view title; from a Manage
+lists entry, to the nearest list left there, else the view title; and from a
+List option of the open add sheet, to its List chip. A refresh never moves
+focus out of the open add sheet, nor closes it. If the selected list is
 gone, the view switches to Inbox with a notice. In "Assigned to me" a refresh
 adds a task another member assigned to the user and removes one they
 unassigned, moved out of its shared list, unshared or deleted (with its list),
@@ -505,56 +524,84 @@ signed-out view; any other failure is silent and retried on the next trigger.
 Saving an edit of a task another member deleted meanwhile shows the usual "no
 longer exists" notice.
 
-The signed-in page shows an add-task form (a title, an optional "Due date"
-field, a "Repeats" control and an "Add notes" toggle) and the task list, with distinct
-loading, empty, load-failure (with retry), create-failure and update-failure
-states. A checkbox changes only after the server stores the new state. While a
-request is pending its control ignores repeat input but keeps keyboard focus,
-and after a task is added the fields are cleared and focus returns to the
-title field.
+The signed-in page shows the task list, with distinct loading, empty,
+load-failure (with retry), create-failure and update-failure states, and the
+round + button (named "Add a task", with `aria-haspopup="dialog"`). A checkbox
+changes only after the server stores the new state. While a request is pending
+its control ignores repeat input but keeps keyboard focus.
+
+The + button opens the add sheet: a modal dialog named "New task" at the
+bottom of the screen (centred and bottom aligned on a wide one) over a dimmed
+page, which is inert meanwhile. Focus starts in its title field (labelled "New
+task"), and Tab and Shift+Tab stay inside it. Escape, Cancel or a click on the
+backdrop close it and return focus to the + button; the draft (title, date,
+repeat, list and notes) is kept for the next time it opens. "Add task" (or
+Enter in the title) adds the task; after a successful add the sheet closes,
+the draft is cleared and focus returns to the + button. A failed or refused add
+keeps the sheet open with the draft. While the add is pending the sheet's
+controls are locked (`readOnly` and `aria-disabled`, never `disabled`), a
+second submit is ignored, and the sheet cannot be closed. The sheet rises in
+and the menus pop open with short animations that reduced motion turns off.
+
+Under the title are chips: "Date", "Repeat" (only once a date is set), "List"
+and "Notes". Each is a button whose name states its value ("Due date: none",
+"Due date: Tomorrow", "Repeat: Weekly", "List: Inbox", "Notes: added") and
+which shows or hides its options under the chips, one chip's options at a
+time; a chip with a value shows it and has a clear (x) control ("Clear due
+date", "Clear repeat", "Clear notes"). Date offers "Today", "Tomorrow", "Next
+week" and a "Due date" field with the supported range; a partly typed date is
+refused ("Enter a complete due date, or leave the field empty."). Clearing the date
+clears the repeat with it; removing the date in the field resets the repeat
+too (a partly typed date does not). List offers Inbox and every list the user
+can see, starting at the view's list (see [Lists](#lists)). Only the chosen
+fields are sent, so a task without them is still `{ "title": ... }`. Every
+client and server error shows inside the sheet next to the field at fault
+(`aria-invalid` and `aria-describedby` point at it), and that field's chip
+opens.
 
 "Repeats" is a native select with "Does not repeat", "Daily", "Weekly",
 "Monthly", "Yearly" and "Custom"; "Custom" reveals an "Every" number field (1 to
 99) and a unit select (days, weeks, months, years), starting from the task's
-stored repeat (every 1 week in the add form or for a task that did not repeat),
-not from presets passed on the way. It is available only while
-the form has a due date: without one the select (and any Custom field) is
-`disabled`, so it is dimmed, cannot be opened or changed and is skipped by Tab,
-and it is described by the visible hint "Set a due date to repeat"; removing
-the date resets it to "Does not repeat" (a partly typed date does not). While
-a request is pending it is locked with `aria-disabled` like the other pending
-controls, so it keeps keyboard focus. The edit row has the same control, named after the task. A Custom
-interval outside 1 to 99 is refused next to the control without a request, and
-an `invalid_repeat` from the server is shown the same way.
+stored repeat (every 1 week in the add sheet or for a task that did not repeat),
+not from presets passed on the way. In the add sheet it is offered only once
+the draft has a due date. In the edit row it is available only while the row
+has a due date: without one the select (and any Custom field) is `disabled`,
+so it is dimmed, cannot be opened or changed and is skipped by Tab, and it is
+described by the visible hint "Set a due date to repeat"; removing the date
+resets it to "Does not repeat" (a partly typed date does not). While a request
+is pending it is locked with `aria-disabled` like the other pending controls,
+so it keeps keyboard focus. A Custom interval outside 1 to 99 is refused next
+to the control without a request, and an `invalid_repeat` from the server is
+shown the same way.
 
-"Add notes" is a button with `aria-expanded`, after "Add task" in Tab order, so
-the order of the other fields is unchanged. It shows a "Notes" text area below
-it. In the text area Enter starts a new line and Ctrl+Enter (Cmd+Enter on a
-Mac) adds the task. Notes are sent only when the area is shown and they have
-something visible after trimming, so a task without notes is still sent as
-`{ "title": ... }`; hiding the area again keeps the typed text for later (also
-across an add) but does not send it. Notes over 5000 characters or with a null character are
-refused next to the field without a request (`aria-invalid` and
-`aria-describedby` point at the message), and an `invalid_notes` from the
-server is shown the same way. After a task is added the notes are cleared and
-the area is hidden again.
+The Notes chip opens a "Notes" text area. In it Enter starts a new line and
+Ctrl+Enter (Cmd+Enter on a Mac) adds the task. Notes with something visible
+after trimming are sent whether or not their text area is open, and clearing
+the chip clears them; notes with nothing visible are not sent. Notes over 5000
+characters or with a null character are refused next to the field without a
+request, and an `invalid_notes` from the server is shown the same way.
 
 The list is grouped. "Today" is the browser's local date. Open tasks are shown
 under Overdue (due before today), Today, Upcoming (due after today) and No
 date, in that order, each group only when it has tasks. Overdue and Upcoming
 are sorted by due date, earliest first (ties newest created first); Today and
-No date keep the server's order, newest created first. Each group is a section
-with a visible heading and its own list named by that heading. Completed
-tasks, with or without a date, are in a Completed section after the groups,
-newest created first. It is collapsed on every page load (the choice is not
-remembered), its header is a "Completed (N)" button with `aria-expanded` and
-`aria-controls`, and it is absent when no task is completed. The empty state is
+No date keep the server's order, newest created first. The open groups share one
+sheet; each is a section with a small sentence-case heading and its own list
+named by that heading. Completed tasks, with or without a date, are in a list
+named "Completed" after the groups, newest created first. It is collapsed on
+every page load (the choice is not remembered) behind a "Show N done" button
+(`aria-expanded`, `aria-controls`) that reads "Hide done" while it is open, and
+it is absent when no task is completed. The empty state is
 shown only when there are no tasks at all. At local midnight, and when the page
 becomes visible again after being hidden, "today" is recomputed and rows move
 between groups without a reload. The API list order is unchanged; grouping
 happens in the browser (`packages/web/src/taskGroups.ts`, date logic in
 `packages/web/src/dueDate.ts`, using `Intl` and no date library).
 
+A row shows its title with a quieter line of details under it: the due date,
+its repeat, its list (in views that mix lists) and, in a shared list, who
+added, completed or has it. With a mouse, its Edit and Delete controls show
+when the row is hovered or has focus; on a touch screen they always show.
 A row with a due date shows it as text: "Due today", "Due tomorrow", "Due
 yesterday", otherwise a short weekday, day and month in the browser's locale
 (for example "Due Fri, Nov 20"), with the year only outside the current year.
@@ -604,7 +651,7 @@ after the task (for example `Edit "Buy oat milk"`).
   row's Edit control (in its new group, if it moved) after saving or
   cancelling, to the date field after "Remove due date", back to Delete after
   cancelling a delete, and after a delete to the first control of the next row,
-  else the previous row, else the new-task field. Neighbours are taken in page
+  else the previous row, else the + button. Neighbours are taken in page
   order across groups.
 - A row changes group only after the server confirmed the change. Completing a
   task while Completed is collapsed removes the row from view: if focus was in
@@ -844,22 +891,27 @@ They do not prove hosted SSO.
 
 Web component tests (`packages/web/src/*.test.tsx`) use Vitest, jsdom and
 Testing Library with `fetch` stubbed. They cover the signed-out view, the task
-list states, creating, completing, renaming and deleting tasks, due dates in
-the add form and in edit mode, grouping and sorting, the Completed section,
+list states, the calm layout (one column, the add sheet with its focus trap,
+Escape, Cancel and backdrop, the kept draft, each chip and its request body,
+the pending lock, the List chip's destination and notice, and where focus goes
+when the + button, the view title or the List chip stand in for a control that
+is gone, after a user action or a refresh, with the sheet or the picker open),
+creating, completing, renaming and deleting tasks, due dates in
+the add sheet and in edit mode, grouping and sorting, the Completed section,
 date labels and overdue marking, the midnight and visibility refresh (with a
-fixed clock), repeats in the add form and in edit mode (presets, Custom,
-disabled without a date and enabled with one, the `aria-disabled` lock while
+fixed clock), repeats in the add sheet and in edit mode (presets, Custom,
+offered only with a date, the `aria-disabled` lock while
 pending, reset when the date is removed, changed fields
 only, inline errors, row labels), ticking and un-ticking repeating tasks with
 their status messages and focus, the `today` sent with a fixed clock, notes in
-the add form (the toggle, Ctrl/Cmd+Enter, bodies, limits, server errors), in
+the add sheet (the Notes chip, Ctrl/Cmd+Enter, bodies, limits, server errors), in
 edit mode (prefill, changed notes only, null when emptied, Escape, read-only
 while saving, errors) and in rows (plain text, muted when completed, the
-scroll region only for overflowing notes), lists (the tablist roles and
-keyboard, the view in the URL and its fallback, filtering and labels per view,
+scroll region only for overflowing notes), lists (the view picker's menu
+roles and keyboard, the view in the URL and its fallback, filtering and labels per view,
 empty states, add bodies per view, creating, renaming and deleting lists with
 their errors and focus, the List select and moves out of a view, lists deleted
-elsewhere, a lists load failure and 401s), shared lists (the tab marker,
+elsewhere, a lists load failure and 401s), shared lists (the picker marker,
 sharing and stopping sharing from Manage lists with the question for someone
 else's list, the delete wording, row labels, the "Assigned to" select and its
 request bodies, and live refresh: focus, visibility and the 30-second timer,
@@ -897,25 +949,35 @@ remove the next one; set a custom "every 2 weeks" repeat and stop it with the
 keyboard only; set and reset a repeat in the edit row by pointer; complete a
 monthly task on the 31st across month ends; and, just after local midnight in
 Pacific/Auckland, check that the local date is sent as `today`. Further
-scenarios check that without a due date the Repeats select is disabled, dimmed
-and skipped by Tab and becomes enabled once a date is set (with screenshots at
-a narrow and a wide viewport), that arrowing from Weekly to Custom starts at every 1 week,
+scenarios check that without a due date the add sheet offers no Repeat chip,
+that a date offers it and clearing the date removes it with its choice (with
+screenshots of the sheet at a narrow and a wide viewport), that arrowing from Weekly to Custom starts at every 1 week,
 that rapid repeated ticks complete once and create one next occurrence, that a
 page left open across local midnight sends the new date, and that the local
 date is accepted at UTC+14 and UTC-12. Notes scenarios add a task with
-multi-line notes through the "Add notes" toggle and see them after a reload;
+multi-line notes through the Notes chip and see them after a reload; send
+notes typed and then hidden, kept across closing the sheet, and clear them with
+the chip;
 edit, cancel and clear notes with the keyboard only; check that a long note is
 capped in a focusable, named scroll region that the keyboard scrolls while a
 short one is not, without horizontal scrolling at 390px (with screenshots); and
 check that the next occurrence of a repeating task shows the same notes.
+Layout scenarios (`packages/e2e/tests/layout.spec.ts`) open the add sheet from
+the + button and check its focus trap, Escape, Cancel and backdrop with the
+draft kept; add a task with every chip and check the request body and the
+notice for a task added to another list; check the "Show N done" toggle; check
+at 1280px and 390px that the page is one column whose last task clears the +
+button, and that reduced motion stops the sheet and menu animations; and, with
+two members, that a refresh taking away the focused control moves focus to the
++ button, the view title or the List chip, never out of the open sheet.
 Lists scenarios (`packages/e2e/tests/lists.spec.ts`) create lists and switch
-between them with the keyboard only; add tasks in a named list and in "All
+between them through the view picker with the keyboard only; add tasks in a named list and in "All
 tasks" and see them in the right views after a reload, with the URL keeping the
 view; move a task between lists from the edit row; rename a list and delete one
 with tasks, checking the confirmation count and the tasks in Inbox; check that
 a second user sees none of the first user's lists; check that a repeating
-task's next occurrence stays in its list; and check at 390px that the tab row
-scrolls sideways without a page scroll (with screenshots). Sharing scenarios
+task's next occurrence stays in its list; and check at 390px that the open
+view picker fits the screen without a page scroll (with screenshots). Sharing scenarios
 (`packages/e2e/tests/sharing.spec.ts`) sign in Household One and Household
 Two in separate browser contexts: One shares a list and Two sees it after a
 reload and through a live refresh without one, adds a task that One sees as
@@ -927,7 +989,7 @@ All tasks, and when One shares it again the task is back without the question; T
 acts on One's list after One stopped sharing it or deleted it, and Two's own
 task with a delete question leaves or stays and deletes accordingly;
 deleting a shared list sends each task to its creator's Inbox; and the share toggle and the "Assigned to" select work by keyboard, with
-the shared tab fitting a 390px screen (with screenshots). The page clock is
+the open view picker fitting a 390px screen (with screenshots). The page clock is
 installed so a test can jump to the next 30-second refresh. Because the API
 checks `today` against its own date, the test API server
 (`packages/api/test/e2e-server.ts`) has a test-only `PUT /e2e/clock` route, and

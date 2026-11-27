@@ -23,20 +23,40 @@ async function signIn(page: Page, user: FixtureUser) {
   await expect(page.getByRole('heading', { name: 'Fixture central SSO' })).toBeVisible();
   await page.getByRole('link', { name: user }).click();
   await expect(page.getByRole('button', { name: `${user}, account` })).toBeVisible();
-  await expect(page.getByLabel('New task')).toBeVisible();
+  await expect(addButton(page)).toBeVisible();
 }
 
 // The visible group lists (Overdue, Today, Upcoming, No date, and Completed
 // when it is expanded). Matching them all keeps rows in page order.
 const taskList = (page: Page) => page.getByRole('list');
-const completedToggle = (page: Page) => page.getByRole('button', { name: /^Completed \(\d+\)$/ });
+const completedToggle = (page: Page) => page.getByRole('button', { name: /^(Show \d+ done|Hide done)$/ });
 
-// The Completed section starts collapsed on every page load.
+// The Completed section starts collapsed on every page load, behind "Show N done".
 async function expandCompleted(page: Page) {
   await expect(completedToggle(page)).toHaveAttribute('aria-expanded', 'false');
+  await expect(completedToggle(page)).toHaveText(/^Show \d+ done$/);
   await completedToggle(page).click();
   await expect(completedToggle(page)).toHaveAttribute('aria-expanded', 'true');
+  await expect(completedToggle(page)).toHaveText('Hide done');
 }
+
+// Adding goes through the round + button ("Add a task"), which opens the
+// "New task" sheet with focus in its title field.
+const addButton = (page: Page) => page.getByRole('button', { name: 'Add a task', exact: true });
+const addSheet = (page: Page) => page.getByRole('dialog', { name: 'New task' });
+const newTaskField = (page: Page) => addSheet(page).getByRole('textbox', { name: 'New task', exact: true });
+async function openAddSheet(page: Page) {
+  await addButton(page).click();
+  await expect(newTaskField(page)).toBeFocused();
+}
+// A chip of the sheet, by the start of its name ("Due date", "Repeat",
+// "List", "Notes"); the rest of the name is its value.
+const chip = (page: Page, name: string) => addSheet(page).getByRole('button', { name: new RegExp(`^${name}: `) });
+async function openChip(page: Page, name: string) {
+  if ((await chip(page, name).getAttribute('aria-expanded')) !== 'true') await chip(page, name).click();
+  await expect(chip(page, name)).toHaveAttribute('aria-expanded', 'true');
+}
+const addDueDate = (page: Page) => addSheet(page).getByLabel('Due date', { exact: true });
 const checkbox = (page: Page, title: string) =>
   page.getByRole('checkbox', { name: title, exact: true });
 const editButton = (page: Page, title: string) =>
@@ -47,9 +67,13 @@ const editField = (page: Page, title: string) =>
   page.getByRole('textbox', { name: `New title for "${title}"`, exact: true });
 
 async function addTask(page: Page, title: string) {
-  await page.getByLabel('New task').fill(title);
-  await page.getByLabel('New task').press('Enter');
+  await openAddSheet(page);
+  await newTaskField(page).fill(title);
+  await newTaskField(page).press('Enter');
   await expect(checkbox(page, title)).toBeVisible();
+  // The sheet closes and focus returns to the + button (D-2).
+  await expect(addSheet(page)).toHaveCount(0);
+  await expect(addButton(page)).toBeFocused();
 }
 
 // Asserts the order of the given titles in the list, top to bottom, ignoring
@@ -78,8 +102,8 @@ async function complete(page: Page, title: string) {
 
 // Presses Tab until the target has focus. Chromium stops on each part of a
 // date field (month, day, year), so the number of presses depends on the field.
-async function tabTo(page: Page, target: ReturnType<Page['getByRole']>) {
-  for (let presses = 0; presses < 8; presses++) {
+async function tabTo(page: Page, target: ReturnType<Page['getByRole']>, most = 8) {
+  for (let presses = 0; presses < most; presses++) {
     if (await target.evaluate((element) => element === document.activeElement)) return;
     await page.keyboard.press('Tab');
   }
@@ -101,13 +125,18 @@ function recordWrites(page: Page) {
 test('signs in, creates tasks and completes one; all of it survives a reload', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByRole('button', { name: 'Sign in with Pior Labs' })).toBeVisible();
-  await expect(page.getByLabel('New task')).toHaveCount(0);
+  await expect(addButton(page)).toHaveCount(0);
 
   await signIn(page, 'Household One');
   await addTask(page, 'Start: buy oat milk');
   await addTask(page, 'Start: water the plants');
-  await expect(page.getByLabel('New task')).toBeFocused();
-  await expect(page.getByLabel('New task')).toHaveValue('');
+  await expect(addButton(page)).toBeFocused();
+  // The sheet opens again with an empty draft.
+  await page.keyboard.press('Enter');
+  await expect(newTaskField(page)).toBeFocused();
+  await expect(newTaskField(page)).toHaveValue('');
+  await page.keyboard.press('Escape');
+  await expect(addButton(page)).toBeFocused();
 
   // Completing moves the task into the collapsed Completed section.
   await checkbox(page, 'Start: buy oat milk').click();
@@ -306,7 +335,7 @@ test('a second user sees none of the first user\'s tasks, and deleting the last 
   const otherContext = await browser.newContext();
   const other = await otherContext.newPage();
   await signIn(other, 'Household Two');
-  await expect(other.getByText('No tasks yet. Add your first one above.')).toBeVisible();
+  await expect(other.getByText('No tasks yet. Add your first one with the + button.')).toBeVisible();
   await expect(other.getByRole('list')).toHaveCount(0);
   await expect(completedToggle(other)).toHaveCount(0);
   await expect(other.getByText('Private: household one only')).toHaveCount(0);
@@ -326,10 +355,10 @@ test('a second user sees none of the first user\'s tasks, and deleting the last 
   await expect(checkbox(other, 'Private: renamed by two')).toBeVisible();
   await deleteButton(other, 'Private: renamed by two').click();
   await other.getByRole('button', { name: 'Confirm deleting "Private: renamed by two"' }).click();
-  await expect(other.getByText('No tasks yet. Add your first one above.')).toBeVisible();
-  await expect(other.getByLabel('New task')).toBeFocused();
+  await expect(other.getByText('No tasks yet. Add your first one with the + button.')).toBeVisible();
+  await expect(addButton(other)).toBeFocused();
   await other.reload();
-  await expect(other.getByText('No tasks yet. Add your first one above.')).toBeVisible();
+  await expect(other.getByText('No tasks yet. Add your first one with the + button.')).toBeVisible();
 
   // None of that touched Household One.
   await page.reload();
@@ -392,7 +421,7 @@ test('an ended session returns to the signed-out view on rename and on delete', 
     }
     await expect(page.getByRole('alert')).toHaveText('Your session has ended. Please sign in again.');
     await expect(page.getByRole('button', { name: 'Sign in with Pior Labs' })).toBeVisible();
-    await expect(page.getByLabel('New task')).toHaveCount(0);
+    await expect(addButton(page)).toHaveCount(0);
 
     // Signing in again shows the task untouched.
     await signIn(page, 'Household One');
@@ -411,9 +440,11 @@ const rowOf = (page: Page, title: string) => page.getByRole('listitem').filter({
 const dueDateField = (page: Page, title: string) => page.getByLabel(`Due date for "${title}"`, { exact: true });
 
 async function addTaskDue(page: Page, title: string, dueDate: string) {
-  await page.getByLabel('New task').fill(title);
-  await page.getByLabel('Due date', { exact: true }).fill(dueDate);
-  await page.getByLabel('New task').press('Enter');
+  await openAddSheet(page);
+  await newTaskField(page).fill(title);
+  await openChip(page, 'Due date');
+  await addDueDate(page).fill(dueDate);
+  await newTaskField(page).press('Enter');
   await expect(checkbox(page, title)).toBeVisible();
 }
 
@@ -451,9 +482,14 @@ test.describe('due dates west of UTC', () => {
     await addTaskDue(page, 'Groups: dentist appointment', '2026-11-24');
     await addTaskDue(page, 'Groups: renew passport', '2027-02-03');
     await addTask(page, 'Groups: someday, no date');
-    // Both fields are cleared after adding, and focus is back in the title field.
-    await expect(page.getByLabel('New task')).toBeFocused();
-    await expect(page.getByLabel('Due date', { exact: true })).toHaveValue('');
+    // Focus is back on the + button, and the next draft starts with both fields empty.
+    await expect(addButton(page)).toBeFocused();
+    await openAddSheet(page);
+    await expect(newTaskField(page)).toHaveValue('');
+    await expect(chip(page, 'Due date')).toHaveAccessibleName('Due date: none');
+    await openChip(page, 'Due date');
+    await expect(addDueDate(page)).toHaveValue('');
+    await page.keyboard.press('Escape');
     expect(writes.map((body) => JSON.parse(body))).toEqual([
       { title: 'Groups: pay the electricity bill', dueDate: '2026-11-19' },
       { title: 'Groups: put the bins out', dueDate: '2026-11-20' },
@@ -747,18 +783,20 @@ function recordBodies(page: Page) {
 
 // Adds a task with a due date and a preset repeat, using the pointer.
 async function addRepeatingTask(page: Page, title: string, dueDate: string, repeat: string) {
-  await page.getByLabel('New task').fill(title);
-  await page.getByLabel('Due date', { exact: true }).fill(dueDate);
+  await openAddSheet(page);
+  await newTaskField(page).fill(title);
+  await openChip(page, 'Due date');
+  await addDueDate(page).fill(dueDate);
+  await openChip(page, 'Repeat');
   await addRepeats(page).selectOption({ label: repeat });
-  await page.getByRole('button', { name: 'Add task' }).click();
+  await addSheet(page).getByRole('button', { name: 'Add task' }).click();
   await expect(checkbox(page, title)).toBeVisible();
 }
 
 // The open occurrence of a title (its completed copies are in Completed).
 const openCheckbox = (page: Page, group: string, title: string) =>
   groupList(page, group).getByRole('checkbox', { name: title, exact: true });
-// Earlier tests leave completed tasks behind, so the count in the name varies.
-const completedList = (page: Page) => page.getByRole('list', { name: /^Completed \(\d+\)$/ });
+const completedList = (page: Page) => page.getByRole('list', { name: 'Completed', exact: true });
 
 test.describe('repeating tasks west of UTC', () => {
   test.use({ timezoneId: 'America/Toronto', locale: 'en-US' });
@@ -772,13 +810,17 @@ test.describe('repeating tasks west of UTC', () => {
     await signIn(page, 'Household One');
     const bodies = recordBodies(page);
 
-    // Without a date the control is disabled and says why.
-    await expect(addRepeats(page)).toBeDisabled();
-    await expect(page.getByText('Set a due date to repeat')).toBeVisible();
-    await expect(addRepeats(page)).toHaveAccessibleDescription('Set a due date to repeat');
+    // Without a date there is no Repeat chip and no repeat control (D-8).
+    await openAddSheet(page);
+    await expect(chip(page, 'Repeat')).toHaveCount(0);
+    await expect(addRepeats(page)).toHaveCount(0);
+    await page.keyboard.press('Escape');
 
     await addRepeatingTask(page, 'Weekly: put the bins out', '2026-11-20', 'Weekly');
-    await expect(addRepeats(page)).toHaveValue('none');
+    // The next draft starts without a date, so without a repeat.
+    await openAddSheet(page);
+    await expect(chip(page, 'Repeat')).toHaveCount(0);
+    await page.keyboard.press('Escape');
     const today = rowOf(page, 'Weekly: put the bins out');
     await expect(today.getByText('Repeats weekly')).toBeVisible();
     await expect(checkbox(page, 'Weekly: put the bins out')).toHaveAccessibleDescription(
@@ -874,23 +916,17 @@ test.describe('repeating tasks west of UTC', () => {
     await expect(openCheckbox(page, 'Upcoming', 'Undo: feed the cat')).toBeVisible();
   });
 
-  test('without a due date the Repeats select is disabled and skipped by Tab, and a date enables it', async ({
+  test('without a due date the add sheet offers no Repeat chip; a date offers it, and clearing the date removes it with its choice (D-8)', async ({
     page,
   }, testInfo) => {
     await signIn(page, 'Household One');
     const writes = recordBodies(page);
-    const repeats = addRepeats(page);
-    await expect(repeats).toBeDisabled();
-    await expect(repeats).toHaveValue('none');
-    await expect(page.getByText('Set a due date to repeat')).toBeVisible();
-    // It looks disabled: dimmed and with the not-allowed cursor.
-    expect(
-      await repeats.evaluate((element) => {
-        const style = getComputedStyle(element);
-        return { opacity: Number(style.opacity), cursor: style.cursor };
-      }),
-    ).toEqual({ opacity: 0.6, cursor: 'not-allowed' });
-    // Screenshots of the add form without a date, narrow and wide.
+    await openAddSheet(page);
+    await newTaskField(page).fill('Disabled: wash the car');
+    await expect(chip(page, 'Repeat')).toHaveCount(0);
+    await expect(addRepeats(page)).toHaveCount(0);
+    await expect(page.getByText('Set a due date to repeat')).toHaveCount(0);
+    // Screenshots of the sheet without a date, narrow and wide, with no page scroll.
     for (const [name, width] of [
       ['repeat-no-date-narrow', 375],
       ['repeat-no-date-wide', 1280],
@@ -900,52 +936,50 @@ test.describe('repeating tasks west of UTC', () => {
         await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth),
       ).toBe(true);
       const path = testInfo.outputPath(`${name}.png`);
-      await page.locator('form').filter({ has: repeats }).screenshot({ path });
+      await addSheet(page).screenshot({ path });
       await testInfo.attach(name, { path, contentType: 'image/png' });
     }
 
-    // Keyboard: Tab goes from the date field to Add task, never stopping on
-    // Repeats, and Shift+Tab goes straight back to the date field.
-    await page.getByLabel('New task').fill('Disabled: wash the car');
-    const visited: string[] = [];
-    for (let presses = 0; presses < 8; presses++) {
-      await page.keyboard.press('Tab');
-      visited.push(await page.evaluate(() => document.activeElement?.id || document.activeElement?.tagName || ''));
-      if (await page.getByRole('button', { name: 'Add task' }).evaluate((element) => element === document.activeElement)) break;
-    }
-    await expect(page.getByRole('button', { name: 'Add task' })).toBeFocused();
-    expect(visited).not.toContain('new-task-repeat');
-    await page.keyboard.press('Shift+Tab');
-    await expect(page.getByLabel('Due date', { exact: true })).toBeFocused();
-    // The pointer cannot open it either: a click does not focus or change it.
-    await repeats.click({ force: true });
-    await page.keyboard.press('ArrowDown');
-    await expect(repeats).not.toBeFocused();
-    await expect(repeats).toHaveValue('none');
-
-    // A date enables it, and it now takes a choice.
-    await page.getByLabel('Due date', { exact: true }).fill('2026-11-21');
-    await expect(repeats).toBeEnabled();
-    await expect(page.getByText('Set a due date to repeat')).toHaveCount(0);
-    await repeats.selectOption({ label: 'Daily' });
-    await expect(repeats).toHaveValue('daily');
-    // Clearing the date disables it again and resets it.
-    await page.getByLabel('Due date', { exact: true }).fill('');
-    await expect(repeats).toBeDisabled();
-    await expect(repeats).toHaveValue('none');
-    await expect(page.getByText('Set a due date to repeat')).toBeVisible();
+    // A date offers the Repeat chip, after the Date chip, and it takes a choice.
+    await openChip(page, 'Due date');
+    await addSheet(page).getByRole('button', { name: 'Tomorrow', exact: true }).click();
+    await expect(addDueDate(page)).toHaveValue('2026-11-21');
+    await expect(chip(page, 'Due date')).toHaveAccessibleName('Due date: Tomorrow');
+    await expect(chip(page, 'Repeat')).toHaveAccessibleName('Repeat: none');
+    await openChip(page, 'Repeat');
+    await addRepeats(page).selectOption({ label: 'Daily' });
+    await expect(chip(page, 'Repeat')).toHaveAccessibleName('Repeat: Daily');
+    // Clearing the date removes the Repeat chip, and its choice with it.
+    await addSheet(page).getByRole('button', { name: 'Clear due date' }).click();
+    await expect(chip(page, 'Due date')).toHaveAccessibleName('Due date: none');
+    await expect(chip(page, 'Repeat')).toHaveCount(0);
+    await expect(addRepeats(page)).toHaveCount(0);
+    await openChip(page, 'Due date');
+    await addDueDate(page).fill('2026-11-21');
+    await expect(chip(page, 'Repeat')).toHaveAccessibleName('Repeat: none');
     expect(writes).toEqual([]);
   });
 
   test('sets a custom "every 2 weeks" repeat with the keyboard only, then stops it', async ({ page }) => {
     await signIn(page, 'Household One');
     const bodies = recordBodies(page);
-    await page.getByLabel('New task').fill('Keys: clean the gutters');
+    // The + button, then the title; Tab reaches the Date chip, Enter opens its options.
+    await addButton(page).focus();
+    await page.keyboard.press('Enter');
+    await expect(newTaskField(page)).toBeFocused();
+    await page.keyboard.type('Keys: clean the gutters');
     await page.keyboard.press('Tab');
-    await expect(page.getByLabel('Due date', { exact: true })).toBeFocused();
+    await expect(chip(page, 'Due date')).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(chip(page, 'Due date')).toHaveAttribute('aria-expanded', 'true');
+    await tabTo(page, addDueDate(page));
     await page.keyboard.type('11232026');
-    // Tab also steps through the parts of the date field.
-    await tabTo(page, addRepeats(page));
+    await expect(chip(page, 'Repeat')).toHaveAccessibleName('Repeat: none');
+    // Tab steps through the parts of the date field, on to the end of the
+    // sheet and round to its start, where the Repeat chip follows the Date chip.
+    await tabTo(page, chip(page, 'Repeat'), 14);
+    await page.keyboard.press('Enter');
+    await tabTo(page, addRepeats(page), 14);
     // Typing selects an option of a focused select: "C" for Custom.
     await page.keyboard.type('C');
     await expect(addRepeats(page)).toHaveValue('custom');
@@ -959,8 +993,8 @@ test.describe('repeating tasks west of UTC', () => {
     await expect(page.getByRole('combobox', { name: 'Repeat unit' })).toBeFocused();
     await page.keyboard.type('w');
     await expect(page.getByRole('combobox', { name: 'Repeat unit' })).toHaveValue('week');
-    await page.keyboard.press('Tab');
-    await expect(page.getByRole('button', { name: 'Add task' })).toBeFocused();
+    await expect(chip(page, 'Repeat')).toHaveAccessibleName('Repeat: Every 2 weeks');
+    await tabTo(page, addSheet(page).getByRole('button', { name: 'Add task' }));
     await page.keyboard.press('Enter');
     await expect(rowOf(page, 'Keys: clean the gutters').getByText('Repeats every 2 weeks')).toBeVisible();
     expect(bodies[0].body).toEqual({
@@ -1170,19 +1204,36 @@ test.describe('repeating tasks, more edges west of UTC', () => {
     await expect(repeats).toHaveAccessibleDescription('Set a due date to repeat');
   }
 
-  test('the add form resets the repeat when the date is cleared one part at a time (R3-F1)', async ({ page }) => {
+  test('the add sheet resets the repeat when the date is cleared one part at a time (R3-F1)', async ({ page }) => {
     await signIn(page, 'Household One');
     const bodies = recordBodies(page);
-    const date = page.getByLabel('Due date', { exact: true });
-    await page.getByLabel('New task').fill('Parts: water the ferns');
+    const date = addDueDate(page);
+    await openAddSheet(page);
+    await newTaskField(page).fill('Parts: water the ferns');
+    await openChip(page, 'Due date');
     await date.fill('2026-11-24');
+    await openChip(page, 'Repeat');
     await addRepeats(page).selectOption({ label: 'Weekly' });
-    await clearDateParts(page, date, addRepeats(page));
+    // One chip's options show at a time: back to the date.
+    await openChip(page, 'Due date');
+    await date.focus();
+    await page.keyboard.press('Backspace');
+    // Partly typed: no date, so no Repeat chip, but the choice is kept.
+    expect(await dateState(date)).toEqual({ value: '', partial: true });
+    await expect(chip(page, 'Repeat')).toHaveCount(0);
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('Backspace');
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('Backspace');
+    // Every part is empty. The browser fires no input or change event for
+    // this last step; the key that did it resets the repeat.
+    expect(await dateState(date)).toEqual({ value: '', partial: false });
     // Typing a date again starts from "Does not repeat", and so does the task.
     await date.fill('2026-11-24');
-    await expect(addRepeats(page)).toBeEnabled();
+    await expect(chip(page, 'Repeat')).toHaveAccessibleName('Repeat: none');
+    await openChip(page, 'Repeat');
     await expect(addRepeats(page)).toHaveValue('none');
-    await page.getByRole('button', { name: 'Add task' }).click();
+    await addSheet(page).getByRole('button', { name: 'Add task' }).click();
     await expect(checkbox(page, 'Parts: water the ferns')).toBeVisible();
     expect(bodies).toEqual([{ method: 'POST', body: { title: 'Parts: water the ferns', dueDate: '2026-11-24' } }]);
   });
@@ -1276,13 +1327,14 @@ test.describe('notes', () => {
     await fixClock(page, request, new Date('2026-11-20T12:00:00-05:00'));
   });
 
-  const notesToggle = (page: Page) => page.getByRole('button', { name: 'Add notes', exact: true });
-  const addNotes = (page: Page) => page.getByRole('textbox', { name: 'Notes', exact: true });
+  const notesToggle = (page: Page) => chip(page, 'Notes');
+  const addNotes = (page: Page) => addSheet(page).getByRole('textbox', { name: 'Notes', exact: true });
   const editNotes = (page: Page, title: string) =>
     page.getByRole('textbox', { name: `Notes for "${title}"`, exact: true });
   const rowNotes = (page: Page, title: string) => rowOf(page, title).locator('[data-notes]');
   async function addTaskWithNotes(page: Page, title: string, notes: string) {
-    await page.getByLabel('New task').fill(title);
+    await openAddSheet(page);
+    await newTaskField(page).fill(title);
     if ((await notesToggle(page).getAttribute('aria-expanded')) === 'false') await notesToggle(page).click();
     await addNotes(page).fill(notes);
     await addNotes(page).press('Control+Enter');
@@ -1294,17 +1346,17 @@ test.describe('notes', () => {
     await testInfo.attach(name, { path, contentType: 'image/png' });
   }
 
-  test('adds a task with multi-line notes through the toggle; they survive a reload', async ({ page }, testInfo) => {
+  test('adds a task with multi-line notes through the Notes chip; they survive a reload', async ({ page }, testInfo) => {
     await signIn(page, 'Household One');
     const bodies = recordBodies(page);
+    await openAddSheet(page);
     await expect(notesToggle(page)).toHaveAttribute('aria-expanded', 'false');
+    await expect(notesToggle(page)).toHaveAccessibleName('Notes: none');
     await expect(addNotes(page)).toHaveCount(0);
 
-    await page.getByLabel('New task').fill('Notes: call the plumber');
-    // Tab from Add task reaches the toggle; Enter opens the field and Tab reaches it.
-    await page.getByRole('button', { name: 'Add task' }).focus();
-    await page.keyboard.press('Tab');
-    await expect(notesToggle(page)).toBeFocused();
+    await newTaskField(page).fill('Notes: call the plumber');
+    // Tab reaches the Notes chip; Enter opens the field and Tab reaches it.
+    await tabTo(page, notesToggle(page));
     await page.keyboard.press('Enter');
     await expect(notesToggle(page)).toHaveAttribute('aria-expanded', 'true');
     await page.keyboard.press('Tab');
@@ -1322,10 +1374,13 @@ test.describe('notes', () => {
     expect(bodies).toEqual([
       { method: 'POST', body: { title: 'Notes: call the plumber', notes: 'Kitchen tap drips\n  and the shower head' } },
     ]);
-    // The field is cleared and collapsed; focus is back in New task.
+    // The sheet closes and focus is back on the + button; the next draft has no notes.
+    await expect(addSheet(page)).toHaveCount(0);
+    await expect(addButton(page)).toBeFocused();
+    await openAddSheet(page);
     await expect(notesToggle(page)).toHaveAttribute('aria-expanded', 'false');
-    await expect(addNotes(page)).toHaveCount(0);
-    await expect(page.getByLabel('New task')).toBeFocused();
+    await expect(notesToggle(page)).toHaveAccessibleName('Notes: none');
+    await page.keyboard.press('Escape');
     const notes = rowNotes(page, 'Notes: call the plumber');
     await expect(notes).toBeVisible();
     // Line breaks and the inner spacing are shown as typed.
@@ -1342,20 +1397,40 @@ test.describe('notes', () => {
     expect(await rowNotes(page, 'Notes: call the plumber').innerText()).toBe('Kitchen tap drips\n  and the shower head');
   });
 
-  test('notes typed and then hidden are not sent with an add, and are shown again on reopening', async ({ page }) => {
+  test('notes typed and then hidden survive closing the sheet and are sent with the add; clearing the chip clears them (D-3, D-4)', async ({ page }) => {
     await signIn(page, 'Household One');
     const bodies = recordBodies(page);
+    await openAddSheet(page);
     await notesToggle(page).click();
     await addNotes(page).fill('Kept for later');
     await notesToggle(page).click();
     await expect(addNotes(page)).toHaveCount(0);
+    await expect(notesToggle(page)).toHaveAccessibleName('Notes: added');
+    // Closed without adding: the draft stays.
+    await page.keyboard.press('Escape');
+    await expect(addSheet(page)).toHaveCount(0);
+    await expect(addButton(page)).toBeFocused();
+    expect(bodies).toEqual([]);
 
-    await addTask(page, 'Notes: hidden text kept');
-    expect(bodies).toEqual([{ method: 'POST', body: { title: 'Notes: hidden text kept' } }]);
-    await expect(rowNotes(page, 'Notes: hidden text kept')).toHaveCount(0);
-    await expect(notesToggle(page)).toHaveAttribute('aria-expanded', 'false');
+    await openAddSheet(page);
+    await expect(notesToggle(page)).toHaveAccessibleName('Notes: added');
+    await newTaskField(page).fill('Notes: hidden text kept');
+    await newTaskField(page).press('Enter');
+    await expect(checkbox(page, 'Notes: hidden text kept')).toBeVisible();
+    expect(bodies).toEqual([{ method: 'POST', body: { title: 'Notes: hidden text kept', notes: 'Kept for later' } }]);
+    await expect(rowNotes(page, 'Notes: hidden text kept')).toHaveText('Kept for later');
+
+    // Clearing the chip clears the notes, so none are sent.
+    await openAddSheet(page);
     await notesToggle(page).click();
-    await expect(addNotes(page)).toHaveValue('Kept for later');
+    await addNotes(page).fill('Dropped');
+    await addSheet(page).getByRole('button', { name: 'Clear notes' }).click();
+    await expect(addNotes(page)).toHaveValue('');
+    await expect(notesToggle(page)).toHaveAccessibleName('Notes: none');
+    await newTaskField(page).fill('Notes: none sent');
+    await newTaskField(page).press('Enter');
+    await expect(checkbox(page, 'Notes: none sent')).toBeVisible();
+    expect(bodies[1]).toEqual({ method: 'POST', body: { title: 'Notes: none sent' } });
   });
 
   test('edits, cancels and clears notes with the keyboard only', async ({ page }, testInfo) => {
@@ -1498,12 +1573,15 @@ test.describe('notes', () => {
   test('the next occurrence of a repeating task shows the same notes', async ({ page }, testInfo) => {
     await signIn(page, 'Household One');
     const title = 'Notes: weekly bins';
-    await page.getByLabel('New task').fill(title);
-    await page.getByLabel('Due date', { exact: true }).fill('2026-11-20');
+    await openAddSheet(page);
+    await newTaskField(page).fill(title);
+    await openChip(page, 'Due date');
+    await addSheet(page).getByRole('button', { name: 'Today', exact: true }).click();
+    await openChip(page, 'Repeat');
     await addRepeats(page).selectOption({ label: 'Weekly' });
     await notesToggle(page).click();
     await addNotes(page).fill('Green bin\nand the recycling');
-    await page.getByRole('button', { name: 'Add task' }).click();
+    await addSheet(page).getByRole('button', { name: 'Add task' }).click();
     await expect(openCheckbox(page, 'Today', title)).toBeVisible();
 
     await openCheckbox(page, 'Today', title).click();

@@ -52,12 +52,77 @@ async function signOut() {
   await userEvent.click(screen.getByRole('button', { name: 'Household One, account' }));
   await userEvent.click(screen.getByRole('menuitem', { name: 'Sign out' }));
 }
-// The Completed section starts collapsed; this opens it.
+// The Completed section starts collapsed behind "Show N done"; this opens it.
 async function expandCompleted() {
-  const toggle = await screen.findByRole('button', { name: /^Completed \(\d+\)$/ });
+  const toggle = await screen.findByRole('button', { name: /^Show \d+ done$/ });
   expect(toggle.getAttribute('aria-expanded')).toBe('false');
   await userEvent.click(toggle);
   expect(toggle.getAttribute('aria-expanded')).toBe('true');
+  expect(toggle.textContent).toBe('Hide done');
+}
+// The add sheet opens from the round + button ("Add a task"); focus starts in
+// its title field, "New task", which this returns.
+async function openAddSheet() {
+  await userEvent.click(await screen.findByRole('button', { name: 'Add a task' }));
+  return newTaskField();
+}
+const addSheet = () => screen.getByRole('dialog', { name: 'New task' });
+const newTaskField = () => within(addSheet()).getByRole('textbox', { name: 'New task' }) as HTMLInputElement;
+// A chip of the add sheet, by the start of its name ("Due date", "Repeat",
+// "List", "Notes"); its full name states its value.
+const chip = (name: string) =>
+  within(addSheet()).getByRole('button', { name: new RegExp(`^${name}: `) }) as HTMLButtonElement;
+// Shows a chip's options, unless they show already.
+async function openChip(name: string) {
+  if (chip(name).getAttribute('aria-expanded') !== 'true') await userEvent.click(chip(name));
+  expect(chip(name).getAttribute('aria-expanded')).toBe('true');
+}
+// The view title, which is the button that opens the view picker.
+const viewTitle = () => document.getElementById('view-title') as HTMLButtonElement;
+// Opens the view picker unless it is open, and returns its menu.
+async function openPicker() {
+  if (viewTitle().getAttribute('aria-expanded') !== 'true') await userEvent.click(viewTitle());
+  return screen.getByRole('menu', { name: 'Views and lists' });
+}
+// Chooses a view (or "New list", "Manage lists") from the view picker.
+async function pick(name: string) {
+  const menu = await openPicker();
+  const item =
+    within(menu).queryByRole('menuitemradio', { name }) ?? within(menu).getByRole('menuitem', { name });
+  await userEvent.click(item);
+}
+// The picker's items stay on the page while it is closed (hidden), so these
+// read them without opening it: a view's item, the views and lists in order,
+// and the view the picker marks as shown.
+const viewMenu = () => document.getElementById('view-menu')!;
+const tab = (name: string) => within(viewMenu()).getByRole('menuitemradio', { name, hidden: true });
+const tabNames = () =>
+  within(viewMenu())
+    .getAllByRole('menuitemradio', { hidden: true })
+    .map((item) => item.textContent);
+const selectedTab = () =>
+  within(viewMenu())
+    .getAllByRole('menuitemradio', { hidden: true })
+    .filter((item) => item.getAttribute('aria-checked') === 'true')
+    .map((item) => item.textContent);
+// The picker's "Manage lists" item, if it offers one.
+const manageItem = () => within(viewMenu()).queryByRole('menuitem', { name: 'Manage lists', hidden: true });
+// The page has loaded its tasks and lists.
+async function ready() {
+  await screen.findByRole('button', { name: 'Add a task' });
+  await waitFor(() => expect(viewTitle()).toBeTruthy());
+}
+async function openManage() {
+  await pick('Manage lists');
+  expect(screen.getByRole('region', { name: 'Manage lists' })).toBeTruthy();
+}
+// Where the add sheet adds now: the value its List chip states.
+async function addDestination() {
+  const open = screen.queryByRole('dialog', { name: 'New task' });
+  if (!open) await openAddSheet();
+  const value = chip('List').getAttribute('aria-label')!.replace(/^List: /, '');
+  if (!open) await userEvent.click(within(addSheet()).getByRole('button', { name: 'Cancel' }));
+  return value;
 }
 // The title of each visible row, in page order across the group lists: the
 // text of the label around its checkbox.
@@ -160,10 +225,10 @@ describe('task list states', () => {
   test('shows an empty state when there are no tasks', async () => {
     signedIn([]);
     render(<App />);
-    expect(await screen.findByText('No tasks yet. Add your first one above.')).toBeTruthy();
+    expect(await screen.findByText('No tasks yet. Add your first one with the + button.')).toBeTruthy();
     expect(screen.queryByRole('list')).toBeNull();
     expect(screen.queryByRole('alert')).toBeNull();
-    expect(screen.getByLabelText('New task')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Add a task' })).toBeTruthy();
   });
 
   test('shows a load failure with a retry action that recovers', async () => {
@@ -171,8 +236,8 @@ describe('task list states', () => {
     reply('GET /api/tasks', () => Promise.reject(new TypeError('network down')), json({ tasks: [milk] }));
     render(<App />);
     expect((await screen.findByRole('alert')).textContent).toBe('Your tasks could not be loaded.');
-    expect(screen.queryByText('No tasks yet. Add your first one above.')).toBeNull();
-    expect(screen.queryByLabelText('New task')).toBeNull();
+    expect(screen.queryByText('No tasks yet. Add your first one with the + button.')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Add a task' })).toBeNull();
 
     // A second failure (network error this time) keeps the failure state.
     await userEvent.click(screen.getByRole('button', { name: 'Try again' }));
@@ -191,21 +256,23 @@ describe('creating a task', () => {
     signedIn([milk]);
     reply('POST /api/tasks', json({ task: { id: 7, title: 'Call the plumber', completed: false, dueDate: null } }, 201));
     render(<App />);
-    const input = (await screen.findByLabelText('New task')) as HTMLInputElement;
+    const input = await openAddSheet();
     await userEvent.type(input, '  Call the plumber  ');
     await userEvent.click(screen.getByRole('button', { name: 'Add task' }));
 
     await waitFor(() => expect(taskTitles()).toEqual(['Call the plumber', 'Buy oat milk']));
     expect(callsTo('POST /api/tasks')[0].body).toEqual({ title: 'Call the plumber' });
     expect((screen.getByRole('checkbox', { name: 'Call the plumber' }) as HTMLInputElement).checked).toBe(false);
-    expect(input.value).toBe('');
+    // The sheet closed; it opens again with an empty draft.
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect((await openAddSheet()).value).toBe('');
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
   test('rejects empty and whitespace-only titles inline without a request', async () => {
     signedIn([milk]);
     render(<App />);
-    const input = await screen.findByLabelText('New task');
+    const input = await openAddSheet();
     await userEvent.click(screen.getByRole('button', { name: 'Add task' }));
     expect(screen.getByRole('alert').textContent).toBe('Enter a task title.');
     expect(input.getAttribute('aria-invalid')).toBe('true');
@@ -223,7 +290,7 @@ describe('creating a task', () => {
   test('rejects a title with nothing visible like an empty one, without a request', async () => {
     signedIn([milk]);
     render(<App />);
-    const input = await screen.findByLabelText('New task');
+    const input = await openAddSheet();
     for (const invisible of ['\u200B', ' \u200B\u200D\u2060\uFEFF ', '\u00AD\u200E', '\u3164']) {
       fireEvent.change(input, { target: { value: invisible } });
       expect(screen.queryByRole('alert')).toBeNull();
@@ -240,7 +307,7 @@ describe('creating a task', () => {
     signedIn([milk]);
     reply('POST /api/tasks', json({ task: { id: 8, title: longest, completed: false, dueDate: null } }, 201));
     render(<App />);
-    const input = (await screen.findByLabelText('New task')) as HTMLInputElement;
+    const input = await openAddSheet();
 
     for (const tooLong of ['x'.repeat(201), emoji.repeat(201), `  ${'x'.repeat(199)}${emoji}x  `]) {
       fireEvent.change(input, { target: { value: tooLong } });
@@ -260,7 +327,7 @@ describe('creating a task', () => {
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
-  test('keeps focus in the title field and ignores repeat submits while saving', async () => {
+  test('keeps focus in the title field and ignores repeat submits while saving; then focus returns to + (D-2)', async () => {
     signedIn([milk]);
     let finish!: (response: Response) => void;
     reply(
@@ -269,7 +336,7 @@ describe('creating a task', () => {
       json({ task: { id: 9, title: 'Second', completed: false, dueDate: null } }, 201),
     );
     render(<App />);
-    const input = (await screen.findByLabelText('New task')) as HTMLInputElement;
+    const input = await openAddSheet();
     await userEvent.type(input, 'First{Enter}');
     const button = screen.getByRole('button', { name: 'Adding...' }) as HTMLButtonElement;
 
@@ -287,27 +354,38 @@ describe('creating a task', () => {
     expect(callsTo('POST /api/tasks')).toHaveLength(1);
     expect(input.value).toBe('First');
 
+    // Escape and Cancel do not close the sheet while the add is pending.
+    await userEvent.keyboard('{Escape}');
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.getByRole('dialog', { name: 'New task' })).toBeTruthy();
+
     finish(json({ task: { id: 7, title: 'First', completed: false, dueDate: null } }, 201));
     await waitFor(() => expect(taskTitles()).toEqual(['First', 'Buy oat milk']));
-    // The submit click moved focus to the button; a successful add returns it to the field.
-    expect(document.activeElement).toBe(input);
-    expect(input.readOnly).toBe(false);
-    expect(input.value).toBe('');
+    // The submit click moved focus to the button; a successful add closes the
+    // sheet and returns focus to the + button.
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Add a task' }));
 
+    await userEvent.keyboard('{Enter}');
+    expect(newTaskField().readOnly).toBe(false);
+    expect(newTaskField().value).toBe('');
+    expect(document.activeElement).toBe(newTaskField());
     await userEvent.keyboard('Second{Enter}');
     await waitFor(() => expect(taskTitles()).toEqual(['Second', 'First', 'Buy oat milk']));
     expect(callsTo('POST /api/tasks')).toHaveLength(2);
-    expect(document.activeElement).toBe(input);
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Add a task' }));
   });
 
   test('shows the server message when the server rejects the title', async () => {
     signedIn([milk]);
     reply('POST /api/tasks', json({ error: 'invalid_title', message: 'Enter a task title.' }, 400));
     render(<App />);
-    const input = (await screen.findByLabelText('New task')) as HTMLInputElement;
+    const input = await openAddSheet();
     await userEvent.type(input, 'Rejected by server{Enter}');
     expect((await screen.findByRole('alert')).textContent).toBe('Enter a task title.');
     expect(taskTitles()).toEqual(['Buy oat milk']);
+    // The sheet stays open with the draft.
+    expect(within(addSheet()).getByRole('alert')).toBeTruthy();
     expect(input.value).toBe('Rejected by server');
   });
 
@@ -317,7 +395,7 @@ describe('creating a task', () => {
       Promise.reject(new TypeError('network down')),
     );
     render(<App />);
-    const input = (await screen.findByLabelText('New task')) as HTMLInputElement;
+    const input = await openAddSheet();
     for (let attempt = 1; attempt <= 2; attempt++) {
       if (attempt === 1) await userEvent.type(input, 'Never saved');
       await userEvent.click(screen.getByRole('button', { name: 'Add task' }));
@@ -326,7 +404,8 @@ describe('creating a task', () => {
       );
       await waitFor(() => expect(callsTo('POST /api/tasks')).toHaveLength(attempt));
       expect(taskTitles()).toEqual(['Buy oat milk']);
-      // The typed title is kept so the user can retry.
+      // The sheet stays open and the typed title is kept so the user can retry.
+      expect(newTaskField()).toBe(input);
       expect(input.value).toBe('Never saved');
       await waitFor(() => expect(input.readOnly).toBe(false));
     }
@@ -367,7 +446,7 @@ describe('completing a task', () => {
     finish(json({ task: { ...milk, completed: true } }));
     await waitFor(() => expect(screen.queryByRole('checkbox', { name: 'Buy oat milk' })).toBeNull());
     expect(screen.getByRole('status').textContent).toBe('"Buy oat milk" was moved to Completed.');
-    await waitFor(() => expect(document.activeElement).toBe(button('Completed (1)')));
+    await waitFor(() => expect(document.activeElement).toBe(button('Show 1 done')));
     await expandCompleted();
     const completed = screen.getByRole('checkbox', { name: 'Buy oat milk' }) as HTMLInputElement;
     expect(completed.checked).toBe(true);
@@ -380,7 +459,7 @@ describe('completing a task', () => {
       expect((screen.getByRole('checkbox', { name: 'Buy oat milk' }) as HTMLInputElement).checked).toBe(false),
     );
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('checkbox', { name: 'Buy oat milk' })));
-    expect(screen.queryByRole('button', { name: /^Completed/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /done$/ })).toBeNull();
     expect(callsTo('PATCH /api/tasks/1')[1].body).toEqual({ completed: false });
     expect(screen.queryByRole('alert')).toBeNull();
   });
@@ -779,7 +858,7 @@ describe('deleting a task', () => {
     expect(confirmSpy).not.toHaveBeenCalled();
   });
 
-  test('after deleting the bottom row focus moves up; after the last task, to the new-task field', async () => {
+  test('after deleting the bottom row focus moves up; after the last task, to the + button', async () => {
     signedIn([plants, milk]);
     reply('DELETE /api/tasks/1', noContent());
     reply('DELETE /api/tasks/2', noContent());
@@ -796,9 +875,9 @@ describe('deleting a task', () => {
     // Deleting the last one shows the empty state.
     await userEvent.click(button('Delete "Buy oat milk"'));
     await userEvent.click(button('Confirm deleting "Buy oat milk"'));
-    expect(await screen.findByText('No tasks yet. Add your first one above.')).toBeTruthy();
+    expect(await screen.findByText('No tasks yet. Add your first one with the + button.')).toBeTruthy();
     expect(screen.queryByRole('list')).toBeNull();
-    expect(document.activeElement).toBe(screen.getByLabelText('New task'));
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Add a task' }));
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
@@ -970,7 +1049,7 @@ describe('session handling', () => {
   async function expectSignedOut() {
     expect(await screen.findByRole('button', { name: 'Sign in with Pior Labs' })).toBeTruthy();
     expect(screen.getByRole('alert').textContent).toBe('Your session has ended. Please sign in again.');
-    expect(screen.queryByLabelText('New task')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Add a task' })).toBeNull();
     expect(screen.queryByRole('list')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Household One, account' })).toBeNull();
   }
@@ -985,7 +1064,7 @@ describe('session handling', () => {
     signedIn([milk]);
     reply('POST /api/tasks', json({ error: 'unauthorized' }, 401));
     render(<App />);
-    await userEvent.type(await screen.findByLabelText('New task'), 'Too late{Enter}');
+    await userEvent.type(await openAddSheet(), 'Too late{Enter}');
     await expectSignedOut();
   });
 
@@ -1047,7 +1126,7 @@ describe('session handling', () => {
     reply('POST /api/auth/sign-out', json({ success: true }));
     render(<App />);
     await userEvent.click(await screen.findByRole('checkbox', { name: 'Buy oat milk' }));
-    await userEvent.type(screen.getByLabelText('New task'), 'In flight{Enter}');
+    await userEvent.type(await openAddSheet(), 'In flight{Enter}');
     await signOut();
     expect(await screen.findByRole('button', { name: 'Sign in with Pior Labs' })).toBeTruthy();
 
@@ -1111,7 +1190,7 @@ describe('under StrictMode', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(taskTitles()).toEqual(['Buy oat milk']);
 
-    await userEvent.type(screen.getByLabelText('New task'), 'Call the plumber{Enter}');
+    await userEvent.type(await openAddSheet(), 'Call the plumber{Enter}');
     await waitFor(() => expect(taskTitles()).toEqual(['Call the plumber', 'Buy oat milk']));
     expect(callsTo('POST /api/tasks')).toHaveLength(1);
   });
@@ -1197,7 +1276,6 @@ describe('due dates', () => {
       'Today',
       'Upcoming',
       'No date',
-      'Completed (2)',
     ]);
     expect(rowTitles(group('Overdue'))).toEqual(['Long overdue', 'Overdue newer', 'Overdue older']);
     expect(rowTitles(group('Today'))).toEqual(['Today newer', 'Today older']);
@@ -1215,20 +1293,24 @@ describe('due dates', () => {
       'Someday older',
     ]);
 
-    // Completed: collapsed by default, a button with aria-expanded and aria-controls.
-    const toggle = button('Completed (2)');
+    // Completed: collapsed by default behind "Show N done", a button with
+    // aria-expanded and aria-controls, which reads "Hide done" when open (AC-7).
+    const toggle = button('Show 2 done');
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
     const controlled = document.getElementById(toggle.getAttribute('aria-controls')!)!;
     expect(controlled.tagName).toBe('UL');
+    expect(controlled.getAttribute('aria-label')).toBe('Completed');
     expect(controlled.hidden).toBe(true);
     expect(screen.queryByRole('checkbox', { name: 'Done and late' })).toBeNull();
     await userEvent.click(toggle);
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(toggle.textContent).toBe('Hide done');
     expect(controlled.hidden).toBe(false);
     expect(rowTitles(group(/^Completed/))).toEqual(['Done without date', 'Done and late']);
     expect(within(group(/^Completed/)).getAllByRole('checkbox').every((box) => (box as HTMLInputElement).checked)).toBe(true);
     await userEvent.click(toggle);
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(toggle.textContent).toBe('Show 2 done');
     expect(screen.queryByRole('checkbox', { name: 'Done and late' })).toBeNull();
   });
 
@@ -1242,14 +1324,14 @@ describe('due dates', () => {
     ]);
     expect(screen.queryByRole('list', { name: 'Overdue' })).toBeNull();
     expect(screen.queryByRole('list', { name: 'Today' })).toBeNull();
-    expect(screen.queryByRole('button', { name: /^Completed/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Show \d+ done$/ })).toBeNull();
   });
 
   test('with only completed tasks there is no empty state, only the Completed section', async () => {
     signedIn([due(1, 'All done', '2026-11-19', true)]);
     render(<App />);
-    expect(await screen.findByRole('button', { name: 'Completed (1)' })).toBeTruthy();
-    expect(screen.queryByText('No tasks yet. Add your first one above.')).toBeNull();
+    expect(await screen.findByRole('button', { name: 'Show 1 done' })).toBeTruthy();
+    expect(screen.queryByText('No tasks yet. Add your first one with the + button.')).toBeNull();
     expect(screen.queryByRole('list')).toBeNull();
   });
 
@@ -1303,8 +1385,9 @@ describe('due dates', () => {
     reply('POST /api/tasks', json({ task: due(7, 'Call the plumber', '2026-11-21') }, 201));
     reply('POST /api/tasks', json({ task: due(8, 'Pay the bill', '2026-11-12') }, 201));
     render(<App />);
-    const title = (await screen.findByLabelText('New task')) as HTMLInputElement;
-    const date = screen.getByLabelText('Due date') as HTMLInputElement;
+    let title = await openAddSheet();
+    await openChip('Due date');
+    let date = screen.getByLabelText('Due date') as HTMLInputElement;
     expect(date.type).toBe('date');
     expect(date.min).toBe('2025-01-01');
     expect(date.max).toBe('2100-12-31');
@@ -1314,9 +1397,12 @@ describe('due dates', () => {
     await userEvent.click(button('Add task'));
     await waitFor(() => expect(rowTitles(group('Upcoming'))).toEqual(['Call the plumber']));
     expect(callsTo('POST /api/tasks')[0].body).toEqual({ title: 'Call the plumber', dueDate: '2026-11-21' });
+    await waitFor(() => expect(document.activeElement).toBe(button('Add a task')));
+    title = await openAddSheet();
+    date = screen.getByLabelText('Due date') as HTMLInputElement;
     expect(title.value).toBe('');
     expect(date.value).toBe('');
-    await waitFor(() => expect(document.activeElement).toBe(title));
+    expect(chip('Due date').getAttribute('aria-label')).toBe('Due date: none');
 
     // A past date in the supported range is allowed: the task is overdue at once.
     await userEvent.type(title, 'Pay the bill');
@@ -1334,7 +1420,7 @@ describe('due dates', () => {
       json({ error: 'invalid_due_date', message: 'A due date must be a real calendar date.' }, 400),
     );
     render(<App />);
-    const title = (await screen.findByLabelText('New task')) as HTMLInputElement;
+    const title = await openAddSheet();
     const date = screen.getByLabelText('Due date') as HTMLInputElement;
     await userEvent.type(title, 'Too early');
     for (const value of ['2024-12-31', '2101-01-01']) {
@@ -1346,6 +1432,9 @@ describe('due dates', () => {
       expect(date.getAttribute('aria-invalid')).toBe('true');
       expect(date.getAttribute('aria-describedby')).toBe(alert.id);
       expect(title.getAttribute('aria-invalid')).toBeNull();
+      // The message shows with the date options, which the error opened (AC-5).
+      expect(chip('Due date').getAttribute('aria-expanded')).toBe('true');
+      expect(document.getElementById('new-task-date-options')!.contains(alert)).toBe(true);
     }
     expect(callsTo('POST /api/tasks')).toHaveLength(0);
 
@@ -1524,7 +1613,7 @@ describe('due dates', () => {
     expect(screen.getByRole('status').textContent).toBe('"Second" was moved to Completed.');
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('checkbox', { name: 'Third' })));
     expect(taskTitles()).toEqual(['First', 'Third']);
-    expect(button('Completed (1)').getAttribute('aria-expanded')).toBe('false');
+    expect(button('Show 1 done').getAttribute('aria-expanded')).toBe('false');
 
     // The last visible row: focus moves up, across groups.
     await userEvent.click(screen.getByRole('checkbox', { name: 'Third' }));
@@ -1536,7 +1625,7 @@ describe('due dates', () => {
     // task is now completed, so it is no longer marked overdue.
     await userEvent.click(screen.getByRole('checkbox', { name: 'First' }));
     await waitFor(() => expect(screen.queryByRole('checkbox', { name: 'First' })).toBeNull());
-    await waitFor(() => expect(document.activeElement).toBe(button('Completed (3)')));
+    await waitFor(() => expect(document.activeElement).toBe(button('Show 3 done')));
     await expandCompleted();
     expect(rowTitles(group(/^Completed/))).toEqual(['First', 'Second', 'Third']);
     expect(within(row('First')).queryByText('Overdue')).toBeNull();
@@ -1752,24 +1841,28 @@ describe('repeating tasks', () => {
     expect(description('Was weekly')).toMatch(/^Due \S.* · Repeats weekly$/);
   });
 
-  test('the add form sets a repeat only with a due date, with presets and Custom', async () => {
+  test('the add sheet offers Repeat only with a due date, with presets and Custom (D-8)', async () => {
     signedIn([]);
     reply('POST /api/tasks', json({ task: task(1, 'Bins out', '2026-11-24', weekly) }, 201));
     reply('POST /api/tasks', json({ task: task(2, 'Gutters', '2026-11-30', { every: 2, unit: 'week' }) }, 201));
     reply('POST /api/tasks', json({ task: task(3, 'No repeat', '2026-11-30') }, 201));
     render(<App />);
-    const title = (await screen.findByLabelText('New task')) as HTMLInputElement;
-    const date = screen.getByLabelText('Due date') as HTMLInputElement;
+    let title = await openAddSheet();
+    let date = screen.getByLabelText('Due date') as HTMLInputElement;
+    // No date yet: there is no Repeat chip and no repeat control.
+    expect(within(addSheet()).queryByRole('button', { name: /^Repeat: / })).toBeNull();
+    expect(screen.queryByRole('combobox', { name: 'Repeats' })).toBeNull();
+    expect(screen.queryByText('Set a due date to repeat')).toBeNull();
+
+    // With a date it is offered, as a chip that opens the repeat control.
+    await userEvent.type(title, 'Bins out');
+    fireEvent.change(date, { target: { value: '2026-11-24' } });
+    expect(chip('Repeat').getAttribute('aria-label')).toBe('Repeat: none');
+    await openChip('Repeat');
     const repeats = select('Repeats');
-    // No date yet: the control is disabled, cannot be changed, and says why.
     expect(repeats.value).toBe('none');
-    expect(repeats.disabled).toBe(true);
+    expect(repeats.disabled).toBe(false);
     expect(repeats.getAttribute('aria-disabled')).toBeNull();
-    expect(repeats.className).toContain('disabled:opacity-60');
-    const hint = screen.getByText('Set a due date to repeat');
-    expect(repeats.getAttribute('aria-describedby')).toBe(hint.id);
-    await userEvent.selectOptions(repeats, 'weekly');
-    expect(repeats.value).toBe('none');
     expect([...repeats.options].map((option) => option.textContent)).toEqual([
       'Does not repeat',
       'Daily',
@@ -1778,27 +1871,24 @@ describe('repeating tasks', () => {
       'Yearly',
       'Custom',
     ]);
-
-    // With a date it is available.
-    await userEvent.type(title, 'Bins out');
-    fireEvent.change(date, { target: { value: '2026-11-24' } });
-    expect(repeats.disabled).toBe(false);
-    expect(repeats.getAttribute('aria-disabled')).toBeNull();
-    expect(screen.queryByText('Set a due date to repeat')).toBeNull();
     await userEvent.selectOptions(repeats, 'weekly');
     expect(repeats.value).toBe('weekly');
+    expect(chip('Repeat').getAttribute('aria-label')).toBe('Repeat: Weekly');
     await userEvent.click(button('Add task'));
     await waitFor(() => expect(callsTo('POST /api/tasks')).toHaveLength(1));
     expect(callsTo('POST /api/tasks')[0].body).toEqual({ title: 'Bins out', dueDate: '2026-11-24', repeat: weekly });
-    // Stored: the row shows it, and the form is reset, repeat included.
+    // Stored: the row shows it, and the draft is reset, repeat included.
     await waitFor(() => expect(description('Bins out')).toMatch(/Repeats weekly$/));
-    expect(select('Repeats').value).toBe('none');
-    expect(select('Repeats').disabled).toBe(true);
+    title = await openAddSheet();
+    date = screen.getByLabelText('Due date') as HTMLInputElement;
+    expect(within(addSheet()).queryByRole('button', { name: /^Repeat: / })).toBeNull();
+    expect(screen.queryByRole('combobox', { name: 'Repeats' })).toBeNull();
 
     // Custom reveals the number and the unit.
     await userEvent.type(title, 'Gutters');
     fireEvent.change(date, { target: { value: '2026-11-30' } });
     expect(screen.queryByRole('spinbutton', { name: 'Every' })).toBeNull();
+    await openChip('Repeat');
     await userEvent.selectOptions(select('Repeats'), 'custom');
     const every = screen.getByRole('spinbutton', { name: 'Every' }) as HTMLInputElement;
     const unit = select('Repeat unit');
@@ -1826,13 +1916,18 @@ describe('repeating tasks', () => {
     await waitFor(() => expect(description('Gutters')).toMatch(/Repeats every 2 weeks$/));
 
     // Removing the date resets the repeat, so nothing repeating is sent.
+    title = await openAddSheet();
+    date = screen.getByLabelText('Due date') as HTMLInputElement;
     await userEvent.type(title, 'No repeat');
     fireEvent.change(date, { target: { value: '2026-11-30' } });
+    await openChip('Repeat');
     await userEvent.selectOptions(select('Repeats'), 'monthly');
     fireEvent.change(date, { target: { value: '' } });
-    expect(select('Repeats').value).toBe('none');
-    expect(select('Repeats').disabled).toBe(true);
+    expect(screen.queryByRole('combobox', { name: 'Repeats' })).toBeNull();
+    expect(within(addSheet()).queryByRole('button', { name: /^Repeat: / })).toBeNull();
     fireEvent.change(date, { target: { value: '2026-11-30' } });
+    expect(chip('Repeat').getAttribute('aria-label')).toBe('Repeat: none');
+    await openChip('Repeat');
     expect(select('Repeats').value).toBe('none');
     await userEvent.click(button('Add task'));
     await waitFor(() => expect(callsTo('POST /api/tasks')).toHaveLength(3));
@@ -1843,10 +1938,13 @@ describe('repeating tasks', () => {
     signedIn([]);
     reply('POST /api/tasks', json({ error: 'invalid_repeat', message: 'A repeat must be null or an object.' }, 400));
     render(<App />);
-    const title = (await screen.findByLabelText('New task')) as HTMLInputElement;
+    const title = await openAddSheet();
     await userEvent.type(title, 'Rejected');
     fireEvent.change(screen.getByLabelText('Due date'), { target: { value: '2026-11-24' } });
+    await openChip('Repeat');
     await userEvent.selectOptions(select('Repeats'), 'daily');
+    // Closed again: the error opens it.
+    await userEvent.click(chip('Repeat'));
     await userEvent.click(button('Add task'));
     const alert = await screen.findByRole('alert');
     expect(alert.textContent).toBe('A repeat must be null or an object.');
@@ -1854,6 +1952,7 @@ describe('repeating tasks', () => {
     expect(select('Repeats').getAttribute('aria-describedby')).toBe(alert.id);
     expect(title.getAttribute('aria-invalid')).toBeNull();
     expect(select('Repeats').value).toBe('daily');
+    expect(chip('Repeat').getAttribute('aria-expanded')).toBe('true');
   });
 
   test('the edit row changes and stops a repeat, sending only what changed', async () => {
@@ -1982,23 +2081,26 @@ describe('repeating tasks', () => {
     };
   }
 
-  test('the add form resets the repeat once a date emptied part by part has no part left (R3-F1)', async () => {
+  test('the add sheet resets the repeat once a date emptied part by part has no part left (R3-F1)', async () => {
     signedIn([]);
     render(<App />);
-    await screen.findByLabelText('New task');
+    await openAddSheet();
     const date = screen.getByLabelText('Due date') as HTMLInputElement;
     // The reset comes with the key that emptied the last part, or on leaving the field.
     for (const finish of [() => fireEvent.keyUp(date, { key: 'Backspace' }), () => fireEvent.blur(date)]) {
       fireEvent.change(date, { target: { value: '2026-11-24' } });
+      await openChip('Repeat');
       await userEvent.selectOptions(select('Repeats'), 'weekly');
+      // Partly typed: no date, so no Repeat chip, but the choice is kept.
+      typePartOfDate(date);
+      expect(within(addSheet()).queryByRole('button', { name: /^Repeat: / })).toBeNull();
+      fireEvent.change(date, { target: { value: '2026-11-25' } });
+      expect(chip('Repeat').getAttribute('aria-label')).toBe('Repeat: Weekly');
       const emptyLastPart = typePartOfDate(date);
-      // Partly typed: disabled, the choice kept.
-      expect(select('Repeats').value).toBe('weekly');
-      expect(select('Repeats').disabled).toBe(true);
       emptyLastPart();
       finish();
-      expect(select('Repeats').value).toBe('none');
-      expect(select('Repeats').disabled).toBe(true);
+      fireEvent.change(date, { target: { value: '2026-11-24' } });
+      expect(chip('Repeat').getAttribute('aria-label')).toBe('Repeat: none');
       Reflect.deleteProperty(date, 'validity');
     }
   });
@@ -2054,18 +2156,19 @@ describe('repeating tasks', () => {
     save.finish(json({ task: task(4, 'Bins out', '2026-11-24', { every: 3, unit: 'week' }) }));
     await waitFor(() => expect(description('Bins out')).toMatch(/Repeats every 3 weeks$/));
 
-    // The add form while creating: a date is set, so the lock is aria-disabled.
-    await userEvent.type(screen.getByLabelText('New task'), 'Gutters');
+    // The add sheet while creating: a date is set, so the lock is aria-disabled.
+    await userEvent.type(await openAddSheet(), 'Gutters');
     fireEvent.change(screen.getByLabelText('Due date'), { target: { value: '2026-11-30' } });
+    await openChip('Repeat');
     await userEvent.selectOptions(select('Repeats'), 'weekly');
     await userEvent.click(button('Add task'));
     expect(select('Repeats').getAttribute('aria-disabled')).toBe('true');
     expect(select('Repeats').disabled).toBe(false);
     create.finish(json({ task: task(5, 'Gutters', '2026-11-30', weekly) }, 201));
     await waitFor(() => expect(description('Gutters')).toMatch(/Repeats weekly$/));
-    // Reset after creating: no date, so disabled again.
-    expect(select('Repeats').disabled).toBe(true);
-    expect(select('Repeats').getAttribute('aria-disabled')).toBeNull();
+    // Reset after creating: no date, so no Repeat chip or control (D-8).
+    await openAddSheet();
+    expect(screen.queryByRole('combobox', { name: 'Repeats' })).toBeNull();
   });
 
   test('ticking a repeating task adds the next occurrence and moves focus to it (Completed collapsed)', async () => {
@@ -2090,7 +2193,7 @@ describe('repeating tasks', () => {
     expect(status()).toMatch(/^"Water the plants" is next due \S+, \S+ 27\.$/);
     await waitFor(() => expect(document.activeElement).toBe(checkbox('Water the plants')));
     expect(checkbox('Water the plants').checked).toBe(false);
-    expect(button('Completed (1)').getAttribute('aria-expanded')).toBe('false');
+    expect(button('Show 1 done').getAttribute('aria-expanded')).toBe('false');
     await expandCompleted();
     expect(rowTitles(group(/^Completed/))).toEqual(['Water the plants']);
   });
@@ -2209,8 +2312,10 @@ describe('repeating tasks', () => {
     expect(select('Repeat unit for "Every 5 days"').value).toBe('day');
     await userEvent.click(button('Cancel'));
 
-    // The add form has no stored repeat: Custom starts at every 1 week.
+    // The add sheet has no stored repeat: Custom starts at every 1 week.
+    await openAddSheet();
     fireEvent.change(screen.getByLabelText('Due date'), { target: { value: '2026-11-24' } });
+    await openChip('Repeat');
     for (const choice of ['monthly', 'yearly', 'custom']) {
       fireEvent.change(select('Repeats'), { target: { value: choice } });
     }
@@ -2252,7 +2357,7 @@ describe('repeating tasks', () => {
 
 describe('notes', () => {
   const withNotes = (notes: string | null) => ({ ...milk, notes });
-  const notesToggle = () => screen.getByRole('button', { name: 'Add notes' });
+  const notesToggle = () => chip('Notes');
   const addNotesField = () => screen.getByRole('textbox', { name: 'Notes' }) as HTMLTextAreaElement;
   const editNotesField = (title: string) =>
     screen.getByRole('textbox', { name: `Notes for "${title}"` }) as HTMLTextAreaElement;
@@ -2260,20 +2365,18 @@ describe('notes', () => {
   const rowNotes = (title: string) =>
     screen.getByRole('checkbox', { name: title }).closest('li')!.querySelector<HTMLElement>('[data-notes]');
 
-  test('"Add notes" reveals a labelled notes field after Add task; Ctrl+Enter adds with notes', async () => {
+  test('the Notes chip reveals a labelled notes field; Ctrl+Enter adds with notes', async () => {
     signedIn([]);
     reply(
       'POST /api/tasks',
       json({ task: { id: 7, title: 'Call the plumber', notes: 'Kitchen tap\n  and the shower', completed: false, dueDate: null, repeat: null } }, 201),
     );
     render(<App />);
-    const title = (await screen.findByLabelText('New task')) as HTMLInputElement;
+    const title = await openAddSheet();
     const toggle = notesToggle();
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(toggle.getAttribute('aria-label')).toBe('Notes: none');
     expect(screen.queryByRole('textbox', { name: 'Notes' })).toBeNull();
-    // The toggle comes after Add task, so the existing order is unchanged.
-    const addTask = screen.getByRole('button', { name: 'Add task' });
-    expect(addTask.compareDocumentPosition(toggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     await userEvent.click(toggle);
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
@@ -2283,75 +2386,89 @@ describe('notes', () => {
     // Enter in the notes field is a new line, not a submit.
     await userEvent.type(notes, '  Kitchen tap{Enter}  and the shower  ');
     expect(notes.value).toBe('  Kitchen tap\n  and the shower  ');
+    expect(notesToggle().getAttribute('aria-label')).toBe('Notes: added');
     expect(callsTo('POST /api/tasks')).toHaveLength(0);
     await userEvent.keyboard('{Control>}{Enter}{/Control}');
 
     await waitFor(() => expect(taskTitles()).toEqual(['Call the plumber']));
     expect(callsTo('POST /api/tasks')[0].body).toEqual({ title: 'Call the plumber', notes: 'Kitchen tap\n  and the shower' });
-    // The notes field is cleared and collapsed; focus is back in the title field.
-    expect(toggle.getAttribute('aria-expanded')).toBe('false');
-    expect(screen.queryByRole('textbox', { name: 'Notes' })).toBeNull();
-    expect(document.activeElement).toBe(title);
-    await userEvent.click(toggle);
+    // The sheet closed; focus is on the + button. The draft's notes are cleared.
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Add a task' }));
+    await openAddSheet();
+    expect(notesToggle().getAttribute('aria-expanded')).toBe('false');
+    await userEvent.click(notesToggle());
     expect(addNotesField().value).toBe('');
     expect(rowNotes('Call the plumber')!.textContent).toBe('Kitchen tap\n  and the shower');
   });
 
-  test('Cmd+Enter also adds; empty or hidden notes are not sent', async () => {
+  test('Cmd+Enter also adds; empty notes are not sent; notes with text are sent with their field closed (D-4)', async () => {
     signedIn([]);
     reply(
       'POST /api/tasks',
       json({ task: { id: 7, title: 'First', notes: null, completed: false, dueDate: null, repeat: null } }, 201),
-      json({ task: { id: 8, title: 'Second', notes: null, completed: false, dueDate: null, repeat: null } }, 201),
-      json({ task: { id: 9, title: 'Third', notes: 'Shown', completed: false, dueDate: null, repeat: null } }, 201),
+      json({ task: { id: 8, title: 'Second', notes: 'Hidden', completed: false, dueDate: null, repeat: null } }, 201),
+      json({ task: { id: 9, title: 'Third', notes: null, completed: false, dueDate: null, repeat: null } }, 201),
     );
     render(<App />);
-    const title = (await screen.findByLabelText('New task')) as HTMLInputElement;
+    let title = await openAddSheet();
     // Notes with nothing visible are no notes: only the title is sent.
     await userEvent.click(notesToggle());
     await userEvent.type(title, 'First');
     await userEvent.type(addNotesField(), ' {Enter}​ ');
+    expect(notesToggle().getAttribute('aria-label')).toBe('Notes: added');
     await userEvent.keyboard('{Meta>}{Enter}{/Meta}');
     await waitFor(() => expect(callsTo('POST /api/tasks')).toHaveLength(1));
     expect(callsTo('POST /api/tasks')[0].body).toEqual({ title: 'First' });
-    await waitFor(() => expect(notesToggle().getAttribute('aria-expanded')).toBe('false'));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
 
-    // Notes typed and then hidden again are kept for later, but not sent.
+    // Notes typed and then hidden again are still the draft's notes: sent.
+    title = await openAddSheet();
     await userEvent.click(notesToggle());
     await userEvent.type(addNotesField(), 'Hidden');
     await userEvent.click(notesToggle());
+    expect(screen.queryByRole('textbox', { name: 'Notes' })).toBeNull();
+    expect(notesToggle().getAttribute('aria-label')).toBe('Notes: added');
     await userEvent.type(title, 'Second{Enter}');
     await waitFor(() => expect(callsTo('POST /api/tasks')).toHaveLength(2));
-    expect(callsTo('POST /api/tasks')[1].body).toEqual({ title: 'Second' });
+    expect(callsTo('POST /api/tasks')[1].body).toEqual({ title: 'Second', notes: 'Hidden' });
     await waitFor(() => expect(taskTitles()).toEqual(['Second', 'First']));
 
+    // Clearing the chip clears them, so nothing is sent.
+    title = await openAddSheet();
     await userEvent.click(notesToggle());
-    // The hidden text was kept through the add; replace it.
-    expect(addNotesField().value).toBe('Hidden');
-    await userEvent.clear(addNotesField());
-    await userEvent.type(addNotesField(), 'Shown');
+    await userEvent.type(addNotesField(), 'Dropped');
+    await userEvent.click(within(addSheet()).getByRole('button', { name: 'Clear notes' }));
+    expect(addNotesField().value).toBe('');
+    expect(notesToggle().getAttribute('aria-label')).toBe('Notes: none');
+    expect(within(addSheet()).queryByRole('button', { name: 'Clear notes' })).toBeNull();
     await userEvent.type(title, 'Third{Enter}');
     await waitFor(() => expect(callsTo('POST /api/tasks')).toHaveLength(3));
-    expect(callsTo('POST /api/tasks')[2].body).toEqual({ title: 'Third', notes: 'Shown' });
+    expect(callsTo('POST /api/tasks')[2].body).toEqual({ title: 'Third' });
   });
 
-  test('R1-F1: notes typed and then hidden survive a successful add, and are shown again on reopening', async () => {
+  test('R1-F1: notes typed and then hidden survive dismissing the sheet, and are shown again on reopening (D-3)', async () => {
     signedIn([]);
     reply(
       'POST /api/tasks',
-      json({ task: { id: 7, title: 'Plain', notes: null, completed: false, dueDate: null, repeat: null } }, 201),
+      json({ task: { id: 7, title: 'Plain', notes: 'Keep me', completed: false, dueDate: null, repeat: null } }, 201),
     );
     render(<App />);
-    const title = (await screen.findByLabelText('New task')) as HTMLInputElement;
+    let title = await openAddSheet();
+    await userEvent.type(title, 'Plain');
     await userEvent.click(notesToggle());
     await userEvent.type(addNotesField(), 'Keep me');
     await userEvent.click(notesToggle());
-    await userEvent.type(title, 'Plain{Enter}');
-    await waitFor(() => expect(taskTitles()).toEqual(['Plain']));
-    expect(callsTo('POST /api/tasks')[0].body).toEqual({ title: 'Plain' });
-    expect(notesToggle().getAttribute('aria-expanded')).toBe('false');
+    await userEvent.click(within(addSheet()).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(callsTo('POST /api/tasks')).toHaveLength(0);
+    title = await openAddSheet();
+    expect(title.value).toBe('Plain');
     await userEvent.click(notesToggle());
     expect(addNotesField().value).toBe('Keep me');
+    await userEvent.click(within(addSheet()).getByRole('button', { name: 'Add task' }));
+    await waitFor(() => expect(taskTitles()).toEqual(['Plain']));
+    expect(callsTo('POST /api/tasks')[0].body).toEqual({ title: 'Plain', notes: 'Keep me' });
   });
 
   test('over-limit notes in the add form show an error on the field and send nothing', async () => {
@@ -2362,7 +2479,7 @@ describe('notes', () => {
       json({ task: { id: 7, title: 'Long', notes: emoji.repeat(5000), completed: false, dueDate: null, repeat: null } }, 201),
     );
     render(<App />);
-    const title = (await screen.findByLabelText('New task')) as HTMLInputElement;
+    const title = await openAddSheet();
     await userEvent.type(title, 'Long');
     await userEvent.click(notesToggle());
     const notes = addNotesField();
@@ -2379,6 +2496,11 @@ describe('notes', () => {
       expect(notes.getAttribute('aria-invalid')).toBe('true');
       expect(notes.getAttribute('aria-describedby')).toBe(alert.id);
       expect(title.getAttribute('aria-invalid')).toBeNull();
+      // Even with the notes closed, the error opens them again (AC-5).
+      await userEvent.click(notesToggle());
+      await userEvent.click(screen.getByRole('button', { name: 'Add task' }));
+      expect(notesToggle().getAttribute('aria-expanded')).toBe('true');
+      expect(screen.getByRole('alert').textContent).toBe(message);
     }
     expect(callsTo('POST /api/tasks')).toHaveLength(0);
     // Typing clears the error; 5000 characters counted as code points is fine.
@@ -2393,7 +2515,7 @@ describe('notes', () => {
     signedIn([]);
     reply('POST /api/tasks', json({ error: 'invalid_notes', message: 'Notes must be text of at most 5000 characters, or null.' }, 400));
     render(<App />);
-    await userEvent.type(await screen.findByLabelText('New task'), 'Milk');
+    await userEvent.type(await openAddSheet(), 'Milk');
     await userEvent.click(notesToggle());
     await userEvent.type(addNotesField(), 'Two litres');
     await userEvent.click(screen.getByRole('button', { name: 'Add task' }));
@@ -2603,93 +2725,97 @@ describe('lists', () => {
   const stamps = inList(4, 'Buy stamps', 10);
   const post = inList(5, 'Post the letter', 10, true);
   const withLists = (...lists: unknown[]) => reply('GET /api/lists', json({ lists }));
-  const tablist = () => screen.getByRole('tablist', { name: 'Lists' });
-  const tab = (name: string) => within(tablist()).getByRole('tab', { name });
-  const tabNames = () => within(tablist()).getAllByRole('tab').map((item) => item.textContent);
-  const selectedTab = () =>
-    within(tablist())
-      .getAllByRole('tab')
-      .filter((item) => item.getAttribute('aria-selected') === 'true')
-      .map((item) => item.textContent);
   const status = () => screen.getByRole('status').textContent;
   const listField = (title: string) => screen.getByRole('combobox', { name: `List for "${title}"` }) as HTMLSelectElement;
-  const newTask = () => screen.getByLabelText('New task') as HTMLInputElement;
   // The muted list label of a row, if it has one.
   const rowLabel = (title: string) =>
     screen.getByRole('checkbox', { name: title }).closest('li')!.querySelector('[data-list-label]')?.textContent ?? null;
-  async function ready() {
-    await screen.findByRole('tablist', { name: 'Lists' });
-    await screen.findByLabelText('New task');
-  }
-  async function openManage() {
-    await userEvent.click(button('Manage lists'));
-    expect(button('Manage lists').getAttribute('aria-expanded')).toBe('true');
-  }
 
-  test('the tab row shows All tasks, Inbox, Assigned to me and the lists in creation order; arrows, Home and End select (AC-8; assigned-to-me AC-1)', async () => {
+  test('the view picker lists All tasks, Inbox, Assigned to me and the lists in creation order; arrows, Home and End move, Enter chooses (AC-2; assigned-to-me AC-1)', async () => {
     signedIn([milk, stamps]);
     withLists(errands, home);
     render(<App />);
     await ready();
     await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Assigned to me', 'Errands', 'Home']));
     expect(selectedTab()).toEqual(['All tasks']);
-    // Only the selected tab is in the Tab order.
-    expect(within(tablist()).getAllByRole('tab').map((item) => item.tabIndex)).toEqual([0, -1, -1, -1, -1]);
-    // The task area, add form included, is the selected tab's panel.
-    const panel = screen.getByRole('tabpanel');
-    expect(panel.getAttribute('aria-labelledby')).toBe(tab('All tasks').id);
-    expect(tab('All tasks').getAttribute('aria-controls')).toBe(panel.id);
-    expect(panel.contains(newTask())).toBe(true);
-    // New list and Manage lists are ordinary buttons after the tablist.
-    expect(tablist().compareDocumentPosition(button('New list')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(within(tablist()).queryByRole('button')).toBeNull();
+    // The view's name is the page title and the button that opens the menu.
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('All tasks');
+    expect(screen.getByRole('heading', { level: 1 }).contains(viewTitle())).toBe(true);
+    expect(viewTitle().textContent).toBe('All tasks');
+    expect(viewTitle().getAttribute('aria-haspopup')).toBe('menu');
+    expect(viewTitle().getAttribute('aria-expanded')).toBe('false');
+    expect(viewTitle().getAttribute('aria-controls')).toBe(viewMenu().id);
+    expect(screen.queryByRole('menu', { name: 'Views and lists' })).toBeNull();
 
-    act(() => tab('All tasks').focus());
-    await userEvent.keyboard('{ArrowRight}');
-    expect(selectedTab()).toEqual(['Inbox']);
+    // Opening it focuses the checked item; New list and Manage lists come after the views.
+    await userEvent.click(viewTitle());
+    const menu = screen.getByRole('menu', { name: 'Views and lists' });
+    expect(viewTitle().getAttribute('aria-expanded')).toBe('true');
+    expect(within(menu).getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['New list', 'Manage lists']);
+    expect(document.activeElement).toBe(tab('All tasks'));
+    // Arrow keys move focus only; nothing is chosen yet.
+    await userEvent.keyboard('{ArrowDown}');
     expect(document.activeElement).toBe(tab('Inbox'));
+    expect(selectedTab()).toEqual(['All tasks']);
+    expect(location.search).toBe('');
+    // Enter chooses: the menu closes, focus is back on the title, the URL follows.
+    await userEvent.keyboard('{Enter}');
+    expect(screen.queryByRole('menu', { name: 'Views and lists' })).toBeNull();
+    expect(document.activeElement).toBe(viewTitle());
+    expect(viewTitle().textContent).toBe('Inbox');
+    expect(selectedTab()).toEqual(['Inbox']);
     expect(location.search).toBe('?list=inbox');
     expect(taskTitles()).toEqual(['Buy oat milk']);
-    expect(screen.getByRole('tabpanel').getAttribute('aria-labelledby')).toBe(tab('Inbox').id);
-    expect(within(tablist()).getAllByRole('tab').map((item) => item.tabIndex)).toEqual([-1, 0, -1, -1, -1]);
 
-    // Then the built-in "Assigned to me".
-    await userEvent.keyboard('{ArrowRight}');
-    expect(selectedTab()).toEqual(['Assigned to me']);
+    // From the title, the down arrow opens the menu at the checked item.
+    await userEvent.keyboard('{ArrowDown}');
+    expect(document.activeElement).toBe(tab('Inbox'));
+    await userEvent.keyboard('{ArrowUp}');
+    expect(document.activeElement).toBe(tab('All tasks'));
+    // Past the first item: the last one, Manage lists.
+    await userEvent.keyboard('{ArrowUp}');
+    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Manage lists' }));
+    // Past the last item: back to the first.
+    await userEvent.keyboard('{ArrowDown}');
+    expect(document.activeElement).toBe(tab('All tasks'));
+    await userEvent.keyboard('{End}');
+    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Manage lists' }));
+    await userEvent.keyboard('{Home}');
+    expect(document.activeElement).toBe(tab('All tasks'));
+    await userEvent.keyboard('{ArrowDown}{ArrowDown}');
     expect(document.activeElement).toBe(tab('Assigned to me'));
-    expect(location.search).toBe('?list=assigned');
-    expect(screen.getByRole('tabpanel').getAttribute('aria-labelledby')).toBe(tab('Assigned to me').id);
-    expect(within(tablist()).getAllByRole('tab').map((item) => item.tabIndex)).toEqual([-1, -1, 0, -1, -1]);
+    // Escape closes without choosing and returns focus to the title.
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByRole('menu', { name: 'Views and lists' })).toBeNull();
+    expect(document.activeElement).toBe(viewTitle());
+    expect(selectedTab()).toEqual(['Inbox']);
 
-    await userEvent.keyboard('{ArrowRight}');
+    // Enter on the title opens it too; Space chooses like Enter.
+    await userEvent.keyboard('{Enter}');
+    expect(document.activeElement).toBe(tab('Inbox'));
+    await userEvent.keyboard('{ArrowDown}');
+    await userEvent.keyboard(' ');
+    expect(selectedTab()).toEqual(['Assigned to me']);
+    expect(location.search).toBe('?list=assigned');
+    expect(document.activeElement).toBe(viewTitle());
+
+    // A click chooses a list.
+    await pick('Errands');
     expect(selectedTab()).toEqual(['Errands']);
+    expect(viewTitle().textContent).toBe('Errands');
     expect(location.search).toBe('?list=10');
     expect(taskTitles()).toEqual(['Buy stamps']);
-    await userEvent.keyboard('{ArrowRight}{ArrowRight}');
-    // Past the last tab: back to the first.
-    expect(selectedTab()).toEqual(['All tasks']);
-    expect(document.activeElement).toBe(tab('All tasks'));
-    expect(location.search).toBe('?list=all');
-    await userEvent.keyboard('{ArrowLeft}');
-    expect(selectedTab()).toEqual(['Home']);
-    await userEvent.keyboard('{Home}');
-    expect(selectedTab()).toEqual(['All tasks']);
-    await userEvent.keyboard('{End}');
-    expect(selectedTab()).toEqual(['Home']);
-    expect(document.activeElement).toBe(tab('Home'));
-    // Left from the first list lands on "Assigned to me", then Inbox.
-    await userEvent.keyboard('{ArrowLeft}{ArrowLeft}');
-    expect(selectedTab()).toEqual(['Assigned to me']);
-    await userEvent.keyboard('{ArrowLeft}');
-    expect(selectedTab()).toEqual(['Inbox']);
-    await userEvent.keyboard('{End}');
-    // Tab leaves the tablist for the buttons after it.
-    await userEvent.tab();
-    expect(document.activeElement).toBe(button('New list'));
 
-    await userEvent.click(tab('Errands'));
-    expect(selectedTab()).toEqual(['Errands']);
-    expect(location.search).toBe('?list=10');
+    // A click outside closes it and hands focus back to the title.
+    await userEvent.click(viewTitle());
+    expect(screen.getByRole('menu', { name: 'Views and lists' })).toBeTruthy();
+    await userEvent.click(document.body);
+    expect(screen.queryByRole('menu', { name: 'Views and lists' })).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(viewTitle()));
+    // Tab closes it and moves on, as if it had not been open.
+    await userEvent.click(viewTitle());
+    await userEvent.tab();
+    expect(screen.queryByRole('menu', { name: 'Views and lists' })).toBeNull();
     expect(calls.filter((call) => call.method !== 'GET')).toEqual([]);
   });
 
@@ -2729,8 +2855,8 @@ describe('lists', () => {
     expect(screen.getAllByRole('heading', { level: 2 }).map((item) => item.textContent!.replace('▸', ''))).toEqual([
       'Overdue',
       'No date',
-      'Completed (2)',
     ]);
+    expect(button('Show 2 done')).toBeTruthy();
     expect(rowLabel('Buy stamps')).toBe('List: Errands');
     expect(rowLabel('Fix the shelf')).toBe('List: Home');
     expect(rowLabel('Buy oat milk')).toBeNull();
@@ -2746,22 +2872,21 @@ describe('lists', () => {
 
     // A named list: only its tasks, open and completed, without labels. The
     // Completed section stays expanded across views.
-    await userEvent.click(tab('Errands'));
-    expect(button('Completed (1)').getAttribute('aria-expanded')).toBe('true');
+    await pick('Errands');
+    expect(button('Hide done').getAttribute('aria-expanded')).toBe('true');
     expect(taskTitles()).toEqual(['Buy stamps', 'Post the letter']);
     expect(rowLabel('Buy stamps')).toBeNull();
     expect(screen.getAllByRole('heading', { level: 2 }).map((item) => item.textContent!.replace('▸', ''))).toEqual([
       'Overdue',
-      'Completed (1)',
     ]);
 
     // Inbox: only tasks without a list.
-    await userEvent.click(tab('Inbox'));
+    await pick('Inbox');
     expect(taskTitles()).toEqual(['Buy oat milk', 'Water the plants']);
     expect(rowLabel('Buy oat milk')).toBeNull();
 
     // Each view has its own empty state.
-    await userEvent.click(tab('Work'));
+    await pick('Work');
     expect(screen.getByText('No tasks in Work yet.')).toBeTruthy();
     expect(screen.queryByRole('list')).toBeNull();
   });
@@ -2771,14 +2896,14 @@ describe('lists', () => {
     withLists(errands);
     render(<App />);
     await ready();
-    await userEvent.click(await screen.findByRole('tab', { name: 'Inbox' }));
+    await pick('Inbox');
     expect(screen.getByText('No tasks in Inbox yet.')).toBeTruthy();
     cleanup();
 
     history.replaceState(null, '', '/');
     signedIn([]);
     render(<App />);
-    expect(await screen.findByText('No tasks yet. Add your first one above.')).toBeTruthy();
+    expect(await screen.findByText('No tasks yet. Add your first one with the + button.')).toBeTruthy();
   });
 
   test('a task added in a named list is created there; All tasks and Inbox send no listId (AC-10)', async () => {
@@ -2790,61 +2915,60 @@ describe('lists', () => {
     render(<App />);
     await ready();
 
-    // All tasks: the add goes to Inbox and says so.
-    expect(newTask().placeholder).toBe('Add to Inbox');
-    await userEvent.click(await screen.findByRole('tab', { name: 'Errands' }));
-    expect(newTask().placeholder).toBe('Add to Errands');
-    expect(screen.getByLabelText('New task')).toBe(newTask());
-    await userEvent.type(newTask(), 'Buy envelopes{Enter}');
+    // All tasks: the add goes to Inbox and its List chip says so.
+    expect(await addDestination()).toBe('Inbox');
+    await pick('Errands');
+    expect(await addDestination()).toBe('Errands');
+    await userEvent.type(await openAddSheet(), 'Buy envelopes{Enter}');
     await waitFor(() => expect(taskTitles()).toEqual(['Buy envelopes']));
     expect(callsTo('POST /api/tasks')[0].body).toEqual({ title: 'Buy envelopes', listId: 10 });
-    expect(document.activeElement).toBe(newTask());
+    expect(document.activeElement).toBe(button('Add a task'));
 
-    await userEvent.click(tab('All tasks'));
-    await userEvent.type(newTask(), 'Call the plumber{Enter}');
+    await pick('All tasks');
+    await userEvent.type(await openAddSheet(), 'Call the plumber{Enter}');
     await waitFor(() => expect(taskTitles()).toEqual(['Call the plumber', 'Buy envelopes', 'Buy oat milk']));
     expect(callsTo('POST /api/tasks')[1].body).toEqual({ title: 'Call the plumber' });
 
-    await userEvent.click(tab('Inbox'));
-    expect(newTask().placeholder).toBe('Add to Inbox');
-    await userEvent.type(newTask(), 'Order tea{Enter}');
+    await pick('Inbox');
+    expect(await addDestination()).toBe('Inbox');
+    await userEvent.type(await openAddSheet(), 'Order tea{Enter}');
     await waitFor(() => expect(taskTitles()).toEqual(['Order tea', 'Call the plumber', 'Buy oat milk']));
     expect(callsTo('POST /api/tasks')[2].body).toEqual({ title: 'Order tea' });
   });
 
-  test('"New list" creates a list with Enter, adds its tab and selects it; Escape and Cancel send nothing (AC-11)', async () => {
+  test('"New list" creates a list with Enter, adds it to the picker and shows it; Escape and Cancel send nothing (AC-11)', async () => {
     signedIn([milk]);
     reply('POST /api/lists', json({ list: errands }, 201));
     render(<App />);
     await ready();
     // Without lists there is nothing to manage.
-    expect(screen.queryByRole('button', { name: 'Manage lists' })).toBeNull();
+    expect(manageItem()).toBeNull();
     expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Assigned to me']);
 
-    // Escape closes the field without a request, and focus returns to New list.
-    await userEvent.click(button('New list'));
+    // Escape closes the field without a request, and focus returns to the view title.
+    await pick('New list');
     const field = screen.getByRole('textbox', { name: 'List name' }) as HTMLInputElement;
     expect(document.activeElement).toBe(field);
     await userEvent.type(field, 'Thrown away{Escape}');
     expect(screen.queryByRole('textbox', { name: 'List name' })).toBeNull();
-    expect(document.activeElement).toBe(button('New list'));
+    expect(document.activeElement).toBe(viewTitle());
     // So does Cancel; the field starts empty again.
-    await userEvent.click(button('New list'));
+    await pick('New list');
     expect((screen.getByRole('textbox', { name: 'List name' }) as HTMLInputElement).value).toBe('');
     await userEvent.click(button('Cancel new list'));
     expect(screen.queryByRole('textbox', { name: 'List name' })).toBeNull();
     expect(callsTo('POST /api/lists')).toHaveLength(0);
 
-    await userEvent.click(button('New list'));
+    await pick('New list');
     await userEvent.type(screen.getByRole('textbox', { name: 'List name' }), '  Errands {Enter}');
     await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Assigned to me', 'Errands']));
     expect(callsTo('POST /api/lists')[0].body).toEqual({ name: 'Errands' });
     expect(selectedTab()).toEqual(['Errands']);
-    expect(document.activeElement).toBe(tab('Errands'));
+    expect(document.activeElement).toBe(viewTitle());
     expect(location.search).toBe('?list=10');
     expect(screen.queryByRole('textbox', { name: 'List name' })).toBeNull();
     expect(screen.getByText('No tasks in Errands yet.')).toBeTruthy();
-    expect(button('Manage lists')).toBeTruthy();
+    expect(manageItem()).toBeTruthy();
   });
 
   test('the new list field checks names like the server and shows server errors on the field (AC-11)', async () => {
@@ -2856,7 +2980,7 @@ describe('lists', () => {
     render(<App />);
     await ready();
     await waitFor(() => expect(tabNames()).toContain('Errands'));
-    await userEvent.click(button('New list'));
+    await pick('New list');
     const field = screen.getByRole('textbox', { name: 'List name' }) as HTMLInputElement;
     const emoji = '\u{1F600}';
     const expectError = (message: string) => {
@@ -2907,7 +3031,7 @@ describe('lists', () => {
     reply('POST /api/lists', json({ list: list(11, 'Inbox zero') }, 201));
     render(<App />);
     await ready();
-    await userEvent.click(button('New list'));
+    await pick('New list');
     const field = screen.getByRole('textbox', { name: 'List name' }) as HTMLInputElement;
     // Letter case, invisible code points, and the white space between the words.
     for (const typed of [
@@ -2947,7 +3071,7 @@ describe('lists', () => {
     render(<App />);
     await ready();
     await waitFor(() => expect(tabNames()).toContain('Weekly shop'));
-    await userEvent.click(button('New list'));
+    await pick('New list');
     const field = screen.getByRole('textbox', { name: 'List name' }) as HTMLInputElement;
     const expectError = (message: string) => {
       expect(screen.getByRole('alert').textContent).toBe(message);
@@ -3061,7 +3185,7 @@ describe('lists', () => {
     render(<App />);
     await ready();
     await waitFor(() => expect(tabNames()).toContain('\u00cdnbox'));
-    await userEvent.click(button('New list'));
+    await pick('New list');
     const field = screen.getByRole('textbox', { name: 'List name' }) as HTMLInputElement;
     for (const [typed, message] of [
       ['Cafe\u00ad\u0301', 'You already have a list with that name.'], // soft hyphen between the e and a combining acute
@@ -3083,7 +3207,7 @@ describe('lists', () => {
     reply('POST /api/lists', created.response);
     render(<App />);
     await ready();
-    await userEvent.click(button('New list'));
+    await pick('New list');
     const field = screen.getByRole('textbox', { name: 'List name' }) as HTMLInputElement;
     await userEvent.type(field, 'Errands{Enter}');
     expect(field.readOnly).toBe(true);
@@ -3188,15 +3312,15 @@ describe('lists', () => {
     expect(selectedTab()).toEqual(['Inbox']);
     expect(location.search).toBe('?list=inbox');
     expect(document.activeElement).toBe(button('Rename "Home"'));
-    await userEvent.click(button('Manage lists'));
+    await userEvent.click(button('Close Manage lists'));
     await expandCompleted();
     expect(taskTitles()).toEqual(['Buy oat milk', 'Buy stamps', 'Post the letter']);
-    await userEvent.click(tab('All tasks'));
+    await pick('All tasks');
     expect(rowLabel('Buy stamps')).toBeNull();
     expect(rowLabel('Fix the shelf')).toBe('List: Home');
   });
 
-  test('after the last list is deleted, Manage lists goes away and focus moves to New list (AC-12)', async () => {
+  test('after the last list is deleted, Manage lists goes away and focus moves to the view title (AC-12)', async () => {
     signedIn([milk]);
     withLists(errands);
     reply('DELETE /api/lists/10', json({ movedTaskIds: [] }));
@@ -3207,8 +3331,9 @@ describe('lists', () => {
     await userEvent.click(button('Delete list "Errands"'));
     await userEvent.click(button('Confirm deleting list "Errands"'));
     await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Assigned to me']));
-    expect(screen.queryByRole('button', { name: 'Manage lists' })).toBeNull();
-    expect(document.activeElement).toBe(button('New list'));
+    expect(manageItem()).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Manage lists' })).toBeNull();
+    expect(document.activeElement).toBe(viewTitle());
   });
 
   test('the edit row has a List select after the date and repeat; only a changed list is sent (AC-13, D-7)', async () => {
@@ -3276,17 +3401,17 @@ describe('lists', () => {
     await waitFor(() => expect(taskTitles()).toEqual(['Buy oat milk']));
     expect(callsTo('PATCH /api/tasks/3')[0].body).toEqual({ listId: 10 });
     expect(status()).toBe('Moved "Order tea" to Errands.');
-    // As after a delete: the next row, else the previous, else the new-task field.
+    // As after a delete: the next row, else the previous, else the + button.
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('checkbox', { name: 'Buy oat milk' })));
 
     await startEditing('Buy oat milk');
     await userEvent.selectOptions(listField('Buy oat milk'), 'Errands');
     await userEvent.click(button('Save'));
     await waitFor(() => expect(screen.getByText('No tasks in Inbox yet.')).toBeTruthy());
-    await waitFor(() => expect(document.activeElement).toBe(newTask()));
+    await waitFor(() => expect(document.activeElement).toBe(button('Add a task')));
 
     // Out of a named list, into Inbox.
-    await userEvent.click(tab('Errands'));
+    await pick('Errands');
     expect(taskTitles()).toEqual(['Order tea', 'Buy oat milk', 'Buy stamps']);
     await startEditing('Buy stamps');
     await userEvent.selectOptions(listField('Buy stamps'), 'Inbox');
@@ -3320,7 +3445,7 @@ describe('lists', () => {
     await userEvent.click(button('Cancel'));
     // The task that was in the gone list is shown in Inbox, as the server keeps it.
     expect(rowLabel('Buy stamps')).toBeNull();
-    await userEvent.click(tab('Inbox'));
+    await pick('Inbox');
     expect(taskTitles()).toEqual(['Buy oat milk', 'Buy stamps']);
   });
 
@@ -3335,15 +3460,19 @@ describe('lists', () => {
     await ready();
     await waitFor(() => expect(selectedTab()).toEqual(['Errands']));
 
-    await userEvent.type(newTask(), 'Buy envelopes{Enter}');
+    await userEvent.type(await openAddSheet(), 'Buy envelopes{Enter}');
     await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Assigned to me', 'Home', 'Work']));
     expect(status()).toBe('"Errands" no longer exists, so it was removed. The task was not added.');
     expect(selectedTab()).toEqual(['Inbox']);
     expect(location.search).toBe('?list=inbox');
-    // The typed task is kept, ready to add to Inbox now.
-    expect(newTask().value).toBe('Buy envelopes');
-    expect(newTask().placeholder).toBe('Add to Inbox');
+    // The sheet stays open with the typed task, ready to add to Inbox now;
+    // the List chip is open and says why.
+    expect(newTaskField().value).toBe('Buy envelopes');
+    expect(chip('List').getAttribute('aria-label')).toBe('List: Inbox');
+    expect(chip('List').getAttribute('aria-expanded')).toBe('true');
+    expect(within(addSheet()).getByRole('alert').textContent).toBe('That list no longer exists. Choose another list.');
     expect(taskTitles()).toEqual(['Buy oat milk', 'Buy stamps']);
+    await userEvent.click(within(addSheet()).getByRole('button', { name: 'Cancel' }));
 
     await openManage();
     await userEvent.click(button('Rename "Home"'));
@@ -3356,7 +3485,7 @@ describe('lists', () => {
     await userEvent.click(button('Confirm deleting list "Work"'));
     await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Assigned to me']));
     expect(status()).toBe('"Work" no longer exists, so it was removed.');
-    expect(document.activeElement).toBe(button('New list'));
+    expect(document.activeElement).toBe(viewTitle());
   });
 
   test('lists that fail to load show an error with a retry; tasks still work in All tasks (AC-14)', async () => {
@@ -3370,7 +3499,9 @@ describe('lists', () => {
     expect((await screen.findByRole('alert')).textContent).toBe('Your lists could not be loaded.');
     expect(selectedTab()).toEqual(['All tasks']);
     expect(taskTitles()).toEqual(['Buy oat milk', 'Buy stamps']);
-    await userEvent.type(newTask(), 'Call the plumber{Enter}');
+    // The picker offers the views only: New list and Manage lists wait for the lists.
+    expect(within(viewMenu()).queryAllByRole('menuitem', { hidden: true })).toEqual([]);
+    await userEvent.type(await openAddSheet(), 'Call the plumber{Enter}');
     await waitFor(() => expect(taskTitles()).toEqual(['Call the plumber', 'Buy oat milk', 'Buy stamps']));
     expect(callsTo('POST /api/tasks')[0].body).toEqual({ title: 'Call the plumber' });
 
@@ -3383,7 +3514,7 @@ describe('lists', () => {
     // The list the URL names exists now, so it is shown.
     expect(selectedTab()).toEqual(['Errands']);
     expect(taskTitles()).toEqual(['Buy stamps']);
-    await userEvent.click(tab('All tasks'));
+    await pick('All tasks');
     expect(rowLabel('Buy stamps')).toBe('List: Errands');
   });
 
@@ -3405,7 +3536,7 @@ describe('lists', () => {
     reply('POST /api/lists', unauthorized());
     render(<App />);
     await ready();
-    await userEvent.click(button('New list'));
+    await pick('New list');
     await userEvent.type(screen.getByRole('textbox', { name: 'List name' }), 'Errands{Enter}');
     await expectSignedOut();
 
@@ -3457,14 +3588,6 @@ describe('shared lists', () => {
     ...extra,
   });
   const withLists = (...lists: unknown[]) => reply('GET /api/lists', json({ lists }));
-  const tablist = () => screen.getByRole('tablist', { name: 'Lists' });
-  const tab = (name: string) => within(tablist()).getByRole('tab', { name });
-  const tabNames = () => within(tablist()).getAllByRole('tab').map((item) => item.textContent);
-  const selectedTab = () =>
-    within(tablist())
-      .getAllByRole('tab')
-      .filter((item) => item.getAttribute('aria-selected') === 'true')
-      .map((item) => item.textContent);
   const manageRow = (name: string) =>
     within(screen.getByRole('list', { name: 'Your lists' }))
       .getAllByRole('listitem')
@@ -3474,14 +3597,6 @@ describe('shared lists', () => {
   const assigneeField = (title: string) =>
     screen.queryByRole('combobox', { name: `Assigned to, for "${title}"` }) as HTMLSelectElement | null;
   const optionTexts = (select: HTMLSelectElement) => [...select.options].map((option) => option.textContent);
-  async function ready() {
-    await screen.findByRole('tablist', { name: 'Lists' });
-    await screen.findByLabelText('New task');
-  }
-  async function openManage() {
-    await userEvent.click(button('Manage lists'));
-    expect(button('Manage lists').getAttribute('aria-expanded')).toBe('true');
-  }
   // Triggers a background refresh by focusing the window, and waits until its
   // three requests went out.
   async function refreshOnFocus() {
@@ -3512,7 +3627,7 @@ describe('shared lists', () => {
       expect(tab(name).querySelector('.sr-only')!.textContent).toBe('(shared)');
     }
     expect(tab('Errands').querySelector('svg.lucide-users')).toBeNull();
-    await userEvent.click(tab('Groceries (shared)'));
+    await pick('Groceries (shared)');
     expect(location.search).toBe('?list=12');
     expect(screen.getByText('No tasks in Groceries yet.')).toBeTruthy();
   });
@@ -3605,8 +3720,8 @@ describe('shared lists', () => {
     expect(screen.getByRole('status').textContent).toBe('"Groceries" is no longer shared with you, so it was removed.');
     // Focus moved to the previous list's Rename.
     await waitFor(() => expect(document.activeElement).toBe(button('Rename "Errands"')));
-    await userEvent.click(button('Manage lists'));
-    await userEvent.click(tab('All tasks'));
+    await userEvent.click(button('Close Manage lists'));
+    await pick('All tasks');
     expect(taskTitles()).toEqual(['Inbox task']);
   });
 
@@ -3633,8 +3748,8 @@ describe('shared lists', () => {
     await userEvent.click(button('Confirm deleting list "Groceries"'));
     await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Assigned to me', 'Errands']));
     // My task is in my Inbox now, unassigned; Household Two's went to theirs.
-    await userEvent.click(button('Manage lists'));
-    await userEvent.click(tab('Inbox'));
+    await userEvent.click(button('Close Manage lists'));
+    await pick('Inbox');
     expect(taskTitles()).toEqual(['My eggs']);
     expect(rowOf('My eggs').querySelector('[data-share-labels]')).toBeNull();
   });
@@ -3668,11 +3783,11 @@ describe('shared lists', () => {
     };
     for (const [title, labels] of Object.entries(expected)) expect(shareLabels(title), title).toBe(labels);
     // The same in the list's own view.
-    await userEvent.click(tab('Groceries (shared)'));
+    await pick('Groceries (shared)');
     expect(shareLabels('Added by two')).toBe('Added by Household Two · Assigned to you');
     expect(shareLabels('Done by two')).toBe('Done by Household Two');
     // Rows outside shared lists have exactly their usual parts.
-    await userEvent.click(tab('Inbox'));
+    await pick('Inbox');
     expect(rowOf('Inbox, by two').querySelectorAll('p')).toHaveLength(0);
   });
 
@@ -3742,7 +3857,7 @@ describe('shared lists', () => {
 
     // An assignee the server refuses is reported on the select.
     reply('PATCH /api/tasks/2', json({ error: 'invalid_assignee', message: 'Not a member.' }, 400));
-    await userEvent.click(tab('Groceries (shared)'));
+    await pick('Groceries (shared)');
     await userEvent.click(button('Edit "Inbox task"'));
     await userEvent.selectOptions(assigneeField('Inbox task')!, 'Household Two');
     await userEvent.click(button('Save'));
@@ -3788,7 +3903,9 @@ describe('shared lists', () => {
     render(<App />);
     await ready();
     await waitFor(() => expect(taskTitles()).toEqual(['Bread', 'Milk']));
-    await userEvent.type(screen.getByLabelText('New task'), 'Half typed');
+    // A draft left in the add sheet.
+    await userEvent.type(await openAddSheet(), 'Half typed');
+    await userEvent.click(within(addSheet()).getByRole('button', { name: 'Cancel' }));
     await userEvent.click(button('Edit "Milk"'));
     const field = screen.getByRole('textbox', { name: 'New title for "Milk"' }) as HTMLInputElement;
     await userEvent.type(field, ' draft');
@@ -3799,7 +3916,6 @@ describe('shared lists', () => {
     refreshReplies([task(2, 'Bread', 12, { dueDate: null }), task(4, 'Butter', 12, { createdById: 2 })], [groceries]);
     await refreshOnFocus();
     await waitFor(() => expect(screen.getByText('Butter')).toBeTruthy());
-    expect((screen.getByLabelText('New task') as HTMLInputElement).value).toBe('Half typed');
     expect(field.value).toBe('Milk draft');
     expect(document.activeElement).toBe(field);
     expect([field.selectionStart, field.selectionEnd]).toEqual([2, 4]);
@@ -3812,6 +3928,8 @@ describe('shared lists', () => {
     await waitFor(() => expect(screen.getByRole('status').textContent).toBe('"Milk" no longer exists, so it was removed from the list.'));
     expect(taskTitles()).toEqual(['Bread', 'Butter']);
     expect(callsTo('PATCH /api/tasks/1')[0].body).toEqual({ title: 'Milk draft' });
+    // The add sheet's draft survived the refresh.
+    expect((await openAddSheet()).value).toBe('Half typed');
   });
 
   test('a refresh moves focus with a row that changes group, and never during a pending change (AC-14)', async () => {
@@ -3843,7 +3961,7 @@ describe('shared lists', () => {
     refreshReplies([task(1, 'Milk', 12, { completed: true, completedById: 1 }), task(2, 'Bread', 12), task(6, 'Fresh', 12)], [groceries]);
     await refreshOnFocus();
     await waitFor(() => expect(taskTitles()).toEqual(['Bread', 'Fresh']));
-    expect(screen.getByRole('button', { name: 'Completed (1)' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Show 1 done' })).toBeTruthy();
   });
 
   test('a refresh that finds the selected list gone switches to Inbox with a notice (AC-14)', async () => {
@@ -3853,7 +3971,9 @@ describe('shared lists', () => {
     render(<App />);
     await ready();
     await waitFor(() => expect(selectedTab()).toEqual(['Groceries (shared)']));
-    act(() => tab('Groceries (shared)').focus());
+    // Focus on the list's item in the open view picker, which goes away.
+    await userEvent.click(viewTitle());
+    expect(document.activeElement).toBe(tab('Groceries (shared)'));
     refreshReplies([task(2, 'Mine', null)], []);
     await refreshOnFocus();
     await waitFor(() => expect(selectedTab()).toEqual(['Inbox']));
@@ -3862,7 +3982,9 @@ describe('shared lists', () => {
       '"Groceries" was deleted or is no longer shared with you, so Inbox is shown.',
     );
     expect(taskTitles()).toEqual(['Mine']);
-    await waitFor(() => expect(document.activeElement).toBe(tab('Inbox')));
+    // Where focus went to the selected tab, it goes to the view title (AC-8).
+    await waitFor(() => expect(document.activeElement).toBe(viewTitle()));
+    expect(viewTitle().textContent).toBe('Inbox');
   });
 
   test('a 401 on refresh signs out; other failures are silent and retried (AC-14)', async () => {
@@ -3948,7 +4070,7 @@ describe('shared lists', () => {
     expect(screen.queryByRole('combobox', { name: /^List for/ })).toBeNull();
     expect(taskTitles()).toEqual(['Mine']);
     expect(calls.filter((call) => call.method !== 'GET')).toEqual([]);
-    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText('New task')));
+    await waitFor(() => expect(document.activeElement).toBe(button('Add a task')));
   });
 
   test('a refresh that closes a lost edit row moves focus to the neighbour row without restoring a caret there (AC-14, R2-F1)', async () => {
@@ -3971,8 +4093,8 @@ describe('shared lists', () => {
     expect(selectedTab()).toEqual(['All tasks']);
     expect(taskTitles()).toEqual(['Mine']);
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('checkbox', { name: 'Mine' })));
-    // The page still works: the add form takes a task.
-    expect(screen.getByLabelText('New task')).toBeTruthy();
+    // The page still works: the + button opens the add sheet.
+    expect(await openAddSheet()).toBeTruthy();
     expect(calls.filter((call) => call.method !== 'GET')).toEqual([]);
   });
 
@@ -4028,11 +4150,11 @@ describe('shared lists', () => {
     await refreshOnFocus();
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Stop sharing "Groceries"' })).toBeNull());
     await waitFor(() => expect(document.activeElement).toBe(button('Rename "Home"')));
-    expect(button('Manage lists').getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByRole('region', { name: 'Manage lists' })).toBeTruthy();
     expect(calls.filter((call) => call.method !== 'GET')).toEqual([]);
   });
 
-  test('focus on the last Manage lists entry goes to the previous list, and to New list when none is left (AC-14, R3-F1)', async () => {
+  test('focus on the last Manage lists entry goes to the previous list, and to the view title when none is left (AC-14, R3-F1)', async () => {
     signedIn([]);
     withLists(errands, groceries);
     render(<App />);
@@ -4048,8 +4170,9 @@ describe('shared lists', () => {
     // Errands goes too (deleted in another tab): no list is left.
     refreshReplies([], []);
     await refreshOnFocus();
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'Manage lists' })).toBeNull());
-    await waitFor(() => expect(document.activeElement).toBe(button('New list')));
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Manage lists' })).toBeNull());
+    expect(manageItem()).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(viewTitle()));
   });
 
   test('a refresh that removes the last list closes Manage lists, so a new list does not reopen it (AC-14, R4-F1)', async () => {
@@ -4064,14 +4187,16 @@ describe('shared lists', () => {
     // The owner deleted Groceries, the only list.
     refreshReplies([], []);
     await refreshOnFocus();
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'Manage lists' })).toBeNull());
-    await waitFor(() => expect(document.activeElement).toBe(button('New list')));
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Manage lists' })).toBeNull());
+    expect(manageItem()).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(viewTitle()));
 
     // As after deleting the last list here, Manage lists comes back closed.
-    await userEvent.click(button('New list'));
+    await pick('New list');
     await userEvent.type(screen.getByRole('textbox', { name: 'List name' }), 'Later{Enter}');
     await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Assigned to me', 'Later']));
-    expect(button('Manage lists').getAttribute('aria-expanded')).toBe('false');
+    expect(manageItem()).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Manage lists' })).toBeNull();
     expect(screen.queryByRole('list', { name: 'Your lists' })).toBeNull();
   });
 
@@ -4273,8 +4398,8 @@ describe('shared lists', () => {
 
       refreshReplies([task(1, 'Their milk', 12, { createdById: 2 }), task(4, 'Inbox task', null)], [errands, groceries]);
       await refreshOnFocus();
-      await userEvent.click(button('Manage lists'));
-      await userEvent.click(tab('Groceries (shared)'));
+      await userEvent.click(button('Close Manage lists'));
+      await pick('Groceries (shared)');
       await waitFor(() => expect(shown('Their milk')).toBe(true));
       expect(question('Their milk')).toBeNull();
     });
@@ -4678,28 +4803,15 @@ describe('assigned to me', () => {
   });
   const mine = { assigneeId: 1 };
   const withLists = (...lists: unknown[]) => reply('GET /api/lists', json({ lists }));
-  const tablist = () => screen.getByRole('tablist', { name: 'Lists' });
-  const tab = (name: string) => within(tablist()).getByRole('tab', { name });
-  const tabNames = () => within(tablist()).getAllByRole('tab').map((item) => item.textContent);
-  const selectedTab = () =>
-    within(tablist())
-      .getAllByRole('tab')
-      .filter((item) => item.getAttribute('aria-selected') === 'true')
-      .map((item) => item.textContent);
   const rowOf = (title: string) => screen.getByRole('checkbox', { name: title }).closest('li')!;
   const rowLabel = (title: string) => rowOf(title).querySelector('[data-list-label]')?.textContent ?? null;
   const shareLabels = (title: string) => rowOf(title).querySelector('[data-share-labels]')?.textContent ?? null;
   const assigneeField = (title: string) =>
     screen.getByRole('combobox', { name: `Assigned to, for "${title}"` }) as HTMLSelectElement;
   const listField = (title: string) => screen.getByRole('combobox', { name: `List for "${title}"` }) as HTMLSelectElement;
-  const newTask = () => screen.getByLabelText('New task') as HTMLInputElement;
   const status = () => screen.queryByRole('status')?.textContent ?? null;
   const headings = () => screen.getAllByRole('heading', { level: 2 }).map((item) => item.textContent!.replace('▸', ''));
   const EMPTY = 'No tasks are assigned to you yet: tasks assigned to you in shared lists show here.';
-  async function ready() {
-    await screen.findByRole('tablist', { name: 'Lists' });
-    await screen.findByLabelText('New task');
-  }
   async function openAssigned(tasks: unknown[], lists: unknown[] = [errands, home, groceries, work]) {
     history.replaceState(null, '', '/?list=assigned');
     signedIn(tasks);
@@ -4722,16 +4834,16 @@ describe('assigned to me', () => {
     reply('GET /api/members', json({ members: fixtureMembers }));
   }
 
-  test('the tab follows Inbox, with or without shared lists, and is kept in the URL (AC-1, D-4)', async () => {
+  test('the view follows Inbox in the picker, with or without shared lists, and is kept in the URL (AC-1, D-4)', async () => {
     signedIn([]);
     render(<App />);
     await ready();
     expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Assigned to me']);
-    await userEvent.click(tab('Assigned to me'));
+    await pick('Assigned to me');
     expect(location.search).toBe('?list=assigned');
     expect(selectedTab()).toEqual(['Assigned to me']);
-    expect(screen.getByRole('tabpanel').getAttribute('aria-labelledby')).toBe(tab('Assigned to me').id);
-    expect(within(tablist()).getAllByRole('tab').map((item) => item.tabIndex)).toEqual([-1, -1, 0]);
+    expect(viewTitle().textContent).toBe('Assigned to me');
+    expect(screen.getByText('From shared lists')).toBeTruthy();
     // The view needs no request of its own.
     expect(calls.map((call) => `${call.method} ${call.path}`).filter((route) => !route.startsWith('GET /api/'))).toEqual([]);
     cleanup();
@@ -4764,8 +4876,8 @@ describe('assigned to me', () => {
       task(10, 'Stale unshared', 10, mine),
     ]);
     expect(taskTitles()).toEqual(['Mine in Home', 'Theirs for me']);
-    expect(headings()).toEqual(['Overdue', 'No date', 'Completed (1)']);
-    expect(button('Completed (1)').getAttribute('aria-expanded')).toBe('false');
+    expect(headings()).toEqual(['Overdue', 'No date']);
+    expect(button('Show 1 done').getAttribute('aria-expanded')).toBe('false');
     // Each row names its list, and the share labels are those of "All tasks".
     expect(rowLabel('Mine in Home')).toBe('List: Home');
     expect(rowLabel('Theirs for me')).toBe('List: Groceries');
@@ -4781,22 +4893,24 @@ describe('assigned to me', () => {
     await openAssigned([task(1, 'For two', 12, { assigneeId: 2 }), task(2, 'Inbox task', null)]);
     expect(screen.getByText(EMPTY)).toBeTruthy();
     expect(screen.queryByRole('list')).toBeNull();
-    // The add form stays.
-    expect(newTask().placeholder).toBe('Add to Inbox');
+    // The + button stays, and adds to Inbox.
+    expect(await addDestination()).toBe('Inbox');
   });
 
   test('a task added from the view goes to Inbox with a notice and does not show (AC-5, D-5)', async () => {
     await openAssigned([task(1, 'Mine', 12, mine)]);
     reply('POST /api/tasks', json({ task: task(20, 'Call the plumber', null) }, 201));
-    expect(newTask().placeholder).toBe('Add to Inbox');
-    await userEvent.type(newTask(), 'Call the plumber{Enter}');
+    expect(await addDestination()).toBe('Inbox');
+    await userEvent.type(await openAddSheet(), 'Call the plumber{Enter}');
     await waitFor(() => expect(status()).toBe('Added "Call the plumber" to Inbox.'));
     expect(callsTo('POST /api/tasks')[0].body).toEqual({ title: 'Call the plumber' });
     expect(taskTitles()).toEqual(['Mine']);
-    expect(newTask().value).toBe('');
-    expect(document.activeElement).toBe(newTask());
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(button('Add a task'));
+    expect((await openAddSheet()).value).toBe('');
+    await userEvent.click(within(addSheet()).getByRole('button', { name: 'Cancel' }));
     // It is in Inbox.
-    await userEvent.click(tab('Inbox'));
+    await pick('Inbox');
     expect(taskTitles()).toEqual(['Call the plumber']);
   });
 
@@ -4849,14 +4963,14 @@ describe('assigned to me', () => {
     expect(status()).toBe('Moved "Charlie" to Errands, so it is no longer assigned to you.');
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('checkbox', { name: 'Alpha' })));
 
-    // The last one, to Inbox: focus goes to the new-task field.
+    // The last one, to Inbox: focus goes to the + button.
     reply('PATCH /api/tasks/1', json({ task: task(1, 'Alpha', null) }));
     await startEditing('Alpha');
     await userEvent.selectOptions(listField('Alpha'), 'Inbox');
     await userEvent.click(button('Save'));
     await waitFor(() => expect(screen.getByText(EMPTY)).toBeTruthy());
     expect(status()).toBe('Moved "Alpha" to Inbox, so it is no longer assigned to you.');
-    await waitFor(() => expect(document.activeElement).toBe(newTask()));
+    await waitFor(() => expect(document.activeElement).toBe(button('Add a task')));
     expect(selectedTab()).toEqual(['Assigned to me']);
   });
 
@@ -4908,7 +5022,8 @@ describe('assigned to me', () => {
     await userEvent.click(screen.getByRole('checkbox', { name: 'Water the plants' }));
     await waitFor(() => expect(status()).toMatch(/^"Water the plants" is next due /));
     expect(taskTitles()).toEqual(['Water the plants']);
-    expect(headings()).toEqual(['Upcoming', 'Completed (1)']);
+    expect(headings()).toEqual(['Upcoming']);
+    expect(button('Show 1 done')).toBeTruthy();
     expect(rowLabel('Water the plants')).toBe('List: Groceries');
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('checkbox', { name: 'Water the plants' })));
     expect((document.activeElement as HTMLInputElement).checked).toBe(false);
@@ -4916,7 +5031,8 @@ describe('assigned to me', () => {
 
   test('a refresh adds and removes rows as others assign, unassign, move, unshare and delete; focus moves on (AC-6)', async () => {
     await openAssigned([task(1, 'Alpha', 12, mine), task(2, 'Bravo', 12, mine), task(3, 'Charlie', 13, mine)]);
-    await userEvent.type(newTask(), 'Half typed');
+    await userEvent.type(await openAddSheet(), 'Half typed');
+    await userEvent.click(within(addSheet()).getByRole('button', { name: 'Cancel' }));
     act(() => button('Edit "Alpha"').focus());
 
     // Another member assigned Delta to the user and unassigned Alpha.
@@ -4928,7 +5044,6 @@ describe('assigned to me', () => {
     await waitFor(() => expect(taskTitles()).toEqual(['Delta', 'Bravo', 'Charlie']));
     // Focus was in Alpha's row: the next row that is still shown takes it.
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('checkbox', { name: 'Bravo' })));
-    expect(newTask().value).toBe('Half typed');
     expect(status()).toBeNull();
 
     // Bravo moved to an unshared list of the user's (which cleared the
@@ -4943,11 +5058,12 @@ describe('assigned to me', () => {
     refreshReplies([task(2, 'Bravo', 10)], [errands, home]);
     await refreshOnFocus();
     await waitFor(() => expect(screen.getByText(EMPTY)).toBeTruthy());
-    await waitFor(() => expect(document.activeElement).toBe(newTask()));
+    await waitFor(() => expect(document.activeElement).toBe(button('Add a task')));
     expect(selectedTab()).toEqual(['Assigned to me']);
     expect(location.search).toBe('?list=assigned');
     expect(status()).toBeNull();
-    expect(newTask().value).toBe('Half typed');
+    // The add sheet's draft survived every refresh.
+    expect((await openAddSheet()).value).toBe('Half typed');
     expect(calls.filter((call) => call.method !== 'GET')).toEqual([]);
   });
 
@@ -5038,7 +5154,7 @@ describe('assigned to me', () => {
     );
     const field = await startEditing('Alpha');
     await userEvent.type(field, ' draft');
-    await userEvent.click(button('Manage lists'));
+    await openManage();
     reply('PATCH /api/lists/11', json({ list: { ...home, shared: false } }));
     await userEvent.click(button('Stop sharing "Home"'));
     await waitFor(() => expect(tabNames()).toContain('Home'));
@@ -5063,9 +5179,9 @@ describe('assigned to me', () => {
       [errands, { ...home, shared: false }, groceries, work, { ...garden, shared: false }],
     );
     await refreshOnFocus();
-    await userEvent.click(tab('Home'));
+    await pick('Home');
     await waitFor(() => expect(shown('Alpha renamed')).toBe(true));
-    await userEvent.click(tab('Garden'));
+    await pick('Garden');
     expect(shown('Delta renamed')).toBe(true);
   });
 
@@ -5076,7 +5192,7 @@ describe('assigned to me', () => {
     );
     const field = await startEditing('Alpha');
     await userEvent.type(field, ' draft');
-    await userEvent.click(button('Manage lists'));
+    await openManage();
     // Alpha, added by the user, moves to the user's Inbox.
     reply('DELETE /api/lists/11', json({ movedTaskIds: [1] }));
     await userEvent.click(button('Delete list "Home"'));
@@ -5101,7 +5217,7 @@ describe('assigned to me', () => {
 
     refreshReplies([task(1, 'Alpha renamed', null), task(2, 'Bravo', 12, mine)], [errands, groceries, work]);
     await refreshOnFocus();
-    await userEvent.click(tab('Inbox'));
+    await pick('Inbox');
     await waitFor(() => expect(shown('Alpha renamed')).toBe(true));
   });
 
@@ -5109,7 +5225,7 @@ describe('assigned to me', () => {
     await openAssigned([task(1, 'Alpha', 11, mine), task(2, 'Bravo', 12, mine), task(3, 'Charlie', 13, mine)]);
     const field = await startEditing('Bravo');
     await userEvent.type(field, ' draft');
-    await userEvent.click(button('Manage lists'));
+    await openManage();
     reply('PATCH /api/lists/12', json({ list: { ...groceries, shared: false } }));
     await userEvent.click(button('Stop sharing "Groceries"'));
     await userEvent.click(button('Confirm stopping sharing "Groceries"'));
@@ -5148,7 +5264,7 @@ describe('assigned to me', () => {
     );
     const field = await startEditing('Alpha');
     await userEvent.type(field, ' draft');
-    await userEvent.click(button('Manage lists'));
+    await openManage();
     // The list was deleted in another tab: it goes as if deleted, and a
     // refresh then shows where its tasks went.
     reply('PATCH /api/lists/11', json({ error: 'list_not_found', message: 'That list could not be found.' }, 404));
@@ -5180,7 +5296,7 @@ describe('assigned to me', () => {
     await waitFor(() => expect(callsTo('GET /api/tasks')).toHaveLength(3));
 
     // Neither task stayed pinned by a hidden row: Inbox shows the server's versions.
-    await userEvent.click(tab('Inbox'));
+    await pick('Inbox');
     await waitFor(() => expect(shown('Alpha renamed')).toBe(true));
     expect(shown('Delta renamed')).toBe(true);
   });
@@ -5192,13 +5308,14 @@ describe('assigned to me', () => {
     render(<App />);
     await ready();
     await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Assigned to me', 'Assigned to me', 'Spare']));
-    // The built-in tab comes first; the list's tab selects the list.
-    const [builtIn, stored] = within(tablist()).getAllByRole('tab', { name: 'Assigned to me' });
-    expect(builtIn.id).toBe('list-tab-assigned');
+    // The built-in view comes first; the list's item shows the list.
+    const menu = await openPicker();
+    const [builtIn, stored] = within(menu).getAllByRole('menuitemradio', { name: 'Assigned to me' });
+    expect(builtIn.id).toBe('view-item-assigned');
     await userEvent.click(stored);
     expect(location.search).toBe('?list=14');
 
-    await userEvent.click(button('Manage lists'));
+    await openManage();
     const nameField = (name: string) => screen.getByRole('textbox', { name: `New name for "${name}"` }) as HTMLInputElement;
     // Another list cannot take the name, in any form with the same fold.
     await userEvent.click(button('Rename "Spare"'));
@@ -5223,5 +5340,381 @@ describe('assigned to me', () => {
     await userEvent.type(nameField('Assigned to me'), '{Enter}');
     await waitFor(() => expect(tabNames()).toEqual(['All tasks', 'Inbox', 'Assigned to me', 'Mine', 'Spare']));
     expect(callsTo('PATCH /api/lists/14')[0].body).toEqual({ name: 'Mine' });
+  });
+});
+
+describe('calm layout', () => {
+  const list = (id: number, name: string, { shared = false, ownerId = 1 } = {}) => ({
+    id,
+    name,
+    shared,
+    ownerId,
+    createdAt: '2026-11-20T12:00:00.000Z',
+    updatedAt: '2026-11-20T12:00:00.000Z',
+  });
+  const errands = list(10, 'Errands');
+  const home = list(11, 'Home', { shared: true });
+  const groceries = list(12, 'Groceries', { shared: true, ownerId: 2 });
+  const task = (id: number, title: string, listId: number | null, extra: Record<string, unknown> = {}) => ({
+    id,
+    title,
+    listId,
+    notes: null,
+    completed: false,
+    dueDate: null,
+    repeat: null,
+    createdById: 1,
+    completedById: null,
+    assigneeId: null,
+    ...extra,
+  });
+  const withLists = (...lists: unknown[]) => reply('GET /api/lists', json({ lists }));
+  const addButtonEl = () => screen.getByRole('button', { name: 'Add a task' });
+  const status = () => screen.queryByRole('status')?.textContent ?? null;
+  async function refreshOnFocus() {
+    const before = callsTo('GET /api/members').length;
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+    await waitFor(() => expect(callsTo('GET /api/members')).toHaveLength(before + 1));
+  }
+  function refreshReplies(tasks: unknown[], lists: unknown[]) {
+    reply('GET /api/tasks', json({ tasks }));
+    reply('GET /api/lists', json({ lists }));
+    reply('GET /api/members', json({ members: fixtureMembers }));
+  }
+  // The browser's date is fixed (the time keeps running), so "Today" is known.
+  function fixToday() {
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 10, 20, 12, 0, 0));
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
+  }
+
+  test('the page is one column: the view title, the kicker and open count, the account, the tasks and the + button (AC-1)', async () => {
+    signedIn([task(1, 'Mow', 11), task(2, 'Done', null, { completed: true })]);
+    withLists(errands, home);
+    render(<App />);
+    await ready();
+    // No rail of tabs and no add form on the page.
+    expect(screen.queryByRole('tablist')).toBeNull();
+    expect(screen.queryByRole('textbox', { name: 'New task' })).toBeNull();
+    expect(screen.queryByRole('complementary')).toBeNull();
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('All tasks');
+    expect(screen.getByText('Every list')).toBeTruthy();
+    expect(screen.getByText(/1 open/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Household One, account' })).toBeTruthy();
+    expect(addButtonEl().getAttribute('aria-haspopup')).toBe('dialog');
+    expect(addButtonEl().getAttribute('aria-expanded')).toBe('false');
+    expect(button('Show 1 done')).toBeTruthy();
+    // The skip link leads to the task column.
+    const skip = screen.getByRole('link', { name: 'Skip to tasks' });
+    expect(document.querySelector(skip.getAttribute('href')!)).toBe(screen.getByRole('main'));
+    // The Tasks wordmark is gone from the signed-in screen (D-7).
+    expect(screen.queryByText('Tasks', { selector: 'span' })).toBeNull();
+  });
+
+  test('the + button opens the "New task" dialog with focus in its title; Tab stays inside; Escape, Cancel and the backdrop close it and keep the draft (AC-4, D-3)', async () => {
+    signedIn([task(1, 'Mow', null)]);
+    render(<App />);
+    await ready();
+    const title = await openAddSheet();
+    const sheet = addSheet();
+    expect(sheet.getAttribute('aria-modal')).toBe('true');
+    expect(document.activeElement).toBe(title);
+    expect(within(sheet).getByLabelText('New task')).toBe(title);
+    expect(addButtonEl().getAttribute('aria-expanded')).toBe('true');
+    // The page behind the sheet is inert.
+    expect(screen.getByRole('main').closest('[inert]')).toBeTruthy();
+    expect(addButtonEl().hasAttribute('inert')).toBe(true);
+
+    // Tab and Shift+Tab wrap around inside the sheet.
+    const addTask = within(sheet).getByRole('button', { name: 'Add task' });
+    await userEvent.tab({ shift: true });
+    expect(document.activeElement).toBe(addTask);
+    await userEvent.tab();
+    expect(document.activeElement).toBe(title);
+    for (let presses = 0; presses < 8; presses++) {
+      await userEvent.tab();
+      expect(sheet.contains(document.activeElement)).toBe(true);
+    }
+
+    // A draft with a title and a date; Escape closes, focus returns to +.
+    await userEvent.type(title, 'Draft title');
+    fireEvent.change(screen.getByLabelText('Due date'), { target: { value: '2026-11-24' } });
+    act(() => title.focus());
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(addButtonEl());
+    expect(screen.getByRole('main').closest('[inert]')).toBeNull();
+    // Reopened: the draft is still there. Cancel closes too.
+    expect((await openAddSheet()).value).toBe('Draft title');
+    expect(chip('Due date').getAttribute('aria-label')).not.toBe('Due date: none');
+    await userEvent.click(within(addSheet()).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(addButtonEl());
+    // So does a click on the backdrop.
+    await openAddSheet();
+    await userEvent.click(document.querySelector<HTMLElement>('.tk-scrim')!);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(addButtonEl());
+    expect(callsTo('POST /api/tasks')).toHaveLength(0);
+  });
+
+  test('chips name their values; Date offers Today, Tomorrow and Next week; List offers Inbox and every list; clears are named (AC-6)', async () => {
+    fixToday();
+    history.replaceState(null, '', '/?list=10');
+    signedIn([task(1, 'Mow', 10)]);
+    withLists(errands, home, groceries);
+    reply('POST /api/tasks', json({ task: task(7, 'Rake leaves', 11, { dueDate: '2026-11-27' }) }, 201));
+    render(<App />);
+    await ready();
+    await waitFor(() => expect(selectedTab()).toEqual(['Errands']));
+    const title = await openAddSheet();
+    // Each chip is a button whose name states its value; only set ones can be cleared.
+    expect(
+      within(addSheet())
+        .getAllByRole('button', { name: /: / })
+        .map((item) => item.getAttribute('aria-label')),
+    ).toEqual(['Due date: none', 'List: Errands', 'Notes: none']);
+    expect(within(addSheet()).queryByRole('button', { name: /^Clear/ })).toBeNull();
+
+    await openChip('Due date');
+    const options = document.getElementById(chip('Due date').getAttribute('aria-controls')!)!;
+    const date = within(options).getByLabelText('Due date') as HTMLInputElement;
+    expect(date.type).toBe('date');
+    await userEvent.click(within(options).getByRole('button', { name: 'Today' }));
+    expect(date.value).toBe('2026-11-20');
+    expect(chip('Due date').getAttribute('aria-label')).toBe('Due date: Today');
+    expect(within(options).getByRole('button', { name: 'Today' }).getAttribute('aria-pressed')).toBe('true');
+    await userEvent.click(within(options).getByRole('button', { name: 'Tomorrow' }));
+    expect(date.value).toBe('2026-11-21');
+    expect(chip('Due date').getAttribute('aria-label')).toBe('Due date: Tomorrow');
+    await userEvent.click(within(options).getByRole('button', { name: 'Next week' }));
+    expect(date.value).toBe('2026-11-27');
+    expect(chip('Due date').getAttribute('aria-label')).toMatch(/^Due date: \S+, \S+ 27$/);
+    // The Repeat chip comes with the date; the date's clear control takes both away.
+    await openChip('Repeat');
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Repeats' }), 'monthly');
+    expect(chip('Repeat').getAttribute('aria-label')).toBe('Repeat: Monthly');
+    await userEvent.click(within(addSheet()).getByRole('button', { name: 'Clear repeat' }));
+    expect(chip('Repeat').getAttribute('aria-label')).toBe('Repeat: none');
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Repeats' }), 'yearly');
+    await userEvent.click(within(addSheet()).getByRole('button', { name: 'Clear due date' }));
+    expect(chip('Due date').getAttribute('aria-label')).toBe('Due date: none');
+    expect(within(addSheet()).queryByRole('button', { name: /^Repeat: / })).toBeNull();
+    // One chip's options show at a time.
+    expect(options.hidden).toBe(true);
+    await openChip('Due date');
+    await userEvent.click(within(options).getByRole('button', { name: 'Next week' }));
+    expect(chip('Repeat').getAttribute('aria-label')).toBe('Repeat: none');
+
+    // List: Inbox and every list the user can see, the shown one chosen.
+    await openChip('List');
+    const lists = within(addSheet()).getByRole('group', { name: 'List' });
+    expect(within(lists).getAllByRole('button').map((item) => item.textContent)).toEqual([
+      'Inbox',
+      'Errands',
+      'Home(shared)',
+      'Groceries(shared)',
+    ]);
+    expect(within(lists).getByRole('button', { name: 'Errands' }).getAttribute('aria-pressed')).toBe('true');
+    await userEvent.click(within(lists).getByRole('button', { name: 'Home (shared)' }));
+    expect(chip('List').getAttribute('aria-label')).toBe('List: Home');
+
+    // The task goes there with exactly the chosen fields, and a notice says
+    // where, since it is not in the view shown.
+    await userEvent.type(title, 'Rake leaves{Enter}');
+    await waitFor(() => expect(status()).toBe('Added "Rake leaves" to Home.'));
+    expect(callsTo('POST /api/tasks')[0].body).toEqual({ title: 'Rake leaves', dueDate: '2026-11-27', listId: 11 });
+    expect(taskTitles()).toEqual(['Mow']);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(addButtonEl());
+    // The next draft follows the view again.
+    await openAddSheet();
+    expect(chip('List').getAttribute('aria-label')).toBe('List: Errands');
+  });
+
+  test('a chosen list follows no view change, and one that goes away gives way to the view\'s list (AC-5, D-5)', async () => {
+    signedIn([]);
+    withLists(errands, home);
+    render(<App />);
+    await ready();
+    await openAddSheet();
+    expect(chip('List').getAttribute('aria-label')).toBe('List: Inbox');
+    await openChip('List');
+    await userEvent.click(within(addSheet()).getByRole('button', { name: 'Errands' }));
+    await userEvent.click(within(addSheet()).getByRole('button', { name: 'Cancel' }));
+    await pick('Home (shared)');
+    await openAddSheet();
+    // Kept as chosen, not the view's list.
+    expect(chip('List').getAttribute('aria-label')).toBe('List: Errands');
+    // Errands is deleted elsewhere: the draft adds to the view's list again.
+    refreshReplies([], [home]);
+    await refreshOnFocus();
+    await waitFor(() => expect(chip('List').getAttribute('aria-label')).toBe('List: Home'));
+  });
+
+  test('controls of the sheet lock while the add is pending, and a failed add keeps the sheet and its draft (AC-5)', async () => {
+    signedIn([]);
+    const create = pending();
+    reply('POST /api/tasks', create.response);
+    render(<App />);
+    await ready();
+    const title = await openAddSheet();
+    await userEvent.type(title, 'Slow');
+    await openChip('Notes');
+    const notes = screen.getByRole('textbox', { name: 'Notes' }) as HTMLTextAreaElement;
+    await userEvent.type(notes, 'Kept');
+    await userEvent.click(within(addSheet()).getByRole('button', { name: 'Add task' }));
+    const sheet = addSheet();
+    // Locked with readOnly and aria-disabled, never disabled.
+    expect(title.readOnly).toBe(true);
+    expect(notes.readOnly).toBe(true);
+    expect(within(sheet).getByRole('button', { name: 'Adding...' }).getAttribute('aria-disabled')).toBe('true');
+    expect(within(sheet).getByRole('button', { name: 'Cancel' }).getAttribute('aria-disabled')).toBe('true');
+    expect(within(sheet).getByRole('button', { name: 'Clear notes' }).getAttribute('aria-disabled')).toBe('true');
+    expect([...sheet.querySelectorAll('button, input, textarea')].some((control) => (control as HTMLButtonElement).disabled)).toBe(false);
+    // A second submit, a clear, Cancel and the backdrop change nothing.
+    fireEvent.submit(sheet);
+    await userEvent.click(within(sheet).getByRole('button', { name: 'Clear notes' }));
+    await userEvent.click(within(sheet).getByRole('button', { name: 'Cancel' }));
+    await userEvent.click(document.querySelector<HTMLElement>('.tk-scrim')!);
+    expect(notes.value).toBe('Kept');
+    expect(screen.getByRole('dialog', { name: 'New task' })).toBe(sheet);
+    expect(callsTo('POST /api/tasks')).toHaveLength(1);
+    create.finish(json({ error: 'internal_error' }, 500));
+    expect((await within(sheet).findByRole('alert')).textContent).toBe('The task could not be saved. Please try again.');
+    expect(title.value).toBe('Slow');
+    expect(notes.value).toBe('Kept');
+    await waitFor(() => expect(title.readOnly).toBe(false));
+  });
+
+  describe('focus targets that leave the page (AC-8)', () => {
+    test('the last row deleted by a user, or by a refresh, sends focus to the + button; a refresh with the sheet open leaves focus in it', async () => {
+      signedIn([task(1, 'Only', 12, { createdById: 2 })]);
+      withLists(groceries);
+      reply('DELETE /api/tasks/1', noContent());
+      render(<App />);
+      await ready();
+      // By a user (the view keeps the + button as the last resort).
+      await userEvent.click(button('Delete "Only"'));
+      await userEvent.click(button('Confirm deleting "Only"'));
+      await waitFor(() => expect(document.activeElement).toBe(addButtonEl()));
+
+      // By a refresh: another member deleted it while focus was on its row.
+      refreshReplies([task(2, 'Second', 12, { createdById: 2 })], [groceries]);
+      await refreshOnFocus();
+      await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Second' })).toBeTruthy());
+      act(() => screen.getByRole('checkbox', { name: 'Second' }).focus());
+      refreshReplies([], [groceries]);
+      await refreshOnFocus();
+      await waitFor(() => expect(screen.queryByRole('checkbox', { name: 'Second' })).toBeNull());
+      await waitFor(() => expect(document.activeElement).toBe(addButtonEl()));
+
+      // With the sheet open: focus stays in it, and it stays open with its draft.
+      refreshReplies([task(3, 'Third', 12, { createdById: 2 })], [groceries]);
+      await refreshOnFocus();
+      await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Third' })).toBeTruthy());
+      const title = await openAddSheet();
+      await userEvent.type(title, 'Typing');
+      refreshReplies([], [groceries]);
+      await refreshOnFocus();
+      await waitFor(() => expect(screen.queryByRole('checkbox', { name: 'Third' })).toBeNull());
+      expect(document.activeElement).toBe(title);
+      expect(title.value).toBe('Typing');
+      expect(addSheet()).toBeTruthy();
+    });
+
+    test('a refresh that takes away the List option with focus moves it to the List chip, inside the open sheet', async () => {
+      history.replaceState(null, '', '/?list=12');
+      signedIn([]);
+      withLists(errands, groceries);
+      render(<App />);
+      await ready();
+      await openAddSheet();
+      await openChip('List');
+      const option = within(addSheet()).getByRole('button', { name: 'Groceries (shared)' });
+      act(() => option.focus());
+      refreshReplies([], [errands]);
+      await refreshOnFocus();
+      await waitFor(() => expect(option.isConnected).toBe(false));
+      await waitFor(() => expect(document.activeElement).toBe(chip('List')));
+      expect(chip('List').getAttribute('aria-label')).toBe('List: Inbox');
+      expect(addSheet()).toBeTruthy();
+      expect(selectedTab()).toEqual(['Inbox']);
+    });
+
+    test('a refresh that takes away the shown list leaves focus on the view title, open picker or closed', async () => {
+      history.replaceState(null, '', '/?list=12');
+      signedIn([]);
+      withLists(groceries, home);
+      render(<App />);
+      await ready();
+      await waitFor(() => expect(selectedTab()).toEqual(['Groceries (shared)']));
+      // Picker closed, focus on the title: the title stays and keeps focus.
+      act(() => viewTitle().focus());
+      refreshReplies([], [home]);
+      await refreshOnFocus();
+      await waitFor(() => expect(selectedTab()).toEqual(['Inbox']));
+      expect(document.activeElement).toBe(viewTitle());
+      expect(viewTitle().textContent).toBe('Inbox');
+    });
+
+    test('Manage lists going away while the picker is open moves focus from its item to the view title; Escape closes the menu', async () => {
+      signedIn([]);
+      withLists(groceries);
+      render(<App />);
+      await ready();
+      await waitFor(() => expect(manageItem()).toBeTruthy());
+      await userEvent.click(viewTitle());
+      await userEvent.keyboard('{End}');
+      expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Manage lists' }));
+      refreshReplies([], []);
+      await refreshOnFocus();
+      await waitFor(() => expect(manageItem()).toBeNull());
+      await waitFor(() => expect(document.activeElement).toBe(viewTitle()));
+      expect(viewTitle().getAttribute('aria-expanded')).toBe('true');
+      await userEvent.keyboard('{Escape}');
+      expect(viewTitle().getAttribute('aria-expanded')).toBe('false');
+      expect(document.activeElement).toBe(viewTitle());
+    });
+
+    test('a refresh while the add sheet is open never moves focus out of it, even from the sheet itself', async () => {
+      signedIn([task(1, 'Alpha', 12, { createdById: 2 }), task(2, 'Bravo', null)]);
+      withLists(groceries);
+      render(<App />);
+      await ready();
+      act(() => screen.getByRole('checkbox', { name: 'Alpha' }).focus());
+      await openAddSheet();
+      // A click on the sheet's surface keeps focus on the sheet, not the page.
+      await userEvent.click(addSheet());
+      expect(document.activeElement).toBe(addSheet());
+      refreshReplies([task(2, 'Bravo', null)], []);
+      await refreshOnFocus();
+      await waitFor(() => expect(screen.queryByRole('checkbox', { name: 'Alpha' })).toBeNull());
+      expect(document.activeElement).toBe(addSheet());
+      expect(screen.getByRole('dialog', { name: 'New task' })).toBeTruthy();
+    });
+
+    test('at midnight, focus in the open sheet stays there', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      vi.setSystemTime(new Date(2026, 10, 20, 23, 59, 58));
+      onTestFinished(() => {
+        vi.useRealTimers();
+      });
+      signedIn([task(1, 'Due tomorrow', null, { dueDate: '2026-11-21' })]);
+      render(<App />);
+      await ready();
+      await screen.findByRole('list', { name: 'Upcoming' });
+      const title = await openAddSheet();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      await waitFor(() => expect(screen.getByRole('list', { name: 'Today' })).toBeTruthy());
+      expect(document.activeElement).toBe(title);
+      expect(addSheet()).toBeTruthy();
+    });
   });
 });
