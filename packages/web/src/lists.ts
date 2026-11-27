@@ -21,7 +21,7 @@ export const listFromServer = (list: Partial<List> & { id: number; name: string 
 // What the task area shows: every task, Inbox, the tasks assigned to the
 // signed-in user in any shared list ("Assigned to me"), or one list (by id).
 export type View = 'all' | 'inbox' | 'assigned' | number;
-// The built-in views, in tab order before the lists.
+// The built-in views, in the view picker before the lists.
 export const BUILT_IN_VIEWS: View[] = ['all', 'inbox', 'assigned'];
 
 export const MAX_LIST_NAME_LENGTH = 50;
@@ -96,4 +96,5 @@ export function viewName(view: View, lists: List[]) {
   if (view === 'assigned') return 'Assigned to me';
   return lists.find((list) => list.id === view)?.name ?? 'Inbox';
 }
-export const tabId = (view: View) => `list-tab-${view}`;
+// The id of a view's item in the view picker.
+export const viewItemId = (view: View) => `view-item-${view}`;

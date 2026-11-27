@@ -1,23 +1,12 @@
 import { type FormEvent, type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from 'react';
-import { Inbox, Layers, ListTodo, Pencil, Plus, Settings2, Trash2, UserCheck, Users } from 'lucide-react';
+import { Pencil, Trash2, Users, X } from 'lucide-react';
 import { cn } from './cn';
 import { jsonHeaders, serverError } from './http';
-import {
-  BUILT_IN_VIEWS,
-  type List,
-  type Member,
-  type View,
-  listFromServer,
-  listNameProblem,
-  tabId,
-  viewName,
-} from './lists';
-import { FieldError, buttonClass, focusRing, labelClass, sheetClass, smallControlClass } from './ui';
+import { type List, type Member, listFromServer, listNameProblem } from './lists';
+import { FieldError, buttonClass, iconButtonClass, labelClass, sheetClass, smallControlClass } from './ui';
+import { VIEW_TITLE_ID } from './ViewPicker';
 
-export const TASKS_PANEL_ID = 'tasks-panel';
-// For moving focus after a background refresh (see Tasks.tsx).
-export const NEW_LIST_BUTTON_ID = 'new-list-button';
-export const MANAGE_LISTS_BUTTON_ID = 'manage-lists-button';
+export const MANAGE_LISTS_ID = 'manage-lists';
 
 type Props = {
   lists: List[];
@@ -26,9 +15,6 @@ type Props = {
   members: Member[];
   // The lists could not be loaded: the built-in views still work.
   failed: boolean;
-  // The view shown now (a missing list is already resolved to "All tasks").
-  view: View;
-  onSelect: (view: View) => void;
   onRetry: () => void;
   onCreated: (list: List) => void;
   // The server stored a rename, share or unshare of the list, which is still
@@ -59,8 +45,9 @@ function deleteQuestion(list: List, count: number) {
   return `Delete ${list.name}? Its ${tasks} will move to Inbox.`;
 }
 
-// The rail's own buttons: quiet, full width on a wide screen.
-const railButton = buttonClass('quiet', 'small', 'gap-2 md:w-full md:justify-start md:bg-transparent md:px-3');
+// The view title, which takes focus where a control that is gone had it (the
+// view picker's New list and Manage lists live in a closed menu).
+const viewTitle = () => document.getElementById(VIEW_TITLE_ID);
 
 // Escape anywhere in a form or question cancels it.
 const escapeTo = (cancel: () => void) => (event: KeyboardEvent) => {
@@ -70,24 +57,18 @@ const escapeTo = (cancel: () => void) => (event: KeyboardEvent) => {
   }
 };
 
-// The views and lists: "All tasks", "Inbox", "Assigned to me" and the user's
-// lists in creation order, as an ARIA tablist with automatic activation (arrow
-// keys, Home and End select a tab; only the selected tab is in the Tab order).
-// "New list" and "Manage lists" are ordinary buttons after it. On a phone the
-// tabs are a row that scrolls sideways inside itself; on a wide screen, a
-// column in the rail. Pending controls are locked with readOnly and
-// aria-disabled instead of disabled, which would drop focus.
+// The user's lists beyond choosing one (which the view picker does): the New
+// list form, the Manage lists panel, and the message when the lists failed to
+// load. Pending controls are locked with readOnly and aria-disabled instead
+// of disabled, which would drop focus.
 //
-// It returns two parts for the page to place: `nav` (the tabs, the list
-// buttons and the new-list form) for the rail, and `panels` (Manage lists,
-// which needs the width) for the main column.
+// It returns `panels`, for the page to place in the column under its header,
+// and `openNewList` and `openManage`, for the view picker's menu items.
 export function useListBar({
   lists,
   me,
   members,
   failed,
-  view,
-  onSelect,
   onRetry,
   onCreated,
   onUpdated,
@@ -97,7 +78,7 @@ export function useListBar({
   onSignedOut,
   taskCount,
   track,
-}: Props): { nav: ReactNode; panels: ReactNode } {
+}: Props): { panels: ReactNode; openNewList: () => void; openManage: () => void } {
   const [creating, setCreating] = useState<{ name: string; error: string; saving: boolean } | null>(null);
   const [manageOpen, setManageOpen] = useState(false);
   // A refresh can remove the last list too: Manage lists closes then, as when
@@ -113,7 +94,6 @@ export function useListBar({
   // A failed delete, share or unshare.
   const [manageError, setManageError] = useState('');
   const pendingRef = useRef(false);
-  const newListButton = useRef<HTMLButtonElement>(null);
   const manageRef = useRef<HTMLDivElement>(null);
   // Forms replace the control that had focus, so focus is moved on purpose,
   // to a target looked up after the next render has updated the page.
@@ -132,46 +112,41 @@ export function useListBar({
     };
   }, []);
 
-  const views: View[] = [...BUILT_IN_VIEWS, ...lists.map((list) => list.id)];
   const ownLists = lists.filter((list) => list.ownerId === me);
   const ownerName = (list: List) => members.find((member) => member.id === list.ownerId)?.name;
   const manageControl = (id: number, action: string) =>
     manageRef.current?.querySelector<HTMLElement>(`[data-list-id="${id}"] [data-action="${action}"]`);
   // After a list leaves the manage panel: the next list's Rename, else the
-  // previous one's, else New list (Manage lists goes away with the last list).
+  // previous one's, else the view title (Manage lists goes away with the last list).
   const focusAfterLeaving = (id: number) => {
     const index = lists.findIndex((list) => list.id === id);
     const neighbour = lists[index + 1] ?? lists[index - 1];
-    focusAfterRender.current = () =>
-      neighbour ? manageControl(neighbour.id, 'rename-list') : newListButton.current;
+    focusAfterRender.current = () => (neighbour ? manageControl(neighbour.id, 'rename-list') : viewTitle());
     if (!neighbour) setManageOpen(false);
   };
 
-  function onTabKeyDown(event: KeyboardEvent) {
-    const index = views.indexOf(view);
-    const last = views.length - 1;
-    // The tabs are a row on a phone and a column on a wide screen, so both
-    // arrow pairs move along them.
-    const next =
-      event.key === 'ArrowRight' || event.key === 'ArrowDown'
-        ? index === last ? 0 : index + 1
-        : event.key === 'ArrowLeft' || event.key === 'ArrowUp'
-          ? index === 0 ? last : index - 1
-          : event.key === 'Home'
-            ? 0
-            : event.key === 'End'
-              ? last
-              : null;
-    if (next === null) return;
-    event.preventDefault();
-    onSelect(views[next]);
-    document.getElementById(tabId(views[next]))?.focus();
+  // From the view picker: the form opens (or stays open) with focus in its field.
+  function openNewList() {
+    if (!creating) setCreating({ name: '', error: '', saving: false });
+    focusAfterRender.current = () => document.getElementById('new-list-name');
+  }
+
+  // From the view picker: the panel opens with focus on it, so Tab goes on
+  // to its Close button and lists.
+  function openManage() {
+    setManageOpen(true);
+    focusAfterRender.current = () => manageRef.current;
+  }
+
+  function closeManage() {
+    setManageOpen(false);
+    focusAfterRender.current = viewTitle;
   }
 
   function closeCreate() {
     if (pendingRef.current) return;
     setCreating(null);
-    focusAfterRender.current = () => newListButton.current;
+    focusAfterRender.current = viewTitle;
   }
 
   async function create(event: FormEvent) {
@@ -202,8 +177,8 @@ export function useListBar({
       const list = listFromServer(created, me);
       setCreating(null);
       onCreated(list);
-      // The new tab is selected; keyboard users carry on from it.
-      focusAfterRender.current = () => document.getElementById(tabId(list.id));
+      // The new list is shown; keyboard users carry on from its title.
+      focusAfterRender.current = viewTitle;
     } catch {
       fail('The list could not be saved. Please try again.');
     } finally {
@@ -388,162 +363,84 @@ export function useListBar({
     }
   }
   const showManage = manageOpen && lists.length > 0;
-  const firstListIndex = BUILT_IN_VIEWS.length;
-  const nav = (
-    <>
-      {/* On a phone the tabs are one sideways row the width of the rail; on a
-          wide screen they are a column. The keyboard takes either arrow pair. */}
-      <div
-        role="tablist"
-        aria-label="Lists"
-        onKeyDown={onTabKeyDown}
-        className="tk-scroll-x -mx-1 flex min-w-0 basis-full gap-1 overflow-x-auto px-1 py-1 md:mx-0 md:basis-auto md:flex-col md:gap-0.5 md:overflow-visible md:px-0"
-      >
-        {views.map((item, index) => {
-          const list = typeof item === 'number' ? lists.find((entry) => entry.id === item) : undefined;
-          const Icon = item === 'all' ? Layers : item === 'inbox' ? Inbox : item === 'assigned' ? UserCheck : list?.shared ? Users : ListTodo;
-          const selected = item === view;
-          return (
-            <button
-              key={item}
-              type="button"
-              role="tab"
-              id={tabId(item)}
-              aria-selected={selected}
-              aria-controls={TASKS_PANEL_ID}
-              tabIndex={selected ? 0 : -1}
-              onClick={() => onSelect(item)}
-              // relative: the screen-reader-only "(shared)" text is absolutely
-              // positioned, and must stay inside its tab, which the row clips,
-              // instead of widening the page on a phone.
-              className={cn(
-                'relative flex min-h-10 shrink-0 cursor-pointer items-center gap-2.5 rounded-full border-0 py-1.5 pr-4 pl-1.5 text-left text-sm font-medium whitespace-nowrap transition-colors',
-                'md:w-full md:pr-3',
-                selected
-                  ? 'bg-ink text-cream shadow-[0_6px_18px_-6px_color-mix(in_srgb,var(--ink)_45%,transparent)]'
-                  : 'bg-transparent text-ink-2 hover:bg-frost/60 hover:text-ink',
-                index === firstListIndex &&
-                  "md:mt-4 md:before:pointer-events-none md:before:absolute md:before:inset-x-3 md:before:-top-2 md:before:border-t md:before:border-dashed md:before:border-ink/10 md:before:content-['']",
-                focusRing,
-              )}
-            >
-              <span
-                aria-hidden="true"
-                className={cn(
-                  'inline-grid size-7 shrink-0 place-items-center rounded-full',
-                  selected ? 'bg-cream/15 text-cream' : 'bg-frost/70 text-ink-2 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--ink)_7%,transparent)]',
-                )}
-              >
-                <Icon className="size-3.5" strokeWidth={2.1} />
-              </span>
-              <span className="min-w-0 md:truncate">{viewName(item, lists)}</span>
-              {list?.shared && (
-                <>
-                  {' '}
-                  <span className="sr-only">(shared)</span>
-                </>
-              )}
-            </button>
-          );
-        })}
-      </div>
-      {!failed && (
-        <div className="flex min-w-0 flex-auto flex-wrap items-center gap-1.5 md:mt-1 md:flex-none md:flex-col md:items-stretch md:gap-0.5">
-          <button
-            type="button"
-            id={NEW_LIST_BUTTON_ID}
-            ref={newListButton}
-            aria-expanded={creating !== null}
-            aria-controls={creating ? 'new-list-form' : undefined}
-            onClick={() => {
-              if (creating) return closeCreate();
-              setCreating({ name: '', error: '', saving: false });
-              focusAfterRender.current = () => document.getElementById('new-list-name');
-            }}
-            className={railButton}
-          >
-            <Plus aria-hidden="true" className="size-4" strokeWidth={2.2} />
-            New list
-          </button>
-          {lists.length > 0 && (
-            <button
-              type="button"
-              id={MANAGE_LISTS_BUTTON_ID}
-              aria-expanded={showManage}
-              aria-controls={showManage ? 'manage-lists' : undefined}
-              onClick={() => setManageOpen((open) => !open)}
-              className={cn(railButton, showManage && 'bg-ink/[0.06] text-ink')}
-            >
-              <Settings2 aria-hidden="true" className="size-4" strokeWidth={2.1} />
-              Manage lists
-            </button>
-          )}
-        </div>
-      )}
-      {failed && (
-        <div className="flex basis-full flex-col items-start gap-2 rounded-2xl bg-[var(--tk-danger-surface)] px-3.5 py-3">
-          <p role="alert" className="m-0 text-[13px] font-medium text-[var(--tk-danger-ink-strong)]">
-            Your lists could not be loaded.
-          </p>
-          <button type="button" onClick={onRetry} className={buttonClass('ghost', 'small')}>
-            Load lists again
-          </button>
-        </div>
-      )}
-      {creating && (
-        <form
-          id="new-list-form"
-          onSubmit={(event) => void create(event)}
-          onKeyDown={escapeTo(closeCreate)}
-          noValidate
-          className="flex basis-full flex-col gap-2 rounded-[20px] bg-[rgba(var(--surface-rgb),0.7)] p-3 shadow-[inset_0_0_0_1px_rgba(var(--frost-rgb),0.6)]"
+  const newListForm = creating && (
+    <form
+      id="new-list-form"
+      onSubmit={(event) => void create(event)}
+      onKeyDown={escapeTo(closeCreate)}
+      noValidate
+      className={cn(sheetClass, 'tk-rise flex flex-col gap-2 p-4')}
+    >
+      <label htmlFor="new-list-name" className={labelClass}>
+        List name
+      </label>
+      <input
+        id="new-list-name"
+        value={creating.name}
+        onChange={(event) => {
+          const name = event.target.value;
+          setCreating((current) => (current && !current.saving ? { ...current, name, error: '' } : current));
+        }}
+        readOnly={creating.saving}
+        autoComplete="off"
+        aria-invalid={creating.error !== '' || undefined}
+        aria-describedby={creating.error ? 'new-list-error' : undefined}
+        className={cn(smallControlClass, 'w-full min-w-0')}
+      />
+      {creating.error && <FieldError id="new-list-error">{creating.error}</FieldError>}
+      <div className="flex flex-wrap gap-1.5">
+        <button
+          type="submit"
+          aria-disabled={creating.saving || undefined}
+          className={buttonClass('primary', 'small', 'flex-1')}
         >
-          <label htmlFor="new-list-name" className={labelClass}>
-            List name
-          </label>
-          <input
-            id="new-list-name"
-            value={creating.name}
-            onChange={(event) => {
-              const name = event.target.value;
-              setCreating((current) => (current && !current.saving ? { ...current, name, error: '' } : current));
-            }}
-            readOnly={creating.saving}
-            autoComplete="off"
-            aria-invalid={creating.error !== '' || undefined}
-            aria-describedby={creating.error ? 'new-list-error' : undefined}
-            className={cn(smallControlClass, 'w-full min-w-0')}
-          />
-          {creating.error && <FieldError id="new-list-error">{creating.error}</FieldError>}
-          <div className="flex flex-wrap gap-1.5">
-            <button
-              type="submit"
-              aria-disabled={creating.saving || undefined}
-              className={buttonClass('primary', 'small', 'flex-1')}
-            >
-              {creating.saving ? 'Creating...' : 'Create list'}
-            </button>
-            <button
-              type="button"
-              aria-label="Cancel new list"
-              aria-disabled={creating.saving || undefined}
-              onClick={closeCreate}
-              className={buttonClass('quiet', 'small')}
-            >
-              Cancel
-            </button>
-          </div>
-        </form>
-      )}
-    </>
+          {creating.saving ? 'Creating...' : 'Create list'}
+        </button>
+        <button
+          type="button"
+          aria-label="Cancel new list"
+          aria-disabled={creating.saving || undefined}
+          onClick={closeCreate}
+          className={buttonClass('quiet', 'small')}
+        >
+          Cancel
+        </button>
+      </div>
+    </form>
   );
-  const panels = showManage && (
-    <section id="manage-lists" ref={manageRef} aria-labelledby="manage-lists-heading" className={cn(sheetClass, 'tk-rise')}>
-      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 border-b border-[var(--tk-soft-divider)] px-5 pt-4 pb-3">
-        <h2 id="manage-lists-heading" className="m-0 font-serif text-[20px] leading-tight font-normal tracking-[-0.01em]">
-          Manage lists
-        </h2>
-        <p className="m-0 text-[13px] text-ink-3">Rename, share with the household, or delete.</p>
+  const failure = failed && (
+    <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl bg-[var(--tk-danger-surface)] px-4 py-3">
+      <p role="alert" className="m-0 text-[13px] font-medium text-[var(--tk-danger-ink-strong)]">
+        Your lists could not be loaded.
+      </p>
+      <button type="button" onClick={onRetry} className={buttonClass('ghost', 'small')}>
+        Load lists again
+      </button>
+    </div>
+  );
+  const manage = showManage && (
+    <section
+      id={MANAGE_LISTS_ID}
+      ref={manageRef}
+      tabIndex={-1}
+      aria-labelledby="manage-lists-heading"
+      className={cn(sheetClass, 'tk-rise focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/45')}
+    >
+      <div className="flex items-start justify-between gap-3 border-b border-[var(--tk-soft-divider)] py-3 pr-3 pl-5">
+        <div className="min-w-0 pt-1">
+          <h2 id="manage-lists-heading" className="m-0 font-serif text-[20px] leading-tight font-normal tracking-[-0.01em]">
+            Manage lists
+          </h2>
+          <p className="m-0 text-[13px] text-ink-3">Rename, share with the household, or delete.</p>
+        </div>
+        <button
+          type="button"
+          aria-label="Close Manage lists"
+          onClick={closeManage}
+          className={iconButtonClass()}
+        >
+          <X aria-hidden="true" className="size-4" strokeWidth={2.1} />
+        </button>
       </div>
       {manageError && <FieldError className="px-5 pt-3">{manageError}</FieldError>}
       <ul aria-label="Your lists" className="m-0 list-none divide-y divide-[var(--tk-soft-divider)] p-0">
@@ -731,5 +628,12 @@ export function useListBar({
       </ul>
     </section>
   );
-  return { nav, panels };
+  const panels = (failure || newListForm || manage) && (
+    <>
+      {failure}
+      {newListForm}
+      {manage}
+    </>
+  );
+  return { panels: panels || null, openNewList, openManage };
 }

@@ -16,7 +16,7 @@
   --tk-mark-3: var(--accent-3);
   --tk-mark-ink: var(--ink);
 
-  /* Floating surfaces: the account menu. */
+  /* Floating surfaces: the view picker and account menus. */
   --tk-menu-bg: rgba(var(--surface-rgb), 0.94);
   --tk-menu-shadow: 0 14px 36px -8px color-mix(in srgb, var(--ink) 22%, transparent),
     inset 0 0 0 1px rgba(var(--frost-rgb), 0.5);
@@ -39,6 +39,9 @@
   --tk-sheet-shadow: 0 10px 34px -14px color-mix(in srgb, var(--ink) 24%, transparent),
     inset 0 0 0 1px rgba(var(--frost-rgb), 0.55);
   --tk-soft-divider: color-mix(in srgb, var(--ink) 9%, transparent);
+  /* The add sheet is a solid surface over a dimmed, softly blurred page. */
+  --tk-sheet-solid: rgba(var(--surface-rgb), 0.98);
+  --tk-scrim: color-mix(in srgb, var(--ink) 25%, transparent);
 
   --tk-avatar-bg: linear-gradient(135deg, var(--accent-3), var(--accent-soft));
   --tk-editing-bg: color-mix(in srgb, var(--accent) 7%, rgba(var(--surface-rgb), 1));
@@ -153,22 +156,56 @@
   animation: tk-rise 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
+/* The add sheet rises from the bottom; menus pop open. */
+@keyframes tk-sheet-up {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes tk-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.tk-sheet {
+  animation: tk-sheet-up 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.tk-pop {
+  transform-origin: top;
+  animation: tk-pop 160ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.tk-scrim {
+  background: var(--tk-scrim);
+  backdrop-filter: blur(2px);
+  animation: tk-fade 200ms ease-out both;
+}
+@keyframes tk-fade {
+  from {
+    opacity: 0;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .tk-rise {
+  .tk-rise,
+  .tk-sheet,
+  .tk-pop,
+  .tk-scrim {
     animation: none;
   }
   .tk-check,
   .tk-check::after {
     transition: none;
   }
-}
-
-/* The tab row scrolls sideways on a phone without drawing a scroll bar. */
-.tk-scroll-x {
-  scrollbar-width: none;
-}
-.tk-scroll-x::-webkit-scrollbar {
-  display: none;
 }
 
 /* A task's notes box that has more text below: fade the last 2rem. */

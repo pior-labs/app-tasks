@@ -1,31 +1,20 @@
 import { type FormEvent, type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
-import { ChevronRight, LoaderCircle, Plus, RotateCw } from 'lucide-react';
-import { type Account, AppShell } from './AppShell';
+import { LoaderCircle, Plus, RotateCw } from 'lucide-react';
+import { type AddDetail, type AddDraft, type AddField, AddSheet, detailOf } from './AddSheet';
+import { type Account, AppShell, PAGE_ID } from './AppShell';
 import { BrandMark } from './BrandMark';
 import { cn } from './cn';
 import {
   INCOMPLETE_DUE_DATE_MESSAGE,
   MAX_DUE_DATE,
-  MIN_DUE_DATE,
   dueDateProblem,
   dueLabel,
-  holdsNoDate,
   localDate,
   msUntilNextLocalMidnight,
 } from './dueDate';
 import { jsonHeaders, serverError } from './http';
-import { useListBar, MANAGE_LISTS_BUTTON_ID, NEW_LIST_BUTTON_ID, TASKS_PANEL_ID, goneListMessage } from './ListBar';
-import {
-  type List,
-  type Member,
-  type View,
-  listFromServer,
-  tabId,
-  viewFromSearch,
-  viewName,
-  writeViewToUrl,
-} from './lists';
-import { RepeatControl, RepeatHint } from './RepeatControl';
+import { MANAGE_LISTS_ID, goneListMessage, useListBar } from './ListBar';
+import { type List, type Member, type View, listFromServer, viewFromSearch, viewName, writeViewToUrl } from './lists';
 import {
   NO_REPEAT,
   type Repeat,
@@ -36,27 +25,18 @@ import {
   sameRepeat,
   withoutRepeat,
 } from './repeat';
-import { type RowMode, type ShareLabels, type Task, TaskRow, submitOnModEnter } from './TaskRow';
+import { type RowMode, type ShareLabels, type Task, TaskRow } from './TaskRow';
 import { groupTasks, visibleTasks } from './taskGroups';
-import {
-  FieldError,
-  buttonClass,
-  controlClass,
-  focusRing,
-  labelClass,
-  panelClass,
-  sheetClass,
-  smallControlClass,
-  textareaClass,
-} from './ui';
+import { buttonClass, focusRing, panelClass, sheetClass } from './ui';
 import { VISIBLE_CHARACTER, characterCount } from './text';
+import { VIEW_TITLE_ID, ViewPicker } from './ViewPicker';
 
 export type { Task };
 
 const MAX_TITLE_LENGTH = 200;
 const MAX_NOTES_LENGTH = 5000;
 
-// The client-side title check shared by the add form and the inline edit
+// The client-side title check shared by the add sheet and the inline edit
 // field. Returns the message to show, or an empty string for a valid title.
 function titleProblem(trimmed: string) {
   if (!VISIBLE_CHARACTER.test(trimmed)) return 'Enter a task title.';
@@ -66,7 +46,7 @@ function titleProblem(trimmed: string) {
   return '';
 }
 
-// The client-side notes check shared by the add form and the edit row, on
+// The client-side notes check shared by the add sheet and the edit row, on
 // trimmed notes, like the server's. Returns the message to show, or an empty
 // string for valid notes (including none).
 function notesProblem(trimmed: string) {
@@ -87,7 +67,7 @@ function goneMessage(task: Task) {
   return `"${task.title}" no longer exists, so it was removed from the list.`;
 }
 
-type Field = 'title' | 'dueDate' | 'repeat' | 'notes' | 'list' | 'assignee';
+type Field = AddField | 'assignee';
 const fieldOf = (code: string): Field =>
   code === 'invalid_due_date'
     ? 'dueDate'
@@ -218,6 +198,13 @@ const lostTaskMessage = (task: Task) => `"${task.title}" is no longer shared wit
 const vanishedListMessage = (list: List) =>
   `"${list.name}" was deleted or is no longer shared with you, so Inbox is shown.`;
 
+// The add sheet's draft. Its list is the one the user chose, or "default" to
+// follow the view: a named list's view adds there, the others to Inbox.
+type Draft = Omit<AddDraft, 'listId'> & { listId: number | null | 'default' };
+const EMPTY_DRAFT: Draft = { title: '', dueDate: '', repeat: NO_REPEAT, notes: '', listId: 'default' };
+const ADD_SHEET_ID = 'new-task-sheet';
+const viewTitle = () => document.getElementById(VIEW_TITLE_ID);
+
 // `me` is the signed-in user's id. `account` is who is signed in, for the
 // shell's account menu, whose Sign out calls `onSignOut`; `onSignedOut` is
 // for a session that ended (a 401). `accountError` is a failed sign-out.
@@ -245,22 +232,21 @@ export function Tasks({
   // Every Tasks user, to name who added, completed or is assigned a task in a
   // shared list. Without them (they failed to load) rows name nobody.
   const [members, setMembers] = useState<Member[]>([]);
-  // The view asked for (by the URL or a tab). A list id that is not one of
+  // The view asked for (by the URL or the view picker). A list id that is not one of
   // the user's lists shows "All tasks" (D-5), so no task is hidden by default.
   const [requestedView, setRequestedView] = useState<View>(() => viewFromSearch(location.search));
   const view: View =
     typeof requestedView === 'number' && !lists.some((list) => list.id === requestedView) ? 'all' : requestedView;
   const shownTasks = view === 'all' ? tasks : tasks.filter((task) => inView(task, view, me, lists));
-  const [title, setTitle] = useState('');
-  const [dueDate, setDueDate] = useState('');
-  const [repeat, setRepeat] = useState<RepeatForm>(NO_REPEAT);
-  // The add form's notes field shows behind the "Add notes" toggle. Hiding it
-  // keeps the text for when it is shown again, also across an add, but hidden
-  // notes are not sent.
-  const [notesOpen, setNotesOpen] = useState(false);
-  const [notes, setNotes] = useState('');
+  // The add sheet: open or not, which chip's options show, and the draft,
+  // which outlives closing the sheet without adding (D-3).
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const sheetOpenRef = useRef(sheetOpen);
+  sheetOpenRef.current = sheetOpen;
+  const [addDetail, setAddDetail] = useState<AddDetail | null>(null);
+  const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
   const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState<{ message: string; field: Field } | null>(null);
+  const [createError, setCreateError] = useState<{ message: string; field: AddField } | null>(null);
   const [updatingIds, setUpdatingIds] = useState<number[]>([]);
   const [updateError, setUpdateError] = useState('');
   // A neutral message, shown when a task turned out to be gone already.
@@ -290,6 +276,7 @@ export function Tasks({
   // Collapsed on every page load; the choice is not remembered.
   const [completedOpen, setCompletedOpen] = useState(false);
   const titleInput = useRef<HTMLInputElement>(null);
+  const addButton = useRef<HTMLButtonElement>(null);
   const dueDateInput = useRef<HTMLInputElement>(null);
   const completedToggle = useRef<HTMLButtonElement>(null);
   // Pending requests are tracked in refs as well as state so a repeat submit
@@ -318,11 +305,13 @@ export function Tasks({
   const focusOnDay = useRef<{ day: string; target: () => HTMLElement | null | undefined } | null>(null);
   // Where focus was when a background refresh was applied. A refresh can
   // replace the focused element (a row moved to another group, or removed,
-  // a tab or a Manage lists entry that went away); focus then goes to the
-  // same control in the row's new place, else the nearest row after it that
-  // is still shown (or before it), else the new-task field; a tab's focus to
-  // the selected tab; and a Manage lists entry's to the nearest list left
-  // there, else New list. Focus that is still on the page is never moved.
+  // a view picker item, a Manage lists entry or an add sheet List option
+  // that went away); focus then goes to the same control in the row's new
+  // place, else the nearest row after it that is still shown (or before it),
+  // else the + button; a picker item's focus to the view title; a Manage
+  // lists entry's to the nearest list left there, else the view title; and
+  // a List option's to the List chip. Focus that is still on the page is
+  // never moved.
   const focusAfterRefresh = useRef<{
     element: Element;
     rowId?: number;
@@ -332,14 +321,20 @@ export function Tasks({
     rowOrder?: number[];
     listId?: number;
     listOrder?: number[];
-    tab: boolean;
+    // The focused element was in the view picker's menu, the Manage lists
+    // panel, or the add sheet.
+    place?: 'menu' | 'manage' | 'sheet';
   } | null>(null);
   useEffect(() => {
-    const target = focusAfterRender.current?.();
+    // While the add sheet is open, focus is never moved out of it (the page
+    // behind is inert): a change that would move it elsewhere leaves it.
+    const reachable = (element: HTMLElement | null | undefined) =>
+      element && (!sheetOpenRef.current || element.closest(`#${ADD_SHEET_ID}`)) ? element : undefined;
+    const target = reachable(focusAfterRender.current?.());
     focusAfterRender.current = null;
     target?.focus();
     if (focusOnDay.current?.day === today) {
-      const moved = focusOnDay.current.target();
+      const moved = reachable(focusOnDay.current.target());
       focusOnDay.current = null;
       moved?.focus();
     }
@@ -349,7 +344,7 @@ export function Tasks({
     if (refreshed && !refreshed.element.isConnected && (!active || active === document.body)) {
       // A control in a collapsed (hidden) section cannot take focus.
       const shown = (element: HTMLElement | null | undefined) =>
-        element && !element.closest('[hidden]') ? element : undefined;
+        reachable(element) && !element!.closest('[hidden]') ? element! : undefined;
       let next: HTMLElement | undefined;
       if (refreshed.rowId !== undefined) {
         const same = refreshed.action ? shown(control(refreshed.rowId, refreshed.action)) : undefined;
@@ -357,21 +352,27 @@ export function Tasks({
         next =
           same ??
           nearest(refreshed.rowOrder ?? [], refreshed.rowId, (id) => shown(firstControl(id))) ??
-          shown(titleInput.current);
+          shown(addButton.current);
         next?.focus();
         // The caret belongs to the control it was saved from, not to the
-        // neighbour's checkbox or the new-task field that takes focus instead.
+        // neighbour's checkbox or the + button that takes focus instead.
         if (next === same) restoreCaret(next, refreshed.caret);
-      } else if (refreshed.tab) {
-        next = shown(document.getElementById(tabId(view)));
+      } else if (refreshed.place === 'sheet') {
+        // A List option whose list went away: the List chip, else the title.
+        next =
+          shown(document.querySelector<HTMLElement>('[aria-controls="new-task-list-options"]')) ??
+          shown(titleInput.current);
         next?.focus();
-      } else if (refreshed.listId !== undefined || refreshed.element.id === MANAGE_LISTS_BUTTON_ID) {
+      } else if (refreshed.place === 'menu') {
+        next = shown(viewTitle());
+        next?.focus();
+      } else if (refreshed.listId !== undefined || refreshed.place === 'manage') {
         // As after a list leaves the panel here: the next list's Rename (or
         // the Cancel of the question it asks, never its Confirm, else its
-        // rename field), else the previous one's, else New list (Manage
-        // lists goes away with the last list).
+        // rename field), else the previous one's, else the view title
+        // (Manage lists goes away with the last list).
         const entry = (id: number) => {
-          const item = document.querySelector(`#manage-lists [data-list-id="${id}"]`);
+          const item = document.querySelector(`#${MANAGE_LISTS_ID} [data-list-id="${id}"]`);
           return shown(
             item?.querySelector<HTMLElement>(
               '[data-action="rename-list"], [data-action="cancel-delete-list"], [data-action="cancel-unshare-list"]',
@@ -382,7 +383,7 @@ export function Tasks({
           (refreshed.listId === undefined
             ? undefined
             : (entry(refreshed.listId) ?? nearest(refreshed.listOrder ?? [], refreshed.listId, entry))) ??
-          shown(document.getElementById(NEW_LIST_BUTTON_ID));
+          shown(viewTitle());
         next?.focus();
       }
     }
@@ -540,6 +541,10 @@ export function Tasks({
     setEditing((current) =>
       current && stillThere(current.listId) !== current.listId ? { ...current, listId: null } : current,
     );
+    // A list chosen in the add sheet that is gone: the draft follows the view again.
+    setDraft((current) =>
+      typeof current.listId === 'number' && !ids.has(current.listId) ? { ...current, listId: 'default' } : current,
+    );
   }, []);
   const loadLists = useCallback(
     async (isCurrent: () => boolean = () => true) => {
@@ -598,7 +603,7 @@ export function Tasks({
   // replaces the loaded data, except for the row being edited and the row
   // asking to confirm a delete, which keep what the user sees (saving an edit
   // of a task deleted meanwhile then shows the usual "no longer exists"
-  // notice). Drafts in the edit row and the add form live outside the task
+  // notice). Drafts in the edit row and the add sheet live outside the task
   // data, so they are kept as typed.
   const refreshing = useRef(false);
   // Tasks dropList kept in Inbox without knowing whether their list was
@@ -670,7 +675,7 @@ export function Tasks({
       if (active instanceof HTMLElement && active !== document.body) {
         const owner = [...rows.current].find(([, row]) => row.contains(active));
         const field = active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement ? active : null;
-        const entry = active.closest<HTMLElement>('#manage-lists [data-list-id]');
+        const entry = active.closest<HTMLElement>(`#${MANAGE_LISTS_ID} [data-list-id]`);
         focusAfterRefresh.current = {
           element: active,
           rowId: owner?.[0],
@@ -682,7 +687,13 @@ export function Tasks({
           rowOrder: owner ? visibleRef.current.map((task) => task.id) : undefined,
           listId: entry ? Number(entry.dataset.listId) : undefined,
           listOrder: entry ? before.lists.map((list) => list.id) : undefined,
-          tab: active.getAttribute('role') === 'tab',
+          place: active.closest('#view-menu')
+            ? 'menu'
+            : active.closest(`#${MANAGE_LISTS_ID}`)
+              ? 'manage'
+              : active.closest(`#${ADD_SHEET_ID}`)
+                ? 'sheet'
+                : undefined,
         };
       }
       setTasks((current) => {
@@ -830,25 +841,55 @@ export function Tasks({
   const isSharedList = (listId: number | null) =>
     listId !== null && (lists.find((list) => list.id === listId)?.shared ?? false);
 
+  // Where the add sheet adds now: the list the user chose (still there), else
+  // the view's list, else Inbox (null).
+  const addListId =
+    typeof draft.listId === 'number' && lists.some((list) => list.id === draft.listId)
+      ? draft.listId
+      : draft.listId === null
+        ? null
+        : typeof view === 'number'
+          ? view
+          : null;
+
+  function openSheet() {
+    setSheetOpen(true);
+  }
+
+  // Closing without adding keeps the draft (D-3). Not while the add is pending.
+  function closeSheet() {
+    if (creatingRef.current) return;
+    setSheetOpen(false);
+    setAddDetail(null);
+    setCreateError(null);
+    focusAfterRender.current = () => addButton.current;
+  }
+
+  // A message about a field of the add sheet opens that field's chip.
+  function addProblem(message: string, field: Field) {
+    const addField: AddField = field === 'assignee' ? 'title' : field;
+    setCreateError({ message, field: addField });
+    const detail = detailOf(addField);
+    if (detail) setAddDetail(detail);
+  }
+
   async function create(event: FormEvent) {
     event.preventDefault();
     if (creatingRef.current) return;
-    const trimmed = title.trim();
+    const trimmed = draft.title.trim();
     const problem = titleProblem(trimmed);
-    if (problem) return setCreateError({ message: problem, field: 'title' });
-    const dateProblem = dateFieldProblem(dueDateInput.current, dueDate);
-    if (dateProblem) return setCreateError({ message: dateProblem, field: 'dueDate' });
-    // A repeat needs a due date; without one the control is unavailable.
-    const repeatChoice = dueDate === '' ? { repeat: null } : repeatFromForm(repeat);
-    if ('problem' in repeatChoice) return setCreateError({ message: repeatChoice.problem, field: 'repeat' });
-    // Notes are sent, and cleared after the add, only when the area is shown.
-    const notesSent = notesOpen;
-    const newNotes = notesSent ? storedNotes(notes) : null;
-    const notesError = notesOpen ? notesProblem(notes.trim()) : '';
-    if (notesError) return setCreateError({ message: notesError, field: 'notes' });
-    // A task added in a named list goes there; in "All tasks", Inbox and
-    // "Assigned to me" it goes to Inbox, which is no field at all.
-    const list = typeof view === 'number' ? lists.find((item) => item.id === view) : undefined;
+    if (problem) return addProblem(problem, 'title');
+    const dateProblem = dateFieldProblem(dueDateInput.current, draft.dueDate);
+    if (dateProblem) return addProblem(dateProblem, 'dueDate');
+    // A repeat needs a due date; without one the Repeat chip is not offered.
+    const repeatChoice = draft.dueDate === '' ? { repeat: null } : repeatFromForm(draft.repeat);
+    if ('problem' in repeatChoice) return addProblem(repeatChoice.problem, 'repeat');
+    // Notes with text are sent whether or not their field is open (D-4).
+    const newNotes = storedNotes(draft.notes);
+    const notesError = notesProblem(draft.notes.trim());
+    if (notesError) return addProblem(notesError, 'notes');
+    // Inbox is no field at all.
+    const list = addListId === null ? undefined : lists.find((item) => item.id === addListId);
     creatingRef.current = true;
     const end = track();
     setCreating(true);
@@ -861,7 +902,7 @@ export function Tasks({
         body: JSON.stringify({
           title: trimmed,
           ...(newNotes === null ? {} : { notes: newNotes }),
-          ...(dueDate === '' ? {} : { dueDate }),
+          ...(draft.dueDate === '' ? {} : { dueDate: draft.dueDate }),
           ...(repeatChoice.repeat === null ? {} : { repeat: repeatChoice.repeat }),
           ...(list ? { listId: list.id } : {}),
         }),
@@ -870,11 +911,13 @@ export function Tasks({
       if (response.status === 401) return onSignedOut();
       if (response.status === 400) {
         const { message, code } = await serverError(response, 'That task was not accepted.');
-        // The list was deleted meanwhile. The typed task is kept for Inbox.
+        // The list was deleted meanwhile. The sheet stays open with the
+        // typed task, now for the view's list or Inbox, and says why.
         if (code === 'invalid_list' && list) {
+          addProblem(LIST_GONE_MESSAGE, 'list');
           return dropList(list, `${goneListMessage(list)} The task was not added.`);
         }
-        return setCreateError({ message, field: fieldOf(code) });
+        return addProblem(message, fieldOf(code));
       }
       if (!response.ok) throw new Error();
       const body: { task: Task } = await response.json();
@@ -883,23 +926,20 @@ export function Tasks({
       setTasks((current) =>
         current.some((item) => item.id === created.id) ? current : [created, ...current],
       );
-      // From "Assigned to me" the task goes to Inbox, which this view does not
-      // show, so a notice says where it went.
+      // A task that went to another list, or to Inbox from "Assigned to me",
+      // is not in this view, so a notice says where it went.
       if (!inView(created, view, me, lists)) {
         setNotice(`Added "${created.title}" to ${viewName(created.listId ?? 'inbox', lists)}.`);
       }
-      setTitle('');
-      setDueDate('');
-      setRepeat(NO_REPEAT);
-      // Hidden notes were not sent, so their text stays for when the area is shown.
-      if (notesSent) {
-        setNotes('');
-        setNotesOpen(false);
-      }
-      // Ready for the next task, also when the add button was clicked.
-      titleInput.current?.focus();
+      // Done: the sheet closes with a fresh draft, and focus returns to the
+      // + button (D-2), also when Add task was clicked.
+      setDraft(EMPTY_DRAFT);
+      setAddDetail(null);
+      setSheetOpen(false);
+      sheetOpenRef.current = false;
+      focusAfterRender.current = () => addButton.current;
     } catch {
-      setCreateError({ message: 'The task could not be saved. Please try again.', field: 'title' });
+      addProblem('The task could not be saved. Please try again.', 'title');
     } finally {
       creatingRef.current = false;
       setCreating(false);
@@ -978,12 +1018,12 @@ export function Tasks({
 
   // Remove a row the server no longer has. If keyboard focus was inside it,
   // move focus to the next row's first control, else the previous row's, else
-  // the new-task field, so focus is never dropped onto the page.
+  // the + button, so focus is never dropped onto the page.
   // Neighbours are taken in page order, across groups.
   function removeRow(id: number) {
     const neighbour = visibleNeighbour(id);
     if (hasFocus(id)) {
-      focusAfterRender.current = () => (neighbour ? firstControl(neighbour.id) : titleInput.current);
+      focusAfterRender.current = () => (neighbour ? firstControl(neighbour.id) : addButton.current);
     }
     removedRef.current.add(id);
     setTasks((current) => current.filter((item) => item.id !== id));
@@ -1109,7 +1149,7 @@ export function Tasks({
       // A task moved out of the selected list (or Inbox), or in "Assigned to
       // me" no longer assigned to the user, leaves the view: like after a
       // delete, focus moves to the next row, else the previous one, else the
-      // new-task field, and a notice says where the task went or who has it.
+      // + button, and a notice says where the task went or who has it.
       const leavesView = !inView(updated, view, me, lists);
       const neighbour = leavesView ? visibleNeighbour(task.id) : undefined;
       // The row shows the new title, date and repeat, and moves to its new
@@ -1118,7 +1158,7 @@ export function Tasks({
       leaveEdit(task);
       if (leavesView) {
         if (hasFocus(task.id)) {
-          focusAfterRender.current = () => (neighbour ? firstControl(neighbour.id) : titleInput.current);
+          focusAfterRender.current = () => (neighbour ? firstControl(neighbour.id) : addButton.current);
         }
         setConfirmingId((current) => (current === task.id ? null : current));
         setNotice(
@@ -1213,13 +1253,11 @@ export function Tasks({
     return { kind: 'view' };
   }
 
-  const { nav, panels } = useListBar({
+  const { panels, openNewList, openManage } = useListBar({
     lists,
     me,
     members,
     failed: listsState === 'failed',
-    view,
-    onSelect: selectView,
     onRetry: () => void loadLists(),
     onCreated: (list) => {
       setLists((current) => [...current, list]);
@@ -1254,9 +1292,16 @@ export function Tasks({
     taskCount: (id) => tasks.filter((task) => task.listId === id).length,
     track,
   });
-  // Every state of the page sits in the same frame; only the main column changes.
-  const shell = (main: ReactNode, rail: ReactNode = null) => (
-    <AppShell account={account} signingOut={signingOut} onSignOut={onSignOut} nav={rail}>
+  // Every state of the page sits in the same frame; only the column changes.
+  const shell = (main: ReactNode, header: ReactNode = null, overlay: ReactNode = null) => (
+    <AppShell
+      account={account}
+      signingOut={signingOut}
+      onSignOut={onSignOut}
+      title={header}
+      inert={sheetOpen}
+      overlay={overlay}
+    >
       {accountError && (
         <p
           role="alert"
@@ -1396,17 +1441,14 @@ export function Tasks({
       onCancelDelete={() => cancelDelete(task)}
     />
   );
-  // Where an added task goes: the selected list, else Inbox.
-  const destination = typeof view === 'number' ? viewName(view, lists) : 'Inbox';
   const emptyMessage =
     view === 'all'
-      ? 'No tasks yet. Add your first one above.'
+      ? 'No tasks yet. Add your first one with the + button.'
       : view === 'assigned'
         ? 'No tasks are assigned to you yet: tasks assigned to you in shared lists show here.'
         : `No tasks in ${viewName(view, lists)} yet.`;
   const selectedList = typeof view === 'number' ? lists.find((list) => list.id === view) : undefined;
   const openCount = shownTasks.filter((task) => !task.completed).length;
-  const doneCount = shownTasks.length - openCount;
   const kicker =
     view === 'all'
       ? 'Every list'
@@ -1419,222 +1461,146 @@ export function Tasks({
               ? 'Shared with household'
               : `Shared by ${members.find((member) => member.id === selectedList.ownerId)?.name ?? 'another member'}`
             : 'List';
-  const headingClass = 'm-0 px-1 font-mono text-[11px] font-semibold tracking-[0.16em] uppercase';
-  const listClass = cn(sheetClass, 'm-0 list-none divide-y divide-[var(--tk-soft-divider)] p-0');
+  const header = (
+    <>
+      <ViewPicker
+        lists={lists}
+        view={view}
+        listActions={listsState !== 'failed'}
+        onSelect={selectView}
+        onNewList={openNewList}
+        onManageLists={openManage}
+      />
+      <p className="m-0 mt-1.5 text-[14px] text-ink-2">
+        {kicker}
+        <span aria-hidden="true">
+          {' \u00B7 '}
+          {openCount === 0 ? 'Nothing open' : `${openCount} open`}
+        </span>
+      </p>
+    </>
+  );
+  const overlay = (
+    <>
+      {/* Fixed bottom right; on a wide screen, at the column's right edge. */}
+      <button
+        ref={addButton}
+        type="button"
+        aria-label="Add a task"
+        aria-haspopup="dialog"
+        aria-expanded={sheetOpen}
+        inert={sheetOpen}
+        onClick={openSheet}
+        className={cn(
+          'fixed right-5 bottom-[max(1.25rem,env(safe-area-inset-bottom))] z-30 grid size-16 cursor-pointer place-items-center rounded-full border-0 bg-ink text-cream shadow-[var(--tk-action-shadow)] transition-[transform,background-color] duration-200 hover:scale-105 hover:bg-[var(--tk-action-hover-bg)] motion-reduce:transition-none motion-reduce:hover:scale-100 sm:right-[max(1.25rem,calc(50vw-16.75rem))] sm:bottom-8',
+          focusRing,
+        )}
+      >
+        <Plus aria-hidden="true" className="size-7" strokeWidth={2.2} />
+      </button>
+      {sheetOpen && (
+        <AddSheet
+          id={ADD_SHEET_ID}
+          pageId={PAGE_ID}
+          draft={{ ...draft, listId: addListId }}
+          lists={lists}
+          today={today}
+          detail={addDetail}
+          error={createError}
+          creating={creating}
+          titleRef={titleInput}
+          dueDateRef={dueDateInput}
+          onChange={(change) => {
+            setDraft((current) => ({ ...current, ...change }));
+            setCreateError(null);
+          }}
+          onDetail={setAddDetail}
+          onSubmit={(event) => void create(event)}
+          onClose={closeSheet}
+        />
+      )}
+    </>
+  );
+  const sectionHeading = 'm-0 px-5 pt-4 pb-1 text-[13px] font-medium';
   return shell(
     <>
-      <header className="flex flex-wrap items-end justify-between gap-x-5 gap-y-1 px-1 pt-1">
-        <div className="min-w-0">
-          <p className="m-0 text-[13px] tracking-wide text-ink-3">{kicker}</p>
-          <h1 className="my-1 min-w-0 font-serif text-[34px] leading-none font-normal tracking-[-0.03em] break-words text-ink sm:text-[44px]">
-            {viewName(view, lists)}
-          </h1>
-        </div>
-        <p aria-hidden="true" className="m-0 pb-1 font-serif text-[15px] text-ink-2 italic">
-          {openCount === 0 ? 'Nothing open' : `${openCount} open`}
-          {doneCount > 0 && ` \u00B7 ${doneCount} done`}
-        </p>
-      </header>
       {panels}
-      <div role="tabpanel" id={TASKS_PANEL_ID} aria-labelledby={tabId(view)} className="tk-rise flex flex-col gap-5">
-        <form onSubmit={(event) => void create(event)} noValidate className={cn(panelClass, 'flex flex-col gap-3')}>
-          <label htmlFor="new-task-title" className="sr-only">
-            New task
-          </label>
-          <div className="relative">
-            <Plus
-              aria-hidden="true"
-              className="pointer-events-none absolute top-1/2 left-4 size-4.5 -translate-y-1/2 text-ink-3"
-              strokeWidth={2.2}
-            />
-            <input
-              id="new-task-title"
-              ref={titleInput}
-              value={title}
-              onChange={(event) => {
-                setTitle(event.target.value);
-                setCreateError(null);
-              }}
-              readOnly={creating}
-              placeholder={`Add to ${destination}`}
-              autoComplete="off"
-              aria-invalid={createError?.field === 'title' || undefined}
-              aria-describedby={createError?.field === 'title' ? 'new-task-error' : undefined}
-              className={cn(controlClass, 'min-h-12 w-full min-w-0 pl-11 text-[16px]')}
-            />
-          </div>
-          <div className="flex flex-wrap items-end gap-2.5">
-            <div className="flex flex-col gap-1.5">
-              <label htmlFor="new-task-due-date" className={cn(labelClass, 'px-1')}>
-                Due date
-              </label>
-              <input
-                id="new-task-due-date"
-                ref={dueDateInput}
-                type="date"
-                value={dueDate}
-                min={MIN_DUE_DATE}
-                max={MAX_DUE_DATE}
-                onChange={(event) => {
-                  setDueDate(event.target.value);
-                  // Removing the date resets the repeat; a partly typed date does not.
-                  if (holdsNoDate(event.target)) setRepeat(NO_REPEAT);
-                  setCreateError(null);
-                }}
-                // Emptying the last part of a date fires no change event, so the
-                // key that did it, or leaving the field, resets the repeat.
-                onKeyUp={(event) => {
-                  if (holdsNoDate(event.currentTarget)) setRepeat(withoutRepeat);
-                }}
-                onBlur={(event) => {
-                  if (holdsNoDate(event.currentTarget)) setRepeat(withoutRepeat);
-                }}
-                readOnly={creating}
-                aria-invalid={createError?.field === 'dueDate' || undefined}
-                aria-describedby={createError?.field === 'dueDate' ? 'new-task-error' : undefined}
-                className={smallControlClass}
-              />
-            </div>
-            <RepeatControl
-              idBase="new-task"
-              visibleLabels
-              names={{ choice: 'Repeats', every: 'Every', unit: 'Repeat unit' }}
-              form={repeat}
-              seed={null}
-              available={dueDate !== ''}
-              locked={creating}
-              invalid={createError?.field === 'repeat'}
-              errorId="new-task-error"
-              className={smallControlClass}
-              onChange={(value) => {
-                setRepeat(value);
-                setCreateError(null);
-              }}
-            />
-            <button
-              type="submit"
-              aria-disabled={creating || undefined}
-              className={buttonClass('primary', 'default', 'w-full sm:ml-auto sm:w-auto')}
-            >
-              {creating ? 'Adding...' : 'Add task'}
-            </button>
-          </div>
-          {dueDate === '' && <RepeatHint idBase="new-task" className="px-1" />}
-          {/* After Add task in Tab order, so title, date, repeat, Add task stay as they were. */}
-          <button
-            type="button"
-            aria-expanded={notesOpen}
-            aria-controls="new-task-notes-area"
-            onClick={() => {
-              setNotesOpen((open) => !open);
-              setCreateError((current) => (current?.field === 'notes' ? null : current));
-            }}
-            className={cn(
-              'flex cursor-pointer items-center gap-1.5 self-start rounded-full border-0 bg-transparent px-1 py-1 text-[13px] font-medium text-ink-2 hover:text-ink',
-              focusRing,
-            )}
-          >
-            <ChevronRight
-              aria-hidden="true"
-              className={cn('size-4 transition-transform motion-reduce:transition-none', notesOpen && 'rotate-90')}
-              strokeWidth={2.2}
-            />
-            Add notes
-          </button>
-          <div id="new-task-notes-area" hidden={!notesOpen} className="flex flex-col gap-1.5">
-            <label htmlFor="new-task-notes" className={cn(labelClass, 'px-1')}>
-              Notes
-            </label>
-            {/* Enter is a new line here; Ctrl+Enter or Cmd+Enter adds the task. */}
-            <textarea
-              id="new-task-notes"
-              value={notes}
-              onChange={(event) => {
-                setNotes(event.target.value);
-                setCreateError(null);
-              }}
-              onKeyDown={submitOnModEnter}
-              readOnly={creating}
-              rows={3}
-              aria-invalid={createError?.field === 'notes' || undefined}
-              aria-describedby={createError?.field === 'notes' ? 'new-task-error' : undefined}
-              className={cn(controlClass, textareaClass, 'min-w-0')}
-            />
-          </div>
-          {createError && (
-            <FieldError id="new-task-error" className="px-1">
-              {createError.message}
-            </FieldError>
-          )}
-        </form>
-        {updateError && (
-          <p
-            role="alert"
-            className="m-0 rounded-2xl border border-[var(--tk-danger-border)] bg-[var(--tk-danger-surface)] px-4 py-3 text-[14px] text-[var(--tk-danger-ink-strong)]"
-          >
-            {updateError}
-          </p>
-        )}
-        {notice && (
-          <p
-            role="status"
-            className="m-0 rounded-2xl bg-[rgba(var(--surface-rgb),0.75)] px-4 py-3 text-[14px] text-muted-foreground shadow-[inset_0_0_0_1px_rgba(var(--frost-rgb),0.6)] backdrop-blur-md"
-          >
-            {notice}
-          </p>
-        )}
-        {shownTasks.length === 0 ? (
-          <div className="flex flex-col items-center gap-3 rounded-[26px] border border-dashed border-ink/15 px-6 py-10 text-center">
-            <BrandMark size={40} className="opacity-60" />
-            <p className="m-0 max-w-sm text-ink-2">{emptyMessage}</p>
-          </div>
-        ) : (
-          <div className="flex flex-col gap-6">
-            {/* Each group is a list named by its heading: "Overdue, list, 2 items". */}
-            {groups.open.map((group) => (
-              <section key={group.key} aria-labelledby={`group-${group.key}`} className="flex flex-col gap-2">
-                <h2
-                  id={`group-${group.key}`}
-                  className={`${headingClass} ${group.key === 'overdue' ? 'text-destructive' : 'text-ink-3'}`}
+      {updateError && (
+        <p
+          role="alert"
+          className="m-0 rounded-2xl border border-[var(--tk-danger-border)] bg-[var(--tk-danger-surface)] px-4 py-3 text-[14px] text-[var(--tk-danger-ink-strong)]"
+        >
+          {updateError}
+        </p>
+      )}
+      {notice && (
+        <p
+          role="status"
+          className="m-0 rounded-2xl bg-[rgba(var(--surface-rgb),0.75)] px-4 py-3 text-[14px] text-muted-foreground shadow-[inset_0_0_0_1px_rgba(var(--frost-rgb),0.6)] backdrop-blur-md"
+        >
+          {notice}
+        </p>
+      )}
+      {shownTasks.length === 0 ? (
+        <div className="tk-rise flex flex-col items-center gap-3 rounded-[26px] bg-[var(--tk-sheet-bg)] px-6 py-10 text-center shadow-[var(--tk-sheet-shadow)] backdrop-blur-md">
+          <BrandMark size={40} className="opacity-60" />
+          <p className="m-0 max-w-sm text-balance text-ink-2">{emptyMessage}</p>
+        </div>
+      ) : (
+        <>
+          {groups.open.length > 0 && (
+            // One sheet for every open group; each group is a list named by
+            // its heading: "Overdue, list, 2 items".
+            <div className={cn(sheetClass, 'tk-rise rounded-[26px] pb-1')}>
+              {groups.open.map((group, index) => (
+                <section
+                  key={group.key}
+                  aria-labelledby={`group-${group.key}`}
+                  className={cn(index > 0 && 'border-t border-[var(--tk-soft-divider)]')}
                 >
-                  {group.heading}
-                </h2>
-                <ul aria-labelledby={`group-${group.key}`} className={listClass}>
-                  {group.tasks.map(renderRow)}
-                </ul>
-              </section>
-            ))}
-            {groups.completed.length > 0 && (
-              <section aria-labelledby="group-completed" className="flex flex-col gap-2">
-                <h2 id="group-completed" className={`${headingClass} text-ink-3`}>
-                  <button
-                    type="button"
-                    ref={completedToggle}
-                    aria-expanded={completedOpen}
-                    aria-controls="completed-tasks"
-                    onClick={() => setCompletedOpen((open) => !open)}
-                    className={cn(
-                      '-ml-1 flex cursor-pointer items-center gap-1.5 rounded-full border-0 bg-transparent px-1 py-1 font-[inherit] tracking-[inherit] text-inherit uppercase hover:text-ink',
-                      focusRing,
-                    )}
+                  <h2
+                    id={`group-${group.key}`}
+                    className={cn(sectionHeading, group.key === 'overdue' ? 'text-destructive' : 'text-ink-3')}
                   >
-                    <ChevronRight
-                      aria-hidden="true"
-                      className={cn('size-3.5 transition-transform motion-reduce:transition-none', completedOpen && 'rotate-90')}
-                      strokeWidth={2.4}
-                    />
-                    Completed ({groups.completed.length})
-                  </button>
-                </h2>
-                <ul id="completed-tasks" aria-labelledby="group-completed" hidden={!completedOpen} className={cn(listClass, 'opacity-95')}>
-                  {groups.completed.map(renderRow)}
-                </ul>
-              </section>
-            )}
-          </div>
-        )}
-      </div>
+                    {group.heading}
+                  </h2>
+                  <ul aria-labelledby={`group-${group.key}`} className="m-0 list-none p-0">
+                    {group.tasks.map(renderRow)}
+                  </ul>
+                </section>
+              ))}
+            </div>
+          )}
+          {groups.completed.length > 0 && (
+            // Collapsed under the open tasks on every load (AC-7).
+            <div className="flex flex-col gap-2">
+              <button
+                type="button"
+                ref={completedToggle}
+                aria-expanded={completedOpen}
+                aria-controls="completed-tasks"
+                onClick={() => setCompletedOpen((open) => !open)}
+                className={cn(
+                  'min-h-9 cursor-pointer self-start rounded-full border-0 bg-transparent px-2 py-1 text-[14px] text-ink-2 transition-colors hover:text-ink pointer-coarse:min-h-11',
+                  focusRing,
+                )}
+              >
+                {completedOpen ? 'Hide done' : `Show ${groups.completed.length} done`}
+              </button>
+              <ul
+                id="completed-tasks"
+                aria-label="Completed"
+                hidden={!completedOpen}
+                className={cn(sheetClass, 'm-0 list-none rounded-[26px] p-0 py-1')}
+              >
+                {groups.completed.map(renderRow)}
+              </ul>
+            </div>
+          )}
+        </>
+      )}
     </>,
-    nav,
+    header,
+    overlay,
   );
 }

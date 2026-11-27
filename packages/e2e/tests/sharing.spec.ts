@@ -18,7 +18,7 @@ async function signIn(page: Page, user: FixtureUser) {
   await expect(page.getByRole('heading', { name: 'Fixture central SSO' })).toBeVisible();
   await page.getByRole('link', { name: user }).click();
   await expect(page.getByRole('button', { name: `${user}, account` })).toBeVisible();
-  await expect(page.getByLabel('New task')).toBeVisible();
+  await expect(addButton(page)).toBeVisible();
 }
 // A member in their own browser context. The page clock is installed (it
 // keeps running at the real pace) so a test can jump to the next 30-second
@@ -41,37 +41,54 @@ async function expectNoReload(page: Page) {
   expect(await page.evaluate(() => (window as unknown as { noReload?: boolean }).noReload)).toBe(true);
 }
 
-const tablist = (page: Page) => page.getByRole('tablist', { name: 'Lists' });
-const tab = (page: Page, name: string) => tablist(page).getByRole('tab', { name, exact: true });
+// The view title is the button that opens the view picker, a menu of the
+// views and lists. Its items stay on the page, hidden, while it is closed.
+const viewTitle = (page: Page) => page.locator('#view-title');
+const viewMenu = (page: Page) => page.getByRole('menu', { name: 'Views and lists', includeHidden: true });
+const tab = (page: Page, name: string) =>
+  viewMenu(page).getByRole('menuitemradio', { name, exact: true, includeHidden: true });
+const viewItem = (page: Page, name: RegExp) =>
+  viewMenu(page).getByRole('menuitemradio', { name, includeHidden: true });
+const menuItem = (page: Page, name: string) =>
+  viewMenu(page).getByRole('menuitem', { name, exact: true, includeHidden: true });
+// Chooses a view, or New list or Manage lists, from the picker.
+async function pick(page: Page, name: string) {
+  if ((await viewTitle(page).getAttribute('aria-expanded')) !== 'true') await viewTitle(page).click();
+  await tab(page, name).or(menuItem(page, name)).click();
+  await expect(viewMenu(page)).toBeHidden();
+}
+const addButton = (page: Page) => page.getByRole('button', { name: 'Add a task', exact: true });
+const addSheet = (page: Page) => page.getByRole('dialog', { name: 'New task' });
+const newTaskField = (page: Page) => addSheet(page).getByRole('textbox', { name: 'New task', exact: true });
 const sharedTab = (page: Page, name: string) => tab(page, `${name} (shared)`);
 const checkbox = (page: Page, title: string) => page.getByRole('checkbox', { name: title, exact: true });
 const rowOf = (page: Page, title: string) => page.getByRole('listitem').filter({ has: checkbox(page, title) });
 const labels = (page: Page, title: string) => rowOf(page, title).locator('[data-share-labels]');
 const button = (page: Page, name: string) => page.getByRole('button', { name, exact: true });
-const completedToggle = (page: Page) => page.getByRole('button', { name: /^Completed \(\d+\)$/ });
+const completedToggle = (page: Page) => page.getByRole('button', { name: /^(Show \d+ done|Hide done)$/ });
 
 async function addTask(page: Page, title: string) {
-  await page.getByLabel('New task').fill(title);
-  await page.getByLabel('New task').press('Enter');
+  await addButton(page).click();
+  await newTaskField(page).fill(title);
+  await newTaskField(page).press('Enter');
   await expect(checkbox(page, title)).toBeVisible();
+  await expect(addButton(page)).toBeFocused();
 }
 async function createList(page: Page, name: string) {
-  await button(page, 'New list').click();
+  await pick(page, 'New list');
   await page.getByRole('textbox', { name: 'List name' }).fill(name);
   await page.getByRole('textbox', { name: 'List name' }).press('Enter');
-  await expect(tab(page, name)).toHaveAttribute('aria-selected', 'true');
+  await expect(tab(page, name)).toHaveAttribute('aria-checked', 'true');
 }
 async function openManage(page: Page) {
-  if ((await button(page, 'Manage lists').getAttribute('aria-expanded')) !== 'true') {
-    await button(page, 'Manage lists').click();
-  }
+  if (!(await page.getByRole('list', { name: 'Your lists' }).isVisible())) await pick(page, 'Manage lists');
   await expect(page.getByRole('list', { name: 'Your lists' })).toBeVisible();
 }
 async function share(page: Page, name: string) {
   await openManage(page);
   await button(page, `Share "${name}" with household`).click();
-  await expect(sharedTab(page, name)).toBeVisible();
-  await button(page, 'Manage lists').click();
+  await expect(sharedTab(page, name)).toBeAttached();
+  await button(page, 'Close Manage lists').click();
 }
 async function expandCompleted(page: Page) {
   if ((await completedToggle(page).getAttribute('aria-expanded')) === 'false') await completedToggle(page).click();
@@ -104,20 +121,20 @@ test('One shares a list; Two sees it, adds, completes and is assigned; an unshar
     await expect(tab(two, 'Shared: groceries')).toHaveCount(0);
 
     await share(one, 'Shared: groceries');
-    await expect(sharedTab(one, 'Shared: groceries')).toHaveAttribute('aria-selected', 'true');
+    await expect(sharedTab(one, 'Shared: groceries')).toHaveAttribute('aria-checked', 'true');
     // Two sees it on the next refresh, without a reload.
     await nextRefresh(two);
-    await expect(sharedTab(two, 'Shared: groceries')).toBeVisible();
+    await expect(sharedTab(two, 'Shared: groceries')).toBeAttached();
     await expectNoReload(two);
     // And after a reload.
     await two.reload();
-    await expect(sharedTab(two, 'Shared: groceries')).toBeVisible();
+    await expect(sharedTab(two, 'Shared: groceries')).toBeAttached();
     // The unshared list and its task never show for Two.
-    await expect(tablist(two).getByRole('tab', { name: /Shared: private/ })).toHaveCount(0);
+    await expect(viewItem(two, /Shared: private/)).toHaveCount(0);
     await expect(two.getByText('Shared: diary')).toHaveCount(0);
 
     // Two adds a task in One's list; One sees who added it.
-    await sharedTab(two, 'Shared: groceries').click();
+    await pick(two, 'Shared: groceries (shared)');
     await addTask(two, 'Shared: bread');
     await expect(labels(two, 'Shared: bread')).toHaveCount(0);
     await nextRefresh(one);
@@ -158,7 +175,7 @@ test('Two renames and stops sharing One\'s list: Two loses it, One keeps it with
     await addTask(one, 'Shared: hoover');
     await share(one, 'Shared: chores');
     await two.reload();
-    await sharedTab(two, 'Shared: chores').click();
+    await pick(two, 'Shared: chores (shared)');
     await addTask(two, 'Shared: dust');
 
     await openManage(two);
@@ -168,7 +185,7 @@ test('Two renames and stops sharing One\'s list: Two loses it, One keeps it with
     await button(two, 'Rename "Shared: chores"').click();
     await two.getByRole('textbox', { name: 'New name for "Shared: chores"' }).fill('Shared: weekly chores');
     await two.keyboard.press('Enter');
-    await expect(sharedTab(two, 'Shared: weekly chores')).toBeVisible();
+    await expect(sharedTab(two, 'Shared: weekly chores')).toBeAttached();
 
     await button(two, 'Stop sharing "Shared: weekly chores"').click();
     await expect(two.getByRole('group', { name: 'Stop sharing "Shared: weekly chores"?' })).toContainText(
@@ -176,15 +193,15 @@ test('Two renames and stops sharing One\'s list: Two loses it, One keeps it with
     );
     await screenshot(two, testInfo, 'sharing-stop-question');
     await button(two, 'Confirm stopping sharing "Shared: weekly chores"').click();
-    await expect(tablist(two).getByRole('tab', { name: /Shared: weekly chores/ })).toHaveCount(0);
-    await expect(tab(two, 'Inbox')).toHaveAttribute('aria-selected', 'true');
+    await expect(viewItem(two, /Shared: weekly chores/)).toHaveCount(0);
+    await expect(tab(two, 'Inbox')).toHaveAttribute('aria-checked', 'true');
     await expect(two.getByText('Shared: dust')).toHaveCount(0);
     await two.reload();
-    await expect(tablist(two).getByRole('tab', { name: /Shared: weekly chores/ })).toHaveCount(0);
+    await expect(viewItem(two, /Shared: weekly chores/)).toHaveCount(0);
 
     // One keeps the renamed list, unshared, with both tasks.
     await nextRefresh(one);
-    await expect(tab(one, 'Shared: weekly chores')).toHaveAttribute('aria-selected', 'true');
+    await expect(tab(one, 'Shared: weekly chores')).toHaveAttribute('aria-checked', 'true');
     await expect(checkbox(one, 'Shared: hoover')).toBeVisible();
     await expect(checkbox(one, 'Shared: dust')).toBeVisible();
     await expect(labels(one, 'Shared: dust')).toHaveCount(0);
@@ -204,7 +221,7 @@ test('Two stops sharing One\'s list with a delete question open in All tasks; wh
     await addTask(one, 'Shared: tyres');
     await share(one, 'Shared: garage');
     await two.reload();
-    await expect(tab(two, 'All tasks')).toHaveAttribute('aria-selected', 'true');
+    await expect(tab(two, 'All tasks')).toHaveAttribute('aria-checked', 'true');
     await expect(checkbox(two, 'Shared: oil change')).toBeVisible();
 
     await button(two, 'Delete "Shared: oil change"').click();
@@ -212,7 +229,7 @@ test('Two stops sharing One\'s list with a delete question open in All tasks; wh
     await openManage(two);
     await button(two, 'Stop sharing "Shared: garage"').click();
     await button(two, 'Confirm stopping sharing "Shared: garage"').click();
-    await expect(tablist(two).getByRole('tab', { name: /Shared: garage/ })).toHaveCount(0);
+    await expect(viewItem(two, /Shared: garage/)).toHaveCount(0);
     await expect(two.getByRole('status')).toHaveText(
       '"Shared: garage" is no longer shared with you, so it was removed. "Shared: oil change" is no longer shared with you.',
     );
@@ -222,11 +239,11 @@ test('Two stops sharing One\'s list with a delete question open in All tasks; wh
 
     // One shares the list again (stopping sharing it gave it back unshared).
     await nextRefresh(one);
-    await expect(tab(one, 'Shared: garage')).toBeVisible();
+    await expect(tab(one, 'Shared: garage')).toBeAttached();
     await share(one, 'Shared: garage');
     // Two's next refresh brings the list and its tasks back, with no question.
     await nextRefresh(two);
-    await expect(sharedTab(two, 'Shared: garage')).toBeVisible();
+    await expect(sharedTab(two, 'Shared: garage')).toBeAttached();
     await expect(checkbox(two, 'Shared: oil change')).toBeVisible();
     await expect(checkbox(two, 'Shared: tyres')).toBeVisible();
     await expectNoReload(two);
@@ -250,22 +267,22 @@ test('Two acts on One\'s list after One stopped sharing it or deleted it: Two\'s
     await createList(one, 'Shared: shed');
     await share(one, 'Shared: shed');
     await two.reload();
-    await sharedTab(two, 'Shared: workshop').click();
+    await pick(two, 'Shared: workshop (shared)');
     await addTask(two, 'Shared: drill');
-    await sharedTab(two, 'Shared: shed').click();
+    await pick(two, 'Shared: shed (shared)');
     await addTask(two, 'Shared: rake');
-    await tab(two, 'All tasks').click();
+    await pick(two, 'All tasks');
 
     // One stops sharing the workshop; Two has not refreshed yet.
     await openManage(one);
     await button(one, 'Stop sharing "Shared: workshop"').click();
-    await expect(tab(one, 'Shared: workshop')).toBeVisible();
+    await expect(tab(one, 'Shared: workshop')).toBeAttached();
     await button(two, 'Delete "Shared: drill"').click();
     await expect(button(two, 'Confirm deleting "Shared: drill"')).toBeVisible();
     await openManage(two);
     await button(two, 'Stop sharing "Shared: workshop"').click();
     await button(two, 'Confirm stopping sharing "Shared: workshop"').click();
-    await expect(tablist(two).getByRole('tab', { name: /Shared: workshop/ })).toHaveCount(0);
+    await expect(viewItem(two, /Shared: workshop/)).toHaveCount(0);
     // The refresh the drop starts shows the task is not Two's: it leaves,
     // with its question, and no ghost row stays.
     await expect(two.getByRole('status')).toHaveText('"Shared: drill" is no longer shared with you.');
@@ -279,20 +296,20 @@ test('Two acts on One\'s list after One stopped sharing it or deleted it: Two\'s
     await expect(button(two, 'Confirm deleting "Shared: drill"')).toHaveCount(0);
     // One keeps it in the workshop.
     await nextRefresh(one);
-    await tab(one, 'Shared: workshop').click();
+    await pick(one, 'Shared: workshop');
     await expect(checkbox(one, 'Shared: drill')).toBeVisible();
 
     // One deletes the shed; Two's task goes to Two's Inbox. Two renames the
     // shed before a refresh, with a question open on that task.
     await button(one, 'Delete list "Shared: shed"').click();
     await button(one, 'Confirm deleting list "Shared: shed"').click();
-    await expect(tablist(one).getByRole('tab', { name: /Shared: shed/ })).toHaveCount(0);
+    await expect(viewItem(one, /Shared: shed/)).toHaveCount(0);
     await button(two, 'Delete "Shared: rake"').click();
     await expect(button(two, 'Confirm deleting "Shared: rake"')).toBeVisible();
     await button(two, 'Rename "Shared: shed"').click();
     await two.getByRole('textbox', { name: 'New name for "Shared: shed"' }).fill('Shared: garden shed');
     await two.keyboard.press('Enter');
-    await expect(tablist(two).getByRole('tab', { name: /Shared: shed/ })).toHaveCount(0);
+    await expect(viewItem(two, /Shared: shed/)).toHaveCount(0);
     await expect(two.getByRole('status')).toHaveText('"Shared: shed" no longer exists, so it was removed.');
     await nextRefresh(two);
     await expectNoReload(two);
@@ -318,7 +335,7 @@ test('deleting a shared list sends each task to the Inbox of whoever added it (A
     await addTask(one, 'Shared: balloons');
     await share(one, 'Shared: party');
     await two.reload();
-    await sharedTab(two, 'Shared: party').click();
+    await pick(two, 'Shared: party (shared)');
     await addTask(two, 'Shared: cake');
 
     await openManage(two);
@@ -327,14 +344,14 @@ test('deleting a shared list sends each task to the Inbox of whoever added it (A
       'Its 2 tasks will return to the Inbox of whoever added them.',
     );
     await button(two, 'Confirm deleting list "Shared: party"').click();
-    await expect(tablist(two).getByRole('tab', { name: /Shared: party/ })).toHaveCount(0);
-    await tab(two, 'Inbox').click();
+    await expect(viewItem(two, /Shared: party/)).toHaveCount(0);
+    await pick(two, 'Inbox');
     await expect(checkbox(two, 'Shared: cake')).toBeVisible();
     await expect(two.getByText('Shared: balloons')).toHaveCount(0);
 
     // One's view of the list was selected: it switches to Inbox with a notice.
     await nextRefresh(one);
-    await expect(tab(one, 'Inbox')).toHaveAttribute('aria-selected', 'true');
+    await expect(tab(one, 'Inbox')).toHaveAttribute('aria-checked', 'true');
     await expect(one.getByRole('status')).toHaveText(
       '"Shared: party" was deleted or is no longer shared with you, so Inbox is shown.',
     );
@@ -345,7 +362,7 @@ test('deleting a shared list sends each task to the Inbox of whoever added it (A
   }
 });
 
-test('the share toggle and the Assigned to select work by keyboard; the tab row fits a phone (AC-15)', async ({
+test('the share toggle and the Assigned to select work by keyboard; the view picker fits a phone (AC-15; calm-layout AC-3)', async ({
   browser,
 }, testInfo) => {
   const one = await member(browser, 'Household One', { width: 390, height: 844 });
@@ -354,9 +371,13 @@ test('the share toggle and the Assigned to select work by keyboard; the tab row 
     await createList(one, 'Shared: kitchen and pantry restock');
     await addTask(one, 'Shared: flour');
 
-    // Manage lists, then the list's share toggle, by keyboard only.
-    await button(one, 'Manage lists').focus();
+    // Manage lists from the view picker, then the list's share toggle, by keyboard only.
+    await viewTitle(one).focus();
     await one.keyboard.press('Enter');
+    await one.keyboard.press('End');
+    await expect(menuItem(one, 'Manage lists')).toBeFocused();
+    await one.keyboard.press('Enter');
+    await expect(one.getByRole('region', { name: 'Manage lists' })).toBeFocused();
     const toggle = button(one, 'Share "Shared: kitchen and pantry restock" with household');
     // Earlier files leave Household One with more lists, so this may take a while.
     for (let presses = 0; presses < 200 && !(await toggle.evaluate((element) => element === document.activeElement)); presses++) {
@@ -366,12 +387,13 @@ test('the share toggle and the Assigned to select work by keyboard; the tab row 
     await one.keyboard.press('Enter');
     const stop = button(one, 'Stop sharing "Shared: kitchen and pantry restock"');
     await expect(stop).toBeFocused();
-    await expect(sharedTab(one, 'Shared: kitchen and pantry restock')).toBeVisible();
+    await expect(sharedTab(one, 'Shared: kitchen and pantry restock')).toBeAttached();
     await one.keyboard.press('Escape');
 
-    // The tab row, with the marker, scrolls inside itself; the page does not.
+    // The open picker, with the marker, fits the screen; the page does not scroll sideways.
+    await viewTitle(one).click();
     const measured = await one.evaluate(() => {
-      const row = document.querySelector('[role="tablist"]')!;
+      const row = document.getElementById('view-menu')!;
       return {
         page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
         rowRight: row.getBoundingClientRect().right,
@@ -388,13 +410,16 @@ test('the share toggle and the Assigned to select work by keyboard; the tab row 
       .evaluate((element) => element.getBoundingClientRect().width);
     expect(nameWidth).toBeGreaterThanOrEqual(160);
     await expect(sharedTab(one, 'Shared: kitchen and pantry restock').locator('svg.lucide-users')).toBeVisible();
-    // Reached by keyboard (Shift+Tab back to the tab row), the tab scrolls into
-    // view within the row; the page still does not scroll sideways.
-    await sharedTab(one, 'Shared: kitchen and pantry restock').focus();
+    // Reached by keyboard, the item is in view; the page still does not scroll sideways.
+    await one.keyboard.press('End');
+    await one.keyboard.press('ArrowUp');
+    await one.keyboard.press('ArrowUp');
+    await expect(sharedTab(one, 'Shared: kitchen and pantry restock')).toBeFocused();
     await expect(sharedTab(one, 'Shared: kitchen and pantry restock')).toBeInViewport();
     expect(await one.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBe(0);
     expect(await one.evaluate(() => window.scrollX)).toBe(0);
-    await screenshot(one, testInfo, 'sharing-phone-tab-row');
+    await screenshot(one, testInfo, 'sharing-phone-picker');
+    await one.keyboard.press('Escape');
 
     // The Assigned to select, by keyboard: Tab from the List select, arrow
     // to Household Two, Enter saves.
@@ -418,7 +443,7 @@ test('the share toggle and the Assigned to select work by keyboard; the tab row 
     await expect(button(one, 'Edit "Shared: flour"')).toBeFocused();
 
     await two.reload();
-    await sharedTab(two, 'Shared: kitchen and pantry restock').click();
+    await pick(two, 'Shared: kitchen and pantry restock (shared)');
     await expect(labels(two, 'Shared: flour')).toHaveText('Added by Household One \u00B7 Assigned to you');
   } finally {
     await closeContexts(one, two);

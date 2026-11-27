@@ -11,7 +11,7 @@ import { MAX_DUE_DATE, MIN_DUE_DATE, dueLabel, dueStatus, holdsNoDate } from './
 import { RepeatControl, RepeatHint } from './RepeatControl';
 import type { List, Member } from './lists';
 import { type Repeat, type RepeatForm, repeatLabel } from './repeat';
-import { CalendarDays, Pencil, Repeat as RepeatIcon, Trash2, UserRound, Users } from 'lucide-react';
+import { Pencil, Repeat as RepeatIcon, Trash2, UserRound, Users } from 'lucide-react';
 import { cn } from './cn';
 import {
   FieldError,
@@ -230,7 +230,7 @@ export function TaskRow({
     // pushing it off a phone screen.
     const selectField = cn(smallControlClass, selectClass, 'min-w-0 max-w-full aria-disabled:opacity-60');
     return (
-      <li ref={rowRef} className="bg-[var(--tk-editing-bg)] px-4 py-4 sm:px-5">
+      <li ref={rowRef} className="bg-[var(--tk-editing-bg)] px-5 py-4">
         <form onSubmit={submit} onKeyDown={escapeTo(onCancelEdit)} noValidate className="flex flex-wrap items-center gap-2">
           <input
             data-action="edit-title"
@@ -382,12 +382,12 @@ export function TaskRow({
   const shareLine = shareLabels
     ? [shareLabels.addedBy, shareLabels.doneBy, shareLabels.assigned].filter((label): label is string => label !== null)
     : [];
-  const meta = 'flex min-w-0 flex-wrap items-center gap-x-1.5 pl-[2.125rem] text-[13px] leading-snug';
+  const hasDetails = task.dueDate !== null || listName !== null || shareLine.length > 0;
   return (
     <li
       ref={rowRef}
       className={cn(
-        'group flex flex-wrap items-start gap-x-2 gap-y-2 px-4 py-3 transition-colors sm:px-5',
+        'group flex flex-wrap items-start gap-x-2 gap-y-2 px-5 py-3 transition-colors',
         mode.kind === 'confirm-delete' ? 'bg-[var(--tk-danger-surface)]' : 'hover:bg-ink/[0.025]',
       )}
     >
@@ -403,55 +403,61 @@ export function TaskRow({
             className="tk-check mt-px aria-disabled:opacity-50"
           />
           <span
-            className={`min-w-0 break-words text-[15px] leading-[1.45] ${
+            className={`min-w-0 break-words text-[16px] leading-snug ${
               task.completed ? 'text-muted-foreground line-through decoration-ink/30' : 'text-ink'
             }`}
           >
             {task.title}
           </span>
         </label>
-        {task.dueDate !== null && (
-          <p id={dueId} className={cn('m-0', meta, overdue ? 'text-destructive' : 'text-muted-foreground')}>
-            <CalendarDays aria-hidden="true" className="size-3.5 shrink-0" strokeWidth={2} />
-            {/* Overdue is said in words, not only by the colour. */}
-            {overdue && (
-              <>
-                <span className="font-semibold">Overdue</span>
-                {' \u00B7 '}
-              </>
-            )}
-            <span>{dueLabel(task.dueDate, today)}</span>
-            {/* Each separator stays with the words after it, so a wrapped
-                line never starts with a stray dot. */}
-            {task.repeat && (
-              <span className="inline-flex items-center gap-1 whitespace-nowrap">
-                {' \u00B7 '}
-                <RepeatIcon aria-hidden="true" className="size-3 shrink-0" strokeWidth={2.2} />
-                {repeatLabel(task.repeat)}
+        {/* The details, quieter, on one line under the title (D-9): when it is
+            due and how it repeats, its list in views that mix lists, and in
+            a shared list who added, completed and has it. */}
+        {hasDetails && (
+          <p className="m-0 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 pl-[2.125rem] text-[13px] leading-snug text-muted-foreground">
+            {task.dueDate !== null && (
+              <span id={dueId} className={cn('inline-flex flex-wrap items-center gap-x-1.5', overdue && 'text-destructive')}>
+                {/* Overdue is said in words, not only by the colour. */}
+                {overdue && (
+                  <>
+                    <span className="font-semibold">Overdue</span>
+                    {' \u00B7 '}
+                  </>
+                )}
+                <span>{dueLabel(task.dueDate, today)}</span>
+                {/* Each separator stays with the words after it, so a wrapped
+                    line never starts with a stray dot. */}
+                {task.repeat && (
+                  <span className="inline-flex items-center gap-1 whitespace-nowrap">
+                    {' \u00B7 '}
+                    <RepeatIcon aria-hidden="true" className="size-3 shrink-0" strokeWidth={2.2} />
+                    {repeatLabel(task.repeat)}
+                  </span>
+                )}
               </span>
             )}
-          </p>
-        )}
-        {listName !== null && (
-          // A muted label after the due date line, outside the checkbox's description.
-          <p data-list-label className={cn('m-0 break-words', meta, 'text-muted-foreground')}>
-            <span className="sr-only">List: </span>
-            <span className="rounded-full bg-ink/[0.05] px-2 py-px text-[12px] font-medium text-ink-2">{listName}</span>
-          </p>
-        )}
-        {shareLine.length > 0 && (
-          <p data-share-labels className={cn('m-0 break-words', meta, 'text-muted-foreground')}>
-            {shareLabels?.assigned ? (
-              <UserRound aria-hidden="true" className="size-3.5 shrink-0" strokeWidth={2} />
-            ) : (
-              <Users aria-hidden="true" className="size-3.5 shrink-0" strokeWidth={2} />
-            )}
-            {shareLine.map((label, index) => (
-              <span key={label} className="whitespace-nowrap">
-                {index > 0 && ' \u00B7 '}
-                {label}
+            {listName !== null && (
+              // After the due date, outside the checkbox's description.
+              <span data-list-label className="min-w-0 break-words text-muted-foreground">
+                <span className="sr-only">List: </span>
+                {listName}
               </span>
-            ))}
+            )}
+            {shareLine.length > 0 && (
+              <span data-share-labels className="inline-flex min-w-0 flex-wrap items-center gap-x-1.5 break-words">
+                {shareLabels?.assigned ? (
+                  <UserRound aria-hidden="true" className="size-3.5 shrink-0" strokeWidth={2} />
+                ) : (
+                  <Users aria-hidden="true" className="size-3.5 shrink-0" strokeWidth={2} />
+                )}
+                {shareLine.map((label, index) => (
+                  <span key={label} className="whitespace-nowrap">
+                    {index > 0 && ' \u00B7 '}
+                    {label}
+                  </span>
+                ))}
+              </span>
+            )}
           </p>
         )}
         {task.notes !== null && <TaskNotes title={task.title} notes={task.notes} completed={task.completed} />}
@@ -486,7 +492,9 @@ export function TaskRow({
           </button>
         </div>
       ) : (
-        <div className="ml-auto flex items-center gap-0.5">
+        // Quiet until wanted: with a mouse, Edit and Delete show on hover or
+        // when a control of the row has focus; on touch they always show.
+        <div className="ml-auto flex items-center gap-0.5 transition-opacity duration-150 motion-reduce:transition-none pointer-fine:opacity-0 pointer-fine:group-focus-within:opacity-100 pointer-fine:group-hover:opacity-100">
           <button
             type="button"
             data-action="edit"

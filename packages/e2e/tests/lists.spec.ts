@@ -17,41 +17,65 @@ async function signIn(page: Page, user: FixtureUser, path = '/') {
   await expect(page.getByRole('heading', { name: 'Fixture central SSO' })).toBeVisible();
   await page.getByRole('link', { name: user }).click();
   await expect(page.getByRole('button', { name: `${user}, account` })).toBeVisible();
-  await expect(page.getByLabel('New task')).toBeVisible();
+  await expect(addButton(page)).toBeVisible();
 }
 
-const tablist = (page: Page) => page.getByRole('tablist', { name: 'Lists' });
-const tab = (page: Page, name: string) => tablist(page).getByRole('tab', { name, exact: true });
+// The view title is the button that opens the view picker, a menu of the
+// views and lists. Its items stay on the page, hidden, while it is closed.
+const viewTitle = (page: Page) => page.locator('#view-title');
+const viewMenu = (page: Page) => page.getByRole('menu', { name: 'Views and lists', includeHidden: true });
+const tab = (page: Page, name: string) =>
+  viewMenu(page).getByRole('menuitemradio', { name, exact: true, includeHidden: true });
+const viewItems = (page: Page) => viewMenu(page).getByRole('menuitemradio', { includeHidden: true });
+const menuItem = (page: Page, name: string) =>
+  viewMenu(page).getByRole('menuitem', { name, exact: true, includeHidden: true });
+// Chooses a view, or New list or Manage lists, from the picker.
+async function pick(page: Page, name: string) {
+  if ((await viewTitle(page).getAttribute('aria-expanded')) !== 'true') await viewTitle(page).click();
+  const item = tab(page, name).or(menuItem(page, name));
+  await item.click();
+  await expect(viewMenu(page)).toBeHidden();
+}
+const addButton = (page: Page) => page.getByRole('button', { name: 'Add a task', exact: true });
+const addSheet = (page: Page) => page.getByRole('dialog', { name: 'New task' });
+const newTaskField = (page: Page) => addSheet(page).getByRole('textbox', { name: 'New task', exact: true });
+const chip = (page: Page, name: string) => addSheet(page).getByRole('button', { name: new RegExp(`^${name}: `) });
 const checkbox = (page: Page, title: string) => page.getByRole('checkbox', { name: title, exact: true });
 const rowOf = (page: Page, title: string) => page.getByRole('listitem').filter({ has: checkbox(page, title) });
 const statusMessage = (page: Page) => page.getByRole('status');
 const button = (page: Page, name: string) => page.getByRole('button', { name, exact: true });
-const completedToggle = (page: Page) => page.getByRole('button', { name: /^Completed \(\d+\)$/ });
+const completedToggle = (page: Page) => page.getByRole('button', { name: /^(Show \d+ done|Hide done)$/ });
 const listParam = (page: Page) => new URL(page.url()).searchParams.get('list');
 
-async function selectedTab(page: Page) {
-  return tablist(page).getByRole('tab', { selected: true }).textContent();
-}
 async function addTask(page: Page, title: string) {
-  await page.getByLabel('New task').fill(title);
-  await page.getByLabel('New task').press('Enter');
+  await addButton(page).click();
+  await newTaskField(page).fill(title);
+  await newTaskField(page).press('Enter');
   await expect(checkbox(page, title)).toBeVisible();
+  await expect(addButton(page)).toBeFocused();
+}
+// Where the add sheet adds now, as its List chip says.
+async function addDestination(page: Page) {
+  await addButton(page).click();
+  const name = await chip(page, 'List').getAttribute('aria-label');
+  await page.keyboard.press('Escape');
+  await expect(addSheet(page)).toHaveCount(0);
+  return name;
 }
 async function createList(page: Page, name: string) {
-  await button(page, 'New list').click();
+  await pick(page, 'New list');
   await page.getByRole('textbox', { name: 'List name' }).fill(name);
   await page.getByRole('textbox', { name: 'List name' }).press('Enter');
-  await expect(tab(page, name)).toHaveAttribute('aria-selected', 'true');
+  await expect(tab(page, name)).toHaveAttribute('aria-checked', 'true');
+  await expect(viewTitle(page)).toHaveText(name);
 }
 async function openManage(page: Page) {
-  if ((await button(page, 'Manage lists').getAttribute('aria-expanded')) !== 'true') {
-    await button(page, 'Manage lists').click();
-  }
+  if (!(await page.getByRole('list', { name: 'Your lists' }).isVisible())) await pick(page, 'Manage lists');
   await expect(page.getByRole('list', { name: 'Your lists' })).toBeVisible();
 }
 // The titles shown in the task area, top to bottom, among the given ones.
 async function shownTitles(page: Page, among: string[]) {
-  const all = await page.getByRole('tabpanel').getByRole('list').locator('label').allTextContents();
+  const all = await page.getByRole('main').getByRole('list').locator('label').allTextContents();
   return all.filter((title) => among.includes(title));
 }
 async function screenshot(page: Page, testInfo: TestInfo, name: string) {
@@ -71,76 +95,108 @@ function recordListWrites(page: Page) {
   return writes;
 }
 
-test('creates lists and switches between them with the keyboard only (AC-8, AC-11, AC-15)', async ({ page }, testInfo) => {
+test('creates lists and switches between them with the keyboard only, through the view picker (AC-8, AC-11, AC-15; calm-layout AC-2, AC-3)', async ({ page }, testInfo) => {
   await signIn(page, 'Household One');
   const writes = recordListWrites(page);
 
   // From the top of the page, the first Tab stop is the skip link, and the
-  // next one is the selected tab.
+  // next one is the view title, which opens the picker.
   await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
   await page.keyboard.press('Tab');
   await expect(page.getByRole('link', { name: 'Skip to tasks' })).toBeFocused();
   await page.keyboard.press('Tab');
-  await expect(tab(page, 'All tasks')).toBeFocused();
-  await expect(tab(page, 'All tasks')).toHaveAttribute('aria-selected', 'true');
-  await page.keyboard.press('Tab');
-  await expect(button(page, 'New list')).toBeFocused();
+  await expect(viewTitle(page)).toBeFocused();
+  await expect(viewTitle(page)).toHaveText('All tasks');
+  await expect(viewTitle(page)).toHaveAttribute('aria-haspopup', 'menu');
+  await expect(viewTitle(page)).toHaveAttribute('aria-expanded', 'false');
 
-  // Escape closes the name field without sending anything.
+  // Enter opens it at the checked view; End reaches New list (no lists yet).
+  await page.keyboard.press('Enter');
+  await expect(viewTitle(page)).toHaveAttribute('aria-expanded', 'true');
+  await expect(tab(page, 'All tasks')).toBeFocused();
+  await expect(tab(page, 'All tasks')).toHaveAttribute('aria-checked', 'true');
+  await expect(menuItem(page, 'Manage lists')).toHaveCount(0);
+  await page.keyboard.press('End');
+  await expect(menuItem(page, 'New list')).toBeFocused();
+
+  // Escape closes the name field without sending anything; focus goes to the view title.
   await page.keyboard.press('Enter');
   await expect(page.getByRole('textbox', { name: 'List name' })).toBeFocused();
   await page.keyboard.type('Keys: thrown away');
   await page.keyboard.press('Escape');
   await expect(page.getByRole('textbox', { name: 'List name' })).toHaveCount(0);
-  await expect(button(page, 'New list')).toBeFocused();
+  await expect(viewTitle(page)).toBeFocused();
   expect(writes).toEqual([]);
 
   // A fullwidth "Inbox" folds to "inbox": refused on the field, nothing sent.
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('End');
   await page.keyboard.press('Enter');
   await page.keyboard.type('\uff29\uff4e\uff42\uff4f\uff58');
   await page.keyboard.press('Enter');
   await expect(page.getByRole('alert')).toHaveText('"Inbox", "All tasks" and "Assigned to me" are built in. Choose another name.');
   await expect(page.getByRole('textbox', { name: 'List name' })).toHaveAttribute('aria-invalid', 'true');
   await page.keyboard.press('Escape');
-  await expect(button(page, 'New list')).toBeFocused();
+  await expect(viewTitle(page)).toBeFocused();
   expect(writes).toEqual([]);
 
-  // Enter creates the list, adds its tab, selects it and focuses it.
+  // Enter creates the list and shows it; focus is on the view title, which names it.
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('End');
   await page.keyboard.press('Enter');
   await page.keyboard.type('Keys: Errands');
   await page.keyboard.press('Enter');
-  await expect(tab(page, 'Keys: Errands')).toBeFocused();
-  await expect(tab(page, 'Keys: Errands')).toHaveAttribute('aria-selected', 'true');
+  await expect(viewTitle(page)).toBeFocused();
+  await expect(viewTitle(page)).toHaveText('Keys: Errands');
+  await expect(tab(page, 'Keys: Errands')).toHaveAttribute('aria-checked', 'true');
   await expect(page.getByText('No tasks in Keys: Errands yet.')).toBeVisible();
-  await page.keyboard.press('Tab');
-  await expect(button(page, 'New list')).toBeFocused();
+  // Now there is a list to manage: the last item is Manage lists, New list before it.
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('End');
+  await expect(menuItem(page, 'Manage lists')).toBeFocused();
+  await page.keyboard.press('ArrowUp');
+  await expect(menuItem(page, 'New list')).toBeFocused();
   await page.keyboard.press('Enter');
   await page.keyboard.type('Keys: Home');
   await page.keyboard.press('Enter');
-  await expect(tab(page, 'Keys: Home')).toBeFocused();
+  await expect(viewTitle(page)).toHaveText('Keys: Home');
+  await expect(viewTitle(page)).toBeFocused();
   expect(writes).toEqual(['POST /api/lists', 'POST /api/lists']);
   const homeId = listParam(page);
   expect(homeId).toMatch(/^\d+$/);
 
-  // Arrow keys, Home and End move between tabs and select them.
-  await page.keyboard.press('ArrowLeft');
+  // Arrow keys, Home and End move between the items; Enter or Space chooses.
+  await page.keyboard.press('ArrowDown');
+  await expect(tab(page, 'Keys: Home')).toBeFocused();
+  await page.keyboard.press('ArrowUp');
   await expect(tab(page, 'Keys: Errands')).toBeFocused();
-  await expect(tab(page, 'Keys: Errands')).toHaveAttribute('aria-selected', 'true');
+  // Moving does not choose.
+  expect(listParam(page)).toBe(homeId);
+  await page.keyboard.press('Enter');
+  await expect(viewTitle(page)).toHaveText('Keys: Errands');
   await expect(page.getByText('No tasks in Keys: Errands yet.')).toBeVisible();
+  await page.keyboard.press('Enter');
   await page.keyboard.press('Home');
   await expect(tab(page, 'All tasks')).toBeFocused();
+  await page.keyboard.press('Space');
+  await expect(viewTitle(page)).toHaveText('All tasks');
   expect(listParam(page)).toBe('all');
-  await page.keyboard.press('ArrowRight');
-  await expect(tab(page, 'Inbox')).toHaveAttribute('aria-selected', 'true');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
   expect(listParam(page)).toBe('inbox');
-  await page.keyboard.press('End');
-  await expect(tab(page, 'Keys: Home')).toBeFocused();
-  expect(listParam(page)).toBe(homeId);
-  // Past the end: back to the first tab.
-  await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('ArrowUp');
+  // Past the start: the last item, then back to the first.
+  await page.keyboard.press('Home');
+  await page.keyboard.press('ArrowUp');
+  await expect(menuItem(page, 'Manage lists')).toBeFocused();
+  await page.keyboard.press('ArrowDown');
   await expect(tab(page, 'All tasks')).toBeFocused();
-  // Only the selected tab is in the Tab order.
-  await expect(tablist(page).locator('[role="tab"][tabindex="0"]')).toHaveCount(1);
+  // Escape closes the menu without choosing.
+  await page.keyboard.press('Escape');
+  await expect(viewMenu(page)).toBeHidden();
+  await expect(viewTitle(page)).toBeFocused();
+  expect(listParam(page)).toBe('inbox');
   await screenshot(page, testInfo, 'lists-keyboard');
 });
 
@@ -150,11 +206,11 @@ test('adds tasks in a named list and in All tasks; views and the URL survive a r
   await signIn(page, 'Household One');
   await createList(page, 'Views: Errands');
   const errandsId = listParam(page);
-  await expect(page.getByLabel('New task')).toHaveAttribute('placeholder', 'Add to Views: Errands');
+  expect(await addDestination(page)).toBe('List: Views: Errands');
   await addTask(page, 'Views: buy stamps');
 
-  await tab(page, 'All tasks').click();
-  await expect(page.getByLabel('New task')).toHaveAttribute('placeholder', 'Add to Inbox');
+  await pick(page, 'All tasks');
+  expect(await addDestination(page)).toBe('List: Inbox');
   await addTask(page, 'Views: call the plumber');
   const titles = ['Views: buy stamps', 'Views: call the plumber'];
   await expect.poll(() => shownTitles(page, titles)).toEqual(['Views: call the plumber', 'Views: buy stamps']);
@@ -163,22 +219,22 @@ test('adds tasks in a named list and in All tasks; views and the URL survive a r
   await expect(rowOf(page, 'Views: call the plumber').locator('[data-list-label]')).toHaveCount(0);
   await screenshot(page, testInfo, 'lists-all-tasks-labels');
 
-  await tab(page, 'Views: Errands').click();
+  await pick(page, 'Views: Errands');
   expect(listParam(page)).toBe(errandsId);
   await page.reload();
-  await expect(tab(page, 'Views: Errands')).toHaveAttribute('aria-selected', 'true');
+  await expect(tab(page, 'Views: Errands')).toHaveAttribute('aria-checked', 'true');
   await expect.poll(() => shownTitles(page, titles)).toEqual(['Views: buy stamps']);
   await expect(rowOf(page, 'Views: buy stamps').locator('[data-list-label]')).toHaveCount(0);
 
-  await tab(page, 'Inbox').click();
+  await pick(page, 'Inbox');
   await page.reload();
-  await expect(tab(page, 'Inbox')).toHaveAttribute('aria-selected', 'true');
+  await expect(tab(page, 'Inbox')).toHaveAttribute('aria-checked', 'true');
   expect(listParam(page)).toBe('inbox');
   await expect.poll(() => shownTitles(page, titles)).toEqual(['Views: call the plumber']);
 
   // An unknown list in the URL shows All tasks.
   await page.goto('/?list=2147483000');
-  await expect(tab(page, 'All tasks')).toHaveAttribute('aria-selected', 'true');
+  await expect(tab(page, 'All tasks')).toHaveAttribute('aria-checked', 'true');
   await expect.poll(() => shownTitles(page, titles)).toEqual(['Views: call the plumber', 'Views: buy stamps']);
 });
 
@@ -186,7 +242,7 @@ test('moves a task between lists from the edit row (AC-13, AC-15)', async ({ pag
   await signIn(page, 'Household One');
   await createList(page, 'Move: Groceries');
   await createList(page, 'Move: Hardware');
-  await tab(page, 'Inbox').click();
+  await pick(page, 'Inbox');
   await addTask(page, 'Move: oat milk');
   await addTask(page, 'Move: light bulbs');
 
@@ -204,7 +260,7 @@ test('moves a task between lists from the edit row (AC-13, AC-15)', async ({ pag
     .poll(() => page.evaluate(() => document.activeElement?.getAttribute('data-action')))
     .toBe('toggle');
 
-  await tab(page, 'Move: Groceries').click();
+  await pick(page, 'Move: Groceries');
   await expect(checkbox(page, 'Move: oat milk')).toBeVisible();
   // From one named list to another.
   await button(page, 'Edit "Move: oat milk"').click();
@@ -215,9 +271,9 @@ test('moves a task between lists from the edit row (AC-13, AC-15)', async ({ pag
   await expect(page.getByText('No tasks in Move: Groceries yet.')).toBeVisible();
 
   await page.reload();
-  await tab(page, 'Move: Hardware').click();
+  await pick(page, 'Move: Hardware');
   await expect(checkbox(page, 'Move: oat milk')).toBeVisible();
-  await tab(page, 'All tasks').click();
+  await pick(page, 'All tasks');
   await expect(rowOf(page, 'Move: oat milk').locator('[data-list-label]')).toHaveText('List: Move: Hardware');
 });
 
@@ -235,12 +291,12 @@ test('renames a list and deletes a list with tasks, which move to Inbox (AC-12, 
   await expect(field).toBeFocused();
   await field.fill('Manage: Housework');
   await field.press('Enter');
-  await expect(tab(page, 'Manage: Housework')).toHaveAttribute('aria-selected', 'true');
+  await expect(tab(page, 'Manage: Housework')).toHaveAttribute('aria-checked', 'true');
   await expect(tab(page, 'Manage: Chores')).toHaveCount(0);
   await expect(button(page, 'Rename "Manage: Housework"')).toBeFocused();
-  await tab(page, 'All tasks').click();
+  await pick(page, 'All tasks');
   await expect(rowOf(page, 'Manage: hoover').locator('[data-list-label]')).toHaveText('List: Manage: Housework');
-  await tab(page, 'Manage: Housework').click();
+  await pick(page, 'Manage: Housework');
 
   await button(page, 'Delete list "Manage: Housework"').click();
   const question = page.getByRole('group', { name: 'Delete list "Manage: Housework"?' });
@@ -248,7 +304,7 @@ test('renames a list and deletes a list with tasks, which move to Inbox (AC-12, 
   await screenshot(page, testInfo, 'lists-delete-confirmation');
   await question.getByRole('button', { name: 'Confirm deleting list "Manage: Housework"' }).click();
   await expect(tab(page, 'Manage: Housework')).toHaveCount(0);
-  await expect(tab(page, 'Inbox')).toHaveAttribute('aria-selected', 'true');
+  await expect(tab(page, 'Inbox')).toHaveAttribute('aria-checked', 'true');
   expect(listParam(page)).toBe('inbox');
   await expect(checkbox(page, 'Manage: hoover')).toBeVisible();
   await completedToggle(page).click();
@@ -256,7 +312,7 @@ test('renames a list and deletes a list with tasks, which move to Inbox (AC-12, 
   await screenshot(page, testInfo, 'lists-after-delete-inbox');
 
   await page.reload();
-  await expect(tab(page, 'Inbox')).toHaveAttribute('aria-selected', 'true');
+  await expect(tab(page, 'Inbox')).toHaveAttribute('aria-checked', 'true');
   await expect(checkbox(page, 'Manage: hoover')).toBeVisible();
 });
 
@@ -268,20 +324,20 @@ test('a second user sees none of the first user\'s lists (AC-4, AC-15)', async (
   const otherContext = await browser.newContext();
   const other = await otherContext.newPage();
   await signIn(other, 'Household Two', `/?list=${id}`);
-  await expect(tab(other, 'All tasks')).toHaveAttribute('aria-selected', 'true');
-  await expect(tablist(other).getByRole('tab')).toHaveText(['All tasks', 'Inbox', 'Assigned to me']);
+  await expect(tab(other, 'All tasks')).toHaveAttribute('aria-checked', 'true');
+  await expect(viewItems(other)).toHaveText(['All tasks', 'Inbox', 'Assigned to me']);
   await expect(other.getByText('Private: one only')).toHaveCount(0);
-  await expect(button(other, 'Manage lists')).toHaveCount(0);
+  await expect(menuItem(other, 'Manage lists')).toHaveCount(0);
 
   // Two can use the same name; One still sees only its own list.
   await createList(other, 'Private: one only');
   await page.reload();
-  await expect(tablist(page).getByRole('tab', { name: 'Private: one only', exact: true })).toHaveCount(1);
+  await expect(tab(page, 'Private: one only')).toHaveCount(1);
   // Leave Household Two as it was.
   await openManage(other);
   await button(other, 'Delete list "Private: one only"').click();
   await button(other, 'Confirm deleting list "Private: one only"').click();
-  await expect(tablist(other).getByRole('tab')).toHaveText(['All tasks', 'Inbox', 'Assigned to me']);
+  await expect(viewItems(other)).toHaveText(['All tasks', 'Inbox', 'Assigned to me']);
   await otherContext.close();
 });
 
@@ -296,10 +352,15 @@ test.describe('lists and repeating tasks', () => {
     await signIn(page, 'Household One');
     await createList(page, 'Repeat: Garden');
     const title = 'Repeat: water the roses';
-    await page.getByLabel('New task').fill(title);
-    await page.getByLabel('Due date', { exact: true }).fill('2026-11-20');
+    await addButton(page).click();
+    await newTaskField(page).fill(title);
+    await chip(page, 'Due date').click();
+    await addSheet(page).getByLabel('Due date', { exact: true }).fill('2026-11-20');
+    await chip(page, 'Repeat').click();
     await page.getByRole('combobox', { name: 'Repeats', exact: true }).selectOption({ label: 'Weekly' });
-    await page.getByRole('button', { name: 'Add task' }).click();
+    // The List chip says where it goes: the list shown.
+    await expect(chip(page, 'List')).toHaveAccessibleName('List: Repeat: Garden');
+    await addSheet(page).getByRole('button', { name: 'Add task' }).click();
     await expect(checkbox(page, title)).toHaveCount(1);
 
     await checkbox(page, title).click();
@@ -311,9 +372,9 @@ test.describe('lists and repeating tasks', () => {
     await screenshot(page, testInfo, 'lists-repeat-next-occurrence');
 
     await page.reload();
-    await expect(tab(page, 'Repeat: Garden')).toHaveAttribute('aria-selected', 'true');
+    await expect(tab(page, 'Repeat: Garden')).toHaveAttribute('aria-checked', 'true');
     await expect(page.getByRole('list', { name: 'Upcoming' }).getByRole('checkbox', { name: title })).toBeVisible();
-    await tab(page, 'Inbox').click();
+    await pick(page, 'Inbox');
     await expect(checkbox(page, title)).toHaveCount(0);
   });
 });
@@ -321,40 +382,36 @@ test.describe('lists and repeating tasks', () => {
 test.describe('lists on a phone', () => {
   test.use({ viewport: { width: 390, height: 844 } });
 
-  test('the tab row scrolls sideways inside itself without a page scroll (AC-8, AC-15)', async ({ page }, testInfo) => {
+  test('the view picker with long list names fits a phone without a page scroll (AC-8, AC-15; calm-layout AC-1, AC-2)', async ({ page }, testInfo) => {
     await signIn(page, 'Household One');
     for (const name of ['Phone: Groceries for the week', 'Phone: Birthday party plans', 'Phone: Garden and garage']) {
       await createList(page, name);
     }
     const sizes = () =>
       page.evaluate(() => {
-        const row = document.querySelector('[role="tablist"]')!;
+        const menu = document.getElementById('view-menu')!.getBoundingClientRect();
         return {
           page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
-          rowOverflow: row.scrollWidth - row.clientWidth,
-          rowScroll: row.scrollLeft,
-          rowRight: row.getBoundingClientRect().right,
+          menuLeft: menu.left,
+          menuRight: menu.right,
           viewport: document.documentElement.clientWidth,
         };
       });
-    // The newest tab is selected and scrolled into view inside the row.
-    let measured = await sizes();
-    expect(measured.page).toBe(0);
-    expect(measured.rowOverflow).toBeGreaterThan(0);
-    expect(measured.rowRight).toBeLessThanOrEqual(measured.viewport);
+    await viewTitle(page).click();
+    await expect(tab(page, 'Phone: Garden and garage')).toBeFocused();
     await expect(tab(page, 'Phone: Garden and garage')).toBeInViewport();
-    await screenshot(page, testInfo, 'lists-phone-scrolled-end');
+    const measured = await sizes();
+    expect(measured.page).toBe(0);
+    expect(measured.menuLeft).toBeGreaterThanOrEqual(0);
+    expect(measured.menuRight).toBeLessThanOrEqual(measured.viewport);
+    await screenshot(page, testInfo, 'lists-phone-picker');
 
-    // Home scrolls the row back to the start; the page itself never scrolls sideways.
-    await tab(page, 'Phone: Garden and garage').focus();
+    // Home reaches the first item; the page itself never scrolls sideways.
     await page.keyboard.press('Home');
     await expect(tab(page, 'All tasks')).toBeFocused();
     await expect(tab(page, 'All tasks')).toBeInViewport();
-    measured = await sizes();
-    expect(measured.rowScroll).toBe(0);
-    expect(measured.page).toBe(0);
-    await page.mouse.wheel(0, 0);
-    await screenshot(page, testInfo, 'lists-phone-start');
+    expect((await sizes()).page).toBe(0);
+    await page.keyboard.press('Escape');
     expect(await page.evaluate(() => window.scrollX)).toBe(0);
   });
 
